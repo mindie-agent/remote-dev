@@ -8,9 +8,11 @@ that local group: remote quiet still requires a remote supervisor receipt.
 """
 from __future__ import annotations
 
+import errno
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -66,6 +68,41 @@ class OwnedProcess:
             os.killpg(self.process.pid, sig)
         except ProcessLookupError:
             pass
+        except PermissionError as exc:
+            # Darwin filters zombies from killpg and may return EPERM when no
+            # live member remains after TERM. A real permission failure still
+            # matters: accept only an independently observed exited group.
+            if (sys.platform != "darwin" or exc.errno != errno.EPERM
+                    or not self._darwin_group_exited()):
+                raise
+
+    def _darwin_group_exited(self) -> bool:
+        try:
+            result = subprocess.run(
+                ["/bin/ps", "-x", "-g", str(self.process.pid), "-o", "pgid=,stat="],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={**os.environ, "COMMAND_MODE": "unix2003"},
+                text=True, encoding="utf-8", check=False, timeout=1.0,
+            )
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            return False
+        # Apple ps exits 1 for an empty selection, but some sysctl failures
+        # exit 0 with stderr. Neither an error nor a partial listing proves exit.
+        if result.stderr or len(result.stdout) > 65536 or result.returncode not in (0, 1):
+            return False
+        if result.returncode == 1:
+            return not result.stdout.strip()
+        if not result.stdout.strip():
+            return False
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split()
+            if len(fields) != 2 or not fields[0].isdecimal():
+                return False
+            if int(fields[0]) != self.process.pid or not fields[1].startswith("Z"):
+                return False
+        return True
 
     def stop(self, *, force: bool = True, timeout: float = 5.0) -> int | None:
         if self._closed:

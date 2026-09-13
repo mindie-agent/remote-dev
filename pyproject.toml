@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vaws-remote-dev"
-version = "0.9.2"
+version = "0.9.3"
 description = "Remote development substrate: SSH-backed twins of local agent tools"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "Qi Mao" }]
 dependencies = [
-  "vaws-diagnostics @ git+https://github.com/vllm-ascend-workspace/vaws-diagnostics@ef8477a6c6d78a4a525ce257730759706d30c1f4",
+  "vaws-diagnostics @ git+https://github.com/vllm-ascend-workspace/vaws-diagnostics@96fcdfaa0f25fa59f12e948eb4e17ead775f3287",
 ]
 classifiers = [
   "Programming Language :: Python :: 3",

@@ -1,19 +1,21 @@
 """Native OS process boundaries; the same tests execute on Windows/macOS/Linux."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core.local_process import OwnedProcess
-from remote_dev.core import ssh_transport
+from remote_dev.core import local_process, ssh_transport
 from test_ssh_transport import _windows_pid_alive
 
 
@@ -33,8 +35,8 @@ elif role == 'branch':
 else:
     subprocess.Popen([sys.executable, __file__, str(root), 'branch', parent_exit])
     while not (root / 'branch.pid').exists(): time.sleep(.01)
-    (root / 'ready').write_text('ready')
     sys.stdout.buffer.write(b'parent ready\\n'); sys.stdout.flush()
+    (root / 'ready').write_text('ready')
     if parent_exit == 'yes': sys.exit(0)
 time.sleep(12)
 '''
@@ -196,3 +198,86 @@ def test_windows_job_handle_closes_when_stop_or_wait_fails(failure):
     # Finally/context cleanup cannot retry a closed handle and mask the error.
     owner.stop()
     owner._job.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize('listing,returncode', [('42 Z\n42 Z+\n', 0), ('', 1)])
+def test_darwin_group_permission_error_accepts_only_observed_exited_group(listing, returncode):
+    owner = OwnedProcess.__new__(OwnedProcess)
+    owner.process = SimpleNamespace(pid=42, returncode=None)
+    original = PermissionError(errno.EPERM, 'fixture group error')
+    with mock.patch.object(local_process.sys, 'platform', 'darwin'), \
+            mock.patch.object(local_process.os, 'killpg', side_effect=original, create=True), \
+            mock.patch.object(local_process.subprocess, 'run', return_value=SimpleNamespace(returncode=returncode, stdout=listing, stderr='')) as observe:
+        owner._signal_group(9)
+    assert observe.call_args.args[0] == ['/bin/ps', '-x', '-g', '42', '-o', 'pgid=,stat=']
+    assert observe.call_args.kwargs['timeout'] == 1.0
+    assert observe.call_args.kwargs['env']['COMMAND_MODE'] == 'unix2003'
+
+
+@pytest.mark.parametrize('listing,returncode,stderr', [
+    ('42 Z\n42 S\n', 0, ''), ('42 T\n', 0, ''), ('42 ?\n', 0, ''),
+    ('unreadable\n', 0, ''), ('42\n', 0, ''), ('42 Z\n', 1, ''),
+    ('99 S\n', 0, ''), ('', 0, ''), ('', 0, 'sysctl failed'), ('', 1, 'error'),
+    ('', 2, ''), pytest.param('42 Z\n' * 15000, 0, '', id='oversized-listing'),
+])
+def test_darwin_live_or_unknown_group_preserves_original_permission_error(listing, returncode, stderr):
+    owner = OwnedProcess.__new__(OwnedProcess)
+    owner.process = SimpleNamespace(pid=42, returncode=None)
+    original = PermissionError(errno.EPERM, 'fixture group error')
+    with mock.patch.object(local_process.sys, 'platform', 'darwin'), \
+            mock.patch.object(local_process.os, 'killpg', side_effect=original, create=True), \
+            mock.patch.object(local_process.subprocess, 'run', return_value=SimpleNamespace(returncode=returncode, stdout=listing, stderr=stderr)):
+        with pytest.raises(PermissionError) as caught:
+            owner._signal_group(9)
+    assert caught.value is original
+
+
+@pytest.mark.parametrize('observation_error', [OSError('ps unavailable'), subprocess.TimeoutExpired('ps', 1)])
+def test_darwin_group_observation_failure_cannot_hide_permission_error(observation_error):
+    owner = OwnedProcess.__new__(OwnedProcess)
+    owner.process = SimpleNamespace(pid=42, returncode=None)
+    original = PermissionError(errno.EPERM, 'fixture group error')
+    with mock.patch.object(local_process.sys, 'platform', 'darwin'), \
+            mock.patch.object(local_process.os, 'killpg', side_effect=original, create=True), \
+            mock.patch.object(local_process.subprocess, 'run', side_effect=observation_error):
+        with pytest.raises(PermissionError) as caught:
+            owner._signal_group(9)
+    assert caught.value is original
+
+
+@pytest.mark.parametrize('platform,error_number', [('linux', errno.EPERM), ('darwin', errno.EACCES)])
+def test_other_permission_errors_do_not_use_darwin_zombie_exception(platform, error_number):
+    owner = OwnedProcess.__new__(OwnedProcess)
+    owner.process = SimpleNamespace(pid=42, returncode=None)
+    original = PermissionError(error_number, 'fixture group error')
+    with mock.patch.object(local_process.sys, 'platform', platform), \
+            mock.patch.object(local_process.os, 'killpg', side_effect=original, create=True), \
+            mock.patch.object(local_process.subprocess, 'run') as observe:
+        with pytest.raises(PermissionError) as caught:
+            owner._signal_group(9)
+    assert caught.value is original
+    observe.assert_not_called()
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='Darwin killpg zombie-group behavior')
+def test_darwin_stop_reaps_a_group_leader_that_is_already_a_zombie():
+    owner = OwnedProcess([sys.executable, '-c', 'pass'], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            # Do not poll/wait Popen here: keeping our exited child unreaped
+            # makes the zombie-only group deterministic instead of a timing race.
+            status = subprocess.run(['/bin/ps', '-o', 'stat=', '-p', str(owner.process.pid)],
+                                    capture_output=True, text=True, check=True, timeout=1).stdout.strip()
+            if status.startswith('Z'):
+                break
+            time.sleep(.01)
+        else:
+            pytest.fail('owned child did not become an unreaped zombie')
+        assert owner.process.returncode is None
+        assert owner.stop(force=False, timeout=.3) == 0
+        assert owner.process.returncode == 0
+    finally:
+        owner.process.kill()
+        owner.process.wait(timeout=3)
