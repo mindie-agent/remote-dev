@@ -19,7 +19,7 @@ class ProcessControlClientTests(unittest.TestCase):
         self.assertIn("PR_SET_CHILD_SUBREAPER", source)
         self.assertIn("REMOTE_DEV_JOB_TOKEN", source)
         self.assertIn("control_job", source)
-        self.assertNotIn("VAWS_REMOTE_JOB", source)
+        self.assertNotIn("MINDIE_REMOTE_JOB", source)
         self.assertNotIn(".vaws-runtime", source)
         self.assertNotIn("lease/fence", source)
         self.assertNotIn("NPU", source)

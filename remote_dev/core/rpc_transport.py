@@ -21,7 +21,7 @@ from pathlib import Path
 
 from .cancellation import current_event
 from .errors import RemoteExecutionError
-from vaws_diagnostics import get_recorder, current_context
+from mindie_diagnostics import get_recorder, current_context
 from remote_dev.observability import observed_operation
 from .container_endpoint import pin_container_endpoint
 

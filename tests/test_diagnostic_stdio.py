@@ -18,7 +18,7 @@ def fake(name, arguments, **kwargs):
     assert subprocess.run(echo, capture_output=True, timeout=3).stdout.strip() == b'0'
     return {'text': 'ok', 'result': make_result(tool=name, target={}, outcome='success', status='ok', summary='ok')}
 if OWNER == 'coordinator':
-    import vaws_coordinator.task_server as server
+    import mindie_coordinator.task_server as server
     server.vaws_call = fake
 else:
     import remote_dev.mcp.server as server
@@ -31,8 +31,8 @@ raise SystemExit(server.main())
 def test_official_sdk_stdio_and_trace_isolation(tmp_path, owner):
     pytest.importorskip("mcp")
     if owner == "coordinator":
-        pytest.importorskip("vaws_coordinator")
-    environment = dict(os.environ, VAWS_DIAGNOSTICS_ROOT=str(tmp_path / "logs"), VAWS_LOG_LEVEL="DEBUG")
+        pytest.importorskip("mindie_coordinator")
+    environment = dict(os.environ, MINDIE_DIAGNOSTICS_ROOT=str(tmp_path / "logs"), MINDIE_LOG_LEVEL="DEBUG")
     # Run the SDK acceptance in its own process so even teardown bugs have a
     # hard deadline. No SSH, daemon, identity discovery or device execution.
     script = textwrap.dedent('''
@@ -52,7 +52,7 @@ def test_official_sdk_stdio_and_trace_isolation(tmp_path, owner):
                         summaries = []
                         for identity in ['a', 'b']:
                             context = {'trace_id': identity * 32, 'operation_id': identity * 32}
-                            params = CallToolRequestParams(name=name, arguments={}, _meta={'vaws_diagnostics': context})
+                            params = CallToolRequestParams(name=name, arguments={}, _meta={'mindie_diagnostics': context})
                             result = await session.send_request(CallToolRequest(method='tools/call', params=params), CallToolResult)
                             summary = result.model_dump(by_alias=True)['structuredContent']['diagnostics']
                             assert summary['trace_id'] == context['trace_id'], summary

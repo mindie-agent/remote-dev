@@ -38,7 +38,7 @@ Kimi Code reads project MCP servers from `.kimi-code/mcp.json` (user level:
 enables the project-level servers; servers added mid-session only join new
 sessions.
 
-All entries launch `remote-dev server` from the installed `vaws-remote-dev`
+All entries launch `remote-dev server` from the installed `remote-dev`
 package (or `uvx --from git+https://github.com/mindie-agent/remote-dev@<ref>
 remote-dev server`). Add `REMOTE_DEV_RESOLVERS`, `REMOTE_DEV_STATE_DIR`,
 `REMOTE_DEV_ENDPOINTS_FILE` and `REMOTE_DEV_RUNTIME_ENV_FILE` to the server
@@ -155,11 +155,11 @@ lifecycle pass.
 
 | Client / model | Version | Four-call result |
 | --- | --- | --- |
-| Kimi Code / `kimi-for-coding` | 0.38.0 | Passed, `VAWS_PR64_kimi_clean_OK` |
-| Claude Code / `deepseek-v4-flash` | 2.1.143 | Passed, `VAWS_PR64_claude_OK` |
-| Codex / `gpt-5.6-sol` | 0.147.0 | Passed, `VAWS_PR64_codex_OK` |
-| Grok Build / `grok-4.6` (`grok-4.6-build` usage ID) | 1.0.5 | Discovery and calls passed, `VAWS_PR64_grok_OK` |
-| Cursor IDE / Cursor Grok 4.6 | 3.17.19 | Discovery and calls passed, `VAWS_PR64_cursor_OK` |
+| Kimi Code / `kimi-for-coding` | 0.38.0 | Passed, `MINDIE_PR64_kimi_clean_OK` |
+| Claude Code / `deepseek-v4-flash` | 2.1.143 | Passed, `MINDIE_PR64_claude_OK` |
+| Codex / `gpt-5.6-sol` | 0.147.0 | Passed, `MINDIE_PR64_codex_OK` |
+| Grok Build / `grok-4.6` (`grok-4.6-build` usage ID) | 1.0.5 | Discovery and calls passed, `MINDIE_PR64_grok_OK` |
+| Cursor IDE / Cursor Grok 4.6 | 3.17.19 | Discovery and calls passed, `MINDIE_PR64_cursor_OK` |
 
 The initial Kimi attempt incorrectly escaped patch newlines; the server rejected
 that payload without writing, and the model corrected it. A fresh-file rerun

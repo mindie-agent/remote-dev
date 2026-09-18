@@ -76,7 +76,7 @@ def write_context_snapshot(endpoint: Endpoint, summary: dict[str, Any], full_pro
         "refs": {},
         "created_at": utc_now_iso(),
         "ttl_seconds": 300,
-        "package_version": package_version("vaws-remote-dev"),
+        "package_version": package_version("remote-dev"),
     }
     stamp = payload["created_at"].replace(":", "").replace("-", "")
     full_path = base / f"context-{stamp}.json"

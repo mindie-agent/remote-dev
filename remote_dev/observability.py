@@ -14,7 +14,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from vaws_diagnostics import get_recorder, current_context, bind_context, wrap_context
+from mindie_diagnostics import get_recorder, current_context, bind_context, wrap_context
 from remote_dev.core.errors import error_details
 
 _tool = contextvars.ContextVar("remote_dev_tool_operation", default=None)

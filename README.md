@@ -4,7 +4,7 @@ A remote development substrate for coding agents. It makes a remote Linux
 host reachable over SSH feel like the local working tree: every native editor
 tool has a remote twin with the same semantics plus endpoint fields.
 
-Install the `vaws-remote-dev` package. The import package is `remote_dev`;
+Install the `remote-dev` package. The import package is `remote_dev`;
 the console entry is `remote-dev`.
 
 | Local tool  | Remote tool          | CLI                                      |
@@ -43,7 +43,7 @@ connection. It never retries an arbitrary business command. Ordinary bash
 results also include transport timings without enabling verbose SSH tracing.
 
 Local runtime requirements: Python 3.11+, an `ssh` client, and the pinned
-`vaws-diagnostics` package installed with the client. Nothing here needs GPU/NPU hardware; the remote host only needs
+`mindie-diagnostics` package installed with the client. Nothing here needs GPU/NPU hardware; the remote host only needs
 `bash`, `python3`, and (for `remote.apply_patch` unified diffs) `git`.
 
 ## Work inside an existing container
@@ -583,8 +583,8 @@ that call; its asynchronous execution and later wait have separate lifetimes.
 Native MCP metadata propagates correlation automatically. Diagnostic IDs never
 grant task or endpoint authority and are excluded from launch-content identity.
 
-`VAWS_LOG_LEVEL=INFO` is the default. `DEBUG` adds RPC, lock and transport phase
-detail; `WARN`/`WARNING` retains warnings and errors. `VAWS_DIAGNOSTICS_ROOT`
+`MINDIE_LOG_LEVEL=INFO` is the default. `DEBUG` adds RPC, lock and transport phase
+detail; `WARN`/`WARNING` retains warnings and errors. `MINDIE_DIAGNOSTICS_ROOT`
 selects a private local log root. The shared diagnostics package rotates bounded
 per-process JSONL files and records package versions. Commands, file contents,
 environment values and credentials are not logging arguments. Business output
@@ -602,7 +602,7 @@ Cancellation/observation timeout does not fabricate quiet or resource release.
 Logging/export disk errors do not change business results or ownership; failures
 to persist authoritative execution state still fail.
 
-For a local issue attachment, the shared `vaws-diagnostics bundle` command makes
+For a local issue attachment, the shared `mindie-diagnostics bundle` command makes
 an offline, bounded public projection from diagnostic events. Use the returned
 operation ID. It excludes raw commands, paths, endpoints and business logs, and
 reports missing or truncated evidence. It never replays work or uploads an issue

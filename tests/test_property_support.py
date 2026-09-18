@@ -7,7 +7,7 @@ reproducible:
 * Every case derives its own ``random.Random`` seed from the suite seed and
   the case index, so a failing case can be re-run in isolation.
 * The suite seed and the case-count scale are read from the environment
-  (``VAWS_PROPTEST_SEED``, ``VAWS_PROPTEST_SCALE``) and printed in every
+  (``MINDIE_PROPTEST_SEED``, ``MINDIE_PROPTEST_SCALE``) and printed in every
   failure message.
 
 The module also carries a self-test so that a regression in the generator
@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_SEED = 20260907
-SEED = int(os.environ.get("VAWS_PROPTEST_SEED", str(DEFAULT_SEED)))
-SCALE = float(os.environ.get("VAWS_PROPTEST_SCALE", "1"))
+SEED = int(os.environ.get("MINDIE_PROPTEST_SEED", str(DEFAULT_SEED)))
+SCALE = float(os.environ.get("MINDIE_PROPTEST_SCALE", "1"))
 
 # Reserved documentation values only (RFC 5737 / RFC 2606); never real hosts.
 DOC_HOSTS = ("192.0.2.10", "198.51.100.7", "203.0.113.5", "npu-a.example.invalid")
@@ -125,7 +125,7 @@ def run_cases(
     """Run ``body(gen, index)`` for ``case_count(count)`` seeded cases.
 
     Failures are re-raised with the suite seed and the per-case seed so the
-    exact case can be reproduced with ``VAWS_PROPTEST_SEED``.
+    exact case can be reproduced with ``MINDIE_PROPTEST_SEED``.
     """
     total = case_count(count)
     for index in range(total):
@@ -135,7 +135,7 @@ def run_cases(
         except Exception as exc:  # noqa: BLE001 - re-raise with reproduction info
             raise AssertionError(
                 f"{label}: case #{index}/{total} failed "
-                f"(VAWS_PROPTEST_SEED={seed}, case_seed={current}): "
+                f"(MINDIE_PROPTEST_SEED={seed}, case_seed={current}): "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
     return total
@@ -212,7 +212,7 @@ class GeneratorSelfTests(unittest.TestCase):
             if index == 3:
                 raise AssertionError("boom")
 
-        with self.assertRaisesRegex(AssertionError, r"case #3/.*VAWS_PROPTEST_SEED=99.*case_seed=\d+.*boom"):
+        with self.assertRaisesRegex(AssertionError, r"case #3/.*MINDIE_PROPTEST_SEED=99.*case_seed=\d+.*boom"):
             run_cases(10, body, seed=99, label="self-test")
 
     def test_run_remote_script_round_trips_json(self) -> None:

@@ -103,5 +103,5 @@ jobs:
           python -m venv "$clean/venv"
           "$clean/venv/bin/python" -m pip install "$wheel"
           "$clean/venv/bin/python" -c "import remote_dev; print(remote_dev.__version__)"
-          "$clean/venv/bin/python" -c "from remote_dev.processes import control, worker_source; src=worker_source(); assert callable(control); assert 'PR_SET_CHILD_SUBREAPER' in src; assert 'REMOTE_DEV_JOB_TOKEN' in src; assert 'VAWS_REMOTE_JOB' not in src"
+          "$clean/venv/bin/python" -c "from remote_dev.processes import control, worker_source; src=worker_source(); assert callable(control); assert 'PR_SET_CHILD_SUBREAPER' in src; assert 'REMOTE_DEV_JOB_TOKEN' in src; assert 'MINDIE_REMOTE_JOB' not in src"
           "$clean/venv/bin/remote-dev" --help

@@ -42,7 +42,7 @@ sys.addaudithook(audit)
             diagnostics = root / "diagnostics"
             env.update(PYTHONPATH=os.pathsep.join((str(root), source)), HOME=str(home), USERPROFILE=str(home),
                        LOCALAPPDATA=str(home / "AppData" / "Local"), XDG_STATE_HOME=str(home / ".local" / "state"),
-                       VAWS_DIAGNOSTICS_ROOT=str(diagnostics))
+                       MINDIE_DIAGNOSTICS_ROOT=str(diagnostics))
             for key in list(env):
                 if key.startswith("REMOTE_DEV_"):
                     env.pop(key)

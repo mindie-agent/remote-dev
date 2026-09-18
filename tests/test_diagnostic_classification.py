@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from vaws_diagnostics import configure
+from mindie_diagnostics import configure
 from remote_dev.observability import observed_tool
 from remote_dev.core.errors import error_details
 

@@ -7,7 +7,7 @@ import sys
 import uuid
 import threading
 import io
-from vaws_diagnostics import wrap_context, bind_context
+from mindie_diagnostics import wrap_context, bind_context
 from remote_dev.observability import protocol_streams
 from concurrent.futures import ThreadPoolExecutor
 from remote_dev.core.cancellation import request_context
@@ -19,7 +19,7 @@ from remote_dev import package_version
 from remote_dev.mcp.tools import call_tool, canonical_name, list_resources, list_tools, read_resource
 from remote_dev.runtime import process_identity, runtime_status
 
-LOADED_RUNTIME = process_identity("vaws-remote-dev")
+LOADED_RUNTIME = process_identity("remote-dev")
 LOADED_VERSION = package_version()
 _OUTPUT_LOCK = threading.Lock()
 _DISPATCHER = None
@@ -102,7 +102,7 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
                 raise ValueError("tools/call requires string name")
             if not isinstance(arguments, dict):
                 raise ValueError("tools/call arguments must be an object")
-            with bind_context((params.get("_meta") or {}).get("vaws_diagnostics") or {}):
+            with bind_context((params.get("_meta") or {}).get("mindie_diagnostics") or {}):
                 payload = call_tool(name, arguments)
             payload["result"]["runtime"] = runtime_status(LOADED_RUNTIME)
             result(

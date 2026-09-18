@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from vaws_diagnostics import configure, get_recorder
+from mindie_diagnostics import configure, get_recorder
 from remote_dev.observability import observed_tool
 from remote_dev.result import make_result
 from remote_dev.mcp.tools import call_tool

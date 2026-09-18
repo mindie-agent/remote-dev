@@ -6,7 +6,7 @@ from importlib.metadata import version
 
 
 def package_version() -> str:
-    return version("vaws-remote-dev")
+    return version("remote-dev")
 
 
 __version__ = package_version()

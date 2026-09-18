@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from functools import lru_cache
 from typing import Any
-from vaws_diagnostics import current_context
+from mindie_diagnostics import current_context
 
 from remote_dev.core.endpoint import Endpoint, resolve_endpoint
 from remote_dev.core.errors import RemoteExecutionError

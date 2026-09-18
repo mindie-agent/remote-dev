@@ -7,7 +7,7 @@ import functools
 import os
 import threading
 import time
-from vaws_diagnostics import get_recorder
+from mindie_diagnostics import get_recorder
 import weakref
 from .cancellation import current_event
 from .errors import RemoteExecutionError

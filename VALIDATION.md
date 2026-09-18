@@ -203,7 +203,7 @@ Local gates on macOS (Apple Silicon), Python 3.11.13:
   `written_chars` accounting, split-UTF-8 paged reads, invalid-byte flush,
   terminal tail flush, tiny-budget progress, initial-yield→poll
   continuation).
-- `python3 .vaws-local/kimi-handoff/review-repro.py kimi1` (reviewer's repro
+- `python3 .mindie-local/kimi-handoff/review-repro.py kimi1` (reviewer's repro
   against this checkout) — UTF-8 pagination now reassembles exactly
   (`combined_matches_original: true`, 0 replacement characters), and the 1
   MiB + `eof=true` write reports `eof: false` (deferred) with the remainder
@@ -323,7 +323,7 @@ portable schemas documented above; endpoint validation remains server-enforced.
   - `<validation-session-b>` with isolated worktree, container, and SSH port.
 - Both sessions passed `validate_remote_dev_scaffold.py --session-id ...` with
   2 parallel scratch workers each.
-- Repo-root `.vaws-local/current-session.json` hash stayed unchanged:
+- Repo-root `.mindie-local/current-session.json` hash stayed unchanged:
   `2d6fdc38c2fae31b165177210ccbfb974863777d7b7d6273edbdcb18b9146525`.
 - Both scratch sessions were removed with container, worktree, and lease cleanup;
   validation session records now show `status=removed`, and lease maps are empty.
@@ -354,16 +354,16 @@ portable schemas documented above; endpoint validation remains server-enforced.
     reported `alive=true`, `health=true`, and `models_ok=true`.
 - Parallel benchmark passed in both sessions with a tiny random workload
   (`num_prompts=2`, `max_concurrency=1`, `input_len=8`, `output_len=8`):
-  - A result was written under session-local `.vaws-local/sessions/<session-id>/benchmark/runs/`,
+  - A result was written under session-local `.mindie-local/sessions/<session-id>/benchmark/runs/`,
     status `ok`, output throughput about `2.13`.
-  - B result was written under session-local `.vaws-local/sessions/<session-id>/benchmark/runs/`,
+  - B result was written under session-local `.mindie-local/sessions/<session-id>/benchmark/runs/`,
     status `ok`, output throughput about `2.25`.
   - After benchmark cleanup, both sessions reported `service_alive.ok=false`
     and `live_leases.service_ports=[]`.
 - Parallel profiling collection passed in both sessions with the same tag
   `remote-dev-same-tag`, proving run directories do not collide:
   - A and B manifests were written under distinct
-    `.vaws-local/ascend-profiling-collection/runs/<timestamp>_<tag>_<session>_<pid>_<uuid>/`
+    `.mindie-local/ascend-profiling-collection/runs/<timestamp>_<tag>_<session>_<pid>_<uuid>/`
     directories.
   - Both manifests ended with `status=ok`, `workload_status.status=ok`,
     `rank_count=1`, `analysis_status=ok`, and verified
@@ -413,7 +413,7 @@ portable schemas documented above; endpoint validation remains server-enforced.
   tags, target/session identity, pid, and a uuid suffix instead of only
   second-level timestamp plus tag.
 - Benchmark results are now persisted under session-local
-  `.vaws-local/sessions/<session-id>/benchmark/runs/` paths.
+  `.mindie-local/sessions/<session-id>/benchmark/runs/` paths.
 - `session_status.py` now reports `live_leases` from the central lease map so
   active service ports are visible even though the session creation record is
   static.

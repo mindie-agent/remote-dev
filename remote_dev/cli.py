@@ -262,7 +262,7 @@ def _status_main() -> int:
     from remote_dev.core.state_store import state_root
 
     payload = {
-        "name": "vaws-remote-dev",
+        "name": "remote-dev",
         "version": package_version(),
         "package": "remote_dev",
         "state_dir": str(state_root()),
