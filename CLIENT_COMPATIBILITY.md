@@ -39,7 +39,7 @@ enables the project-level servers; servers added mid-session only join new
 sessions.
 
 All entries launch `remote-dev server` from the installed `vaws-remote-dev`
-package (or `uvx --from git+https://github.com/vllm-ascend-workspace/remote-dev@<ref>
+package (or `uvx --from git+https://github.com/mindie-agent/remote-dev@<ref>
 remote-dev server`). Add `REMOTE_DEV_RESOLVERS`, `REMOTE_DEV_STATE_DIR`,
 `REMOTE_DEV_ENDPOINTS_FILE` and `REMOTE_DEV_RUNTIME_ENV_FILE` to the server
 `env` when the consumer needs them (see README). Do not add model credentials

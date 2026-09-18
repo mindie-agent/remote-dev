@@ -108,7 +108,7 @@ child that deliberately creates a separate session is outside the local group.
 From a git ref (no local checkout required):
 
 ```bash
-uvx --from git+https://github.com/vllm-ascend-workspace/remote-dev@main remote-dev server
+uvx --from git+https://github.com/mindie-agent/remote-dev@main remote-dev server
 ```
 
 From a clone:
@@ -129,7 +129,7 @@ see `examples/kimi-mcp.example.json`):
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/vllm-ascend-workspace/remote-dev@main",
+        "git+https://github.com/mindie-agent/remote-dev@main",
         "remote-dev",
         "server"
       ],

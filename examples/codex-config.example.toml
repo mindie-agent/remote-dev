@@ -6,7 +6,7 @@ approval_policy = "on-request"
 
 [mcp_servers.remote_dev]
 command = "uvx"
-args = ["--from", "git+https://github.com/vllm-ascend-workspace/remote-dev@main", "remote-dev", "server"]
+args = ["--from", "git+https://github.com/mindie-agent/remote-dev@main", "remote-dev", "server"]
 startup_timeout_sec = 20
 tool_timeout_sec = 600
 enabled = true
