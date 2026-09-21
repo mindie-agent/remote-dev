@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest import mock
 import remote_dev.core.job_ops as job_ops
 import remote_dev.core.state_store as state_store
 from remote_dev.core.endpoint import Endpoint
+from remote_dev.core.errors import RemoteExecutionError
 from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS
 
 
@@ -41,8 +43,12 @@ class RemoteJobControlTests(unittest.TestCase):
             "target": self.endpoint.to_result_target(),
             "remote_dir": f"{self.endpoint.root}/.remote-dev/jobs/{self.job_id}",
             "started_at": "2026-09-01T00:00:00Z",
+            "state": "running",
+            "stdin_cursors": {"stdout_offset": 0, "stderr_offset": 0},
+            "authorization": {"token": "secret-start-gate-token", "job_id": self.job_id},
         }
         state_store.atomic_write_json(state_store.job_record_path(self.endpoint, self.job_id), record)
+        self.record_path = state_store.job_record_path(self.endpoint, self.job_id)
 
     def _status(self, supervisor) -> dict:
         with mock.patch.object(job_ops, "control", return_value=supervisor):
@@ -54,6 +60,8 @@ class RemoteJobControlTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "success")
         self.assertFalse(result["job"]["quiet"])
         self.assertEqual(result["job"]["remote_status"]["state"], "running")
+        self.assertNotIn("authorization", result["job"])
+        self.assertEqual(json.loads(self.record_path.read_text(encoding="utf-8"))["authorization"]["token"], "secret-start-gate-token")
 
     def test_succeeded_supervisor_is_reported_as_succeeded(self) -> None:
         result = self._status(_supervisor(state="succeeded", quiet=True, result={"state": "succeeded", "exit_code": 0}))
@@ -92,6 +100,25 @@ class RemoteJobControlTests(unittest.TestCase):
             result = job_ops.remote_job_stop(self.endpoint, job_id=self.job_id)["result"]
         self.assertEqual(result["status"], "cancelled")
         self.assertEqual(result["outcome"], "cancelled")
+
+    def test_status_failure_omits_authorization_and_exposes_actionable_text(self) -> None:
+        error = RemoteExecutionError(
+            "ssh: connect to host 127.0.0.1 port 46000: Connection refused",
+            category="remote_execution",
+            submission_state="not_sent",
+        )
+        with mock.patch.object(job_ops, "control", side_effect=error):
+            payload = job_ops.remote_job_status(self.endpoint, job_id=self.job_id)
+        result = payload["result"]
+        self.assertEqual(result["outcome"], "failed")
+        self.assertNotIn("authorization", result["job"])
+        self.assertNotIn("secret-start-gate-token", json.dumps(result))
+        self.assertNotIn("secret-start-gate-token", payload["text"])
+        self.assertIn(self.job_id, payload["text"])
+        self.assertIn("not_sent", payload["text"])
+        self.assertIn("Connection refused", payload["text"])
+        saved = json.loads(self.record_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["authorization"]["token"], "secret-start-gate-token")
 
     def test_stop_still_running_is_failed(self) -> None:
         supervisor = _supervisor(state="running", quiet=False)
@@ -155,6 +182,23 @@ class StartRemoteJobTests(unittest.TestCase):
         self.assertEqual(record["runtime_env_file"], "/etc/profile.d/toolchain.sh")
         restored = job_ops.endpoint_from_job_record(record)
         self.assertEqual(restored.runtime_env_file, "/etc/profile.d/toolchain.sh")
+
+    def test_start_uncertain_failure_text_includes_original_job_id(self) -> None:
+        error = RemoteExecutionError(
+            "ssh: connect to host 1.2.3.4 port 46000: Connection timed out",
+            category="remote_execution",
+            submission_state="uncertain",
+        )
+        with mock.patch.object(job_ops, "control", side_effect=error):
+            payload = job_ops.start_remote_job(self.endpoint, command="echo ok", job_id="job-uncertain-1")
+        self.assertEqual(payload["result"]["status"], "submission_uncertain")
+        self.assertIn("job-uncertain-1", payload["text"])
+        self.assertIn("uncertain", payload["text"])
+        self.assertIn("Connection timed out", payload["text"])
+        self.assertNotIn("authorization", json.dumps(payload["result"]))
+        record = state_store.read_json(state_store.job_record_path(self.endpoint, "job-uncertain-1"))
+        self.assertIn("authorization", record)
+        self.assertNotIn(record["authorization"]["token"], payload["text"])
 
     def test_missing_cwd_does_not_open_the_start_gate(self) -> None:
         calls = []

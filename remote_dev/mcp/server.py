@@ -17,6 +17,7 @@ os.environ.setdefault("REMOTE_DEV_SESSION_ID", f"mcp-{os.getpid()}-{uuid.uuid4()
 
 from remote_dev import package_version
 from remote_dev.mcp.tools import call_tool, canonical_name, list_resources, list_tools, read_resource
+from remote_dev.result import tool_text
 from remote_dev.runtime import process_identity, runtime_status
 
 LOADED_RUNTIME = process_identity("remote-dev")
@@ -55,22 +56,6 @@ def error(request_id: Any, code: int, message: str, data: Any | None = None, *, 
     if data is not None:
         payload["error"]["data"] = data
     send(payload, framed=framed)
-
-
-def tool_text(payload: dict[str, Any]) -> str:
-    """Keep failures actionable for clients that only consume MCP text."""
-    text = str(payload.get("text") or "")
-    details = payload.get("result") or {}
-    if details.get("outcome") in {"success", "cancelled"}:
-        return text
-    status = str(details.get("status") or details.get("outcome") or "failed")
-    parts = [f"Remote tool failed ({status})."]
-    for value in (details.get("summary"), details.get("error")):
-        if value and str(value) not in text:
-            parts.append(str(value))
-    if text.strip():
-        parts.append(text.rstrip())
-    return "\n".join(parts) + "\n"
 
 
 def handle(message: dict[str, Any], *, framed: bool = False) -> None:
