@@ -32,3 +32,54 @@ class McpErrorTextTests(unittest.TestCase):
     def test_success_and_cancelled_text_remain_unchanged(self) -> None:
         for outcome in ("success", "cancelled"):
             self.assertEqual(server.tool_text({"text": "bounded output\n", "result": {"outcome": outcome}}), "bounded output\n")
+
+    def test_failure_text_includes_job_id_category_and_diagnostic_without_private_fields(self) -> None:
+        from remote_dev.result import tool_text as result_tool_text
+
+        payload = {
+            "text": "failed\n",
+            "result": {
+                "outcome": "failed",
+                "status": "failed",
+                "summary": "Remote job job-abc status failed.",
+                "error": "ssh: connect to host example port 22: Connection refused",
+                "job_id": "job-abc",
+                "error_details": {"category": "remote_execution", "submission_state": "not_sent"},
+                "diagnostics": {"operation_id": "op-123", "phases": [{"name": "status"}]},
+                "job": {"job_id": "job-abc", "error": "ssh: connect to host example port 22: Connection refused"},
+            },
+        }
+        text = server.tool_text(payload)
+        self.assertEqual(text, result_tool_text(payload))
+        self.assertIn("job-abc", text)
+        self.assertIn("not_sent", text)
+        self.assertIn("Connection refused", text)
+        self.assertIn("operation_id=op-123", text)
+        self.assertIn("phase=status", text)
+        self.assertEqual(text.count("Remote job job-abc status failed."), 1)
+        self.assertNotIn("authorization", text)
+        again = server.tool_text({"text": text, "result": payload["result"]})
+        self.assertEqual(again, text)
+
+    def test_successful_command_output_is_not_reformatted(self) -> None:
+        body = "Remote command running.\n__STDOUT__\n" + ("ok" * 2000)
+        self.assertEqual(server.tool_text({"text": body, "result": {"outcome": "success", "summary": "Remote command running."}}), body)
+
+    def test_nonzero_command_output_keeps_its_existing_cursor_budget(self) -> None:
+        body = "Remote command failed. Exit code: 2.\n__STDERR__\n" + "x" * 16000
+        for tool in ("remote.bash", "remote.job_stdin"):
+            self.assertEqual(server.tool_text({"text": body, "result": {
+                "tool": tool, "outcome": "failed", "state": "failed", "exit_code": 2,
+            }}), body)
+
+    def test_preformatted_failure_is_bounded_and_accepts_late_phase(self) -> None:
+        from remote_dev.result import MAX_FAILURE_TEXT_CHARS
+        body = "Remote tool failed (failed).\n" + "x" * 12000
+        details = {"outcome": "failed", "diagnostics": {
+            "operation_id": "op-123", "phases": [{"phase": "rpc.control", "status": "error"}],
+        }}
+        text = server.tool_text({"text": body, "result": details})
+        self.assertLessEqual(len(text), MAX_FAILURE_TEXT_CHARS)
+        self.assertIn("operation_id=op-123", text)
+        self.assertIn("phase=rpc.control", text)
+        self.assertEqual(server.tool_text({"text": text, "result": details}), text)

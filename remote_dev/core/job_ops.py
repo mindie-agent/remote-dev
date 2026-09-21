@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from remote_dev.observability import observed_tool
+from remote_dev.observability import current_tool, observed_tool
 
 import re
 import json
@@ -20,7 +20,7 @@ from remote_dev.core.locking import record_lock
 from remote_dev.core.runtime_env import runtime_env_lines
 from remote_dev.core.state_store import atomic_write_json, find_job_record, job_record_path
 from remote_dev.processes import control
-from remote_dev.result import make_result, utc_now_iso
+from remote_dev.result import make_result, tool_text, utc_now_iso
 from remote_dev.core.errors import error_details
 
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,95}$")
@@ -72,6 +72,47 @@ def _job_command(endpoint: Endpoint, command: str, runtime_enabled: bool) -> str
     # Parse the user's command after initialization, in the same shell. This
     # preserves runtime functions/options and avoids a second SSH .bashrc load.
     return "\n".join([*preamble, f"eval -- {shlex.quote(command)}"])
+
+
+_PUBLIC_JOB_KEYS = (
+    "schema_version",
+    "job_id",
+    "description",
+    "target",
+    "command_preview",
+    "cwd",
+    "env_keys",
+    "runtime_env",
+    "runtime_env_file",
+    "remote_dir",
+    "started_at",
+    "timeout_ms",
+    "tty",
+    "state",
+    "stdin_cursors",
+    "local_output_offsets",
+    "diagnostics",
+)
+
+
+def _public_job_record(record: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """Project saved job state for tool responses without private start-gate fields."""
+    projected = {key: record[key] for key in _PUBLIC_JOB_KEYS if key in record}
+    projected.update(extra)
+    projected.pop("authorization", None)
+    return projected
+
+
+def _failure_payload(result: dict[str, Any], *, text: str | None = None) -> dict[str, Any]:
+    if "diagnostics" not in result:
+        operation = current_tool()
+        if operation:
+            # Completed transport phases already exist before the enclosing
+            # observed_tool finishes. Text-only clients need them as well.
+            result["diagnostics"] = operation["op"].summary()
+    payload = {"text": text if text is not None else str(result.get("summary") or "") + "\n", "result": result}
+    payload["text"] = tool_text(payload)
+    return payload
 
 
 def _record_cwd(target: dict[str, Any]) -> str:
@@ -131,7 +172,7 @@ def _start_failure(
         duration_ms=_duration_ms(start),
         extra={"error": error[-4000:], "job_id": job_id},
     )
-    return {"text": summary + "\n", "result": result}
+    return _failure_payload(result, text=summary + "\n")
 
 
 def _classify_start_error(exc: BaseException) -> tuple[str, str, str]:
@@ -278,8 +319,7 @@ def start_remote_job(
             if failure["result"]["error_details"].get("submission_state") == "uncertain":
                 failure["result"]["status"] = "submission_uncertain"
                 failure["result"]["summary"] = "Remote submission outcome is uncertain; observe the original job."
-                failure["text"] = failure["result"]["summary"] + "\n"
-            return failure
+            return _failure_payload(failure["result"])
     return _session_result(endpoint, record, path, row, tool="remote.bash", started=started, start=start, budget=budget)
 
 
@@ -300,9 +340,9 @@ def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, An
             summary=f"Remote job {job_id} status failed.",
             started_at=started,
             duration_ms=_duration_ms(start),
-            extra={"job": {**record, "error": str(exc)[-4000:]}, "error_details": error_details(exc)},
+            extra={"job": _public_job_record(record, error=str(exc)[-4000:]), "error_details": error_details(exc)},
         )
-        return {"text": result["summary"] + "\n", "result": result}
+        return _failure_payload(result)
     status = str(supervisor.get("state") or "unknown")
     result = make_result(
         tool="remote.job_status",
@@ -312,7 +352,7 @@ def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, An
         summary=f"Remote job {job_id} is {status}.",
         started_at=started,
         duration_ms=_duration_ms(start),
-        extra={"job": {**record, "remote_status": supervisor, "quiet": supervisor.get("quiet")}},
+        extra={"job": _public_job_record(record, remote_status=supervisor, quiet=supervisor.get("quiet"))},
     )
     return {"text": f"Remote job {job_id}: {status}\n", "result": result}
 
@@ -342,7 +382,7 @@ def remote_job_tail(endpoint: Endpoint | None, *, job_id: str, lines: int = 80, 
             duration_ms=_duration_ms(start),
             extra={"job_id": job_id, "error": str(exc)[-4000:], "error_details": error_details(exc)},
         )
-        return {"text": result["summary"] + "\n", "result": result}
+        return _failure_payload(result)
     requested: list[str] = []
     sections: list[str] = []
     missing: list[str] = []
@@ -454,7 +494,7 @@ def remote_job_stop(endpoint: Endpoint | None, *, job_id: str, force: bool = Fal
             duration_ms=_duration_ms(start),
             extra={"job_id": job_id, "error": str(exc)[-4000:], "error_details": error_details(exc)},
         )
-        return {"text": result["summary"] + "\n", "result": result}
+        return _failure_payload(result)
     state = str(supervisor.get("state") or "unknown")
     quiet = bool(supervisor.get("quiet"))
     if quiet and state in {"cancelled", "succeeded", "failed", "timeout"}:
