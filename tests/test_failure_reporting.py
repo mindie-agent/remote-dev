@@ -114,3 +114,16 @@ def test_actual_local_protocol_output_owner_records_once(reports, monkeypatch, b
     assert result['status'] == 'failed' and len(reports) == 1
     assert reports[0]['category'] == 'command_protocol'
     assert result['diagnostic'] == {'incident_id': 'a' * 32, 'logging_failed': False}
+
+
+@pytest.mark.parametrize('tool,args', [
+    ('remote.glob', {}), ('remote.grep', {}), ('remote.artifact_manifest', {}),
+    ('remote.artifact_pull', {}), ('remote.artifact_push', {'remote_path': '/tmp/fixture'}),
+])
+def test_missing_schema_required_fields_are_caller_not_internal(reports, monkeypatch, tool, args):
+    from remote_dev.mcp import tools
+    monkeypatch.setattr(tools, 'resolve_endpoint', lambda *_: pytest.fail('caller rejection must precede endpoint or SSH'))
+    with pytest.raises(KeyError) as caught:
+        tools.call_tool(tool, args)
+    assert caught.value.category == 'caller'
+    assert reports == [] and not hasattr(caught.value, 'mindie_diagnostic')
