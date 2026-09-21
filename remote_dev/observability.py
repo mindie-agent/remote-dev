@@ -88,21 +88,16 @@ def _report_output_valid(value):
 
 
 def _warn_report_unavailable():
-    """One static stderr line, and only when stderr can accept it without blocking."""
+    """Optional static warning; never change shared stderr flags or block."""
     global _failure_warning_sent
     if _failure_warning_sent:
         return
-    try:
-        import select
-        descriptor = sys.stderr.fileno()
-        _, writable, _ = select.select([], [descriptor], [], 0)
-    except Exception:
-        return
-    if descriptor not in writable:
-        return
     _failure_warning_sent = True
     try:
-        os.write(descriptor, b"remote-dev: shared failure report unavailable\n")
+        if os.name == "posix":
+            descriptor = sys.stderr.fileno()
+            if not os.get_blocking(descriptor):
+                os.write(descriptor, b"remote-dev: shared failure report unavailable\n")
     except Exception:
         pass
 
