@@ -227,6 +227,9 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             hint = "; use yield_time_ms and continue with session_id; wait=True is only a Python SDK option"
         raise caller_error(f"{name} received unsupported argument(s): {', '.join(sorted(unknown))}{hint}")
     args = normalize_arguments(name, args)
+    missing = [key for key in TOOL_SCHEMAS[name].get("required", ()) if key not in args]
+    if missing:
+        raise caller_error(f"{name} requires {', '.join(missing)}", KeyError)
     endpoint = None
     # Job tools can locate their endpoint from the local job record, so they
     # only resolve when the caller supplied an explicit selector.
