@@ -15,9 +15,145 @@ import sys
 from datetime import datetime, timezone
 
 from mindie_diagnostics import get_recorder, current_context, bind_context, wrap_context
-from remote_dev.core.errors import error_details
+from remote_dev.core.errors import RemoteDevError, error_details
 
 _tool = contextvars.ContextVar("remote_dev_tool_operation", default=None)
+
+_REPORT_OPERATIONS = frozenset({
+    "remote.read", "remote.write", "remote.edit", "remote.multi_edit", "remote.bash",
+    "remote.glob", "remote.grep", "remote.ls", "remote.apply_patch", "remote.job_status",
+    "remote.job_tail", "remote.job_stop", "remote.job_stdin", "remote.artifact_manifest",
+    "remote.artifact_pull", "remote.artifact_push", "remote.context_snapshot",
+    "remote.probe", "remote.python",
+})
+_REPORT_STAGES = frozenset({"tool_call", "protocol_decode"})
+_REPORT_CATEGORIES = frozenset({"internal_exception", "command_protocol"})
+_EXACT_INTERNAL = (RuntimeError, AssertionError, KeyError, AttributeError, IndexError, ZeroDivisionError)
+_NOT_INTERNAL = (RemoteDevError, ValueError, TypeError, OSError, KeyboardInterrupt, SystemExit, GeneratorExit)
+_HEX = frozenset("0123456789abcdef")
+_failure_warning_sent = False
+
+
+class _FailureAnchor:
+    """Private proof that this process recorded the attached reference."""
+
+    __slots__ = ("diagnostic",)
+
+    def __init__(self, diagnostic):
+        self.diagnostic = diagnostic
+
+
+def _internal_exception(exc):
+    """True only for an exact outer internal type whose chain stays unmarked."""
+    seen = set()
+    pending = [exc]
+    seen_count = 0
+    while pending:
+        current = pending.pop()
+        if current is None:
+            continue
+        marker = id(current)
+        if marker in seen:
+            return False
+        seen.add(marker)
+        seen_count += 1
+        if seen_count > 8:
+            return False
+        if getattr(current, "category", None) is not None:
+            return False
+        if isinstance(current, _NOT_INTERNAL):
+            return False
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        if cause is not None:
+            pending.append(cause)
+        if context is not None and not getattr(current, "__suppress_context__", False):
+            pending.append(context)
+    return type(exc) in _EXACT_INTERNAL
+
+
+def _report_output_valid(value):
+    if not isinstance(value, dict):
+        return False
+    incident = value.get("incident_id")
+    logging_failed = value.get("logging_failed")
+    recorded = value.get("recorded")
+    if type(logging_failed) is not bool or recorded is not True:
+        return False
+    return (
+        type(incident) is str
+        and len(incident) == 32
+        and all(character in _HEX for character in incident)
+    )
+
+
+def _warn_report_unavailable():
+    """One static stderr line, and only when stderr can accept it without blocking."""
+    global _failure_warning_sent
+    if _failure_warning_sent:
+        return
+    try:
+        import select
+        descriptor = sys.stderr.fileno()
+        _, writable, _ = select.select([], [descriptor], [], 0)
+    except Exception:
+        return
+    if descriptor not in writable:
+        return
+    _failure_warning_sent = True
+    try:
+        os.write(descriptor, b"remote-dev: shared failure report unavailable\n")
+    except Exception:
+        pass
+
+
+def _remember_diagnostic(reference):
+    active = current_tool()
+    if not isinstance(active, dict):
+        return
+    active["diagnostic"] = reference
+    active["_failure_anchor"] = _FailureAnchor(reference)
+
+
+def confirmed_failure(operation, *, stage, category, exception=None):
+    """Report one confirmed internal failure. Unknown stage/category is not sent."""
+    if not isinstance(operation, str) or operation not in _REPORT_OPERATIONS:
+        operation = "remote.tool"
+    if not isinstance(stage, str) or not isinstance(category, str) or stage not in _REPORT_STAGES or category not in _REPORT_CATEGORIES:
+        return None
+    if exception is not None:
+        anchor = getattr(exception, "_mindie_failure_anchor", None)
+        if type(anchor) is _FailureAnchor:
+            _remember_diagnostic(anchor.diagnostic)
+            return anchor.diagnostic
+    reported = None
+    try:
+        from mindie_diagnostics.integration import record_failure
+        active = current_tool()
+        elapsed_ms = (time.monotonic() - active["started"]) * 1000 if active else None
+        reported = record_failure(
+            "remote-dev", operation, stage=stage, category=category, exception=exception,
+            elapsed_ms=elapsed_ms,
+        )
+        valid = _report_output_valid(reported)
+    except Exception:
+        valid = False
+    if valid:
+        reference = {"incident_id": reported["incident_id"], "logging_failed": reported["logging_failed"]}
+    else:
+        _warn_report_unavailable()
+        reference = {"logging_failed": True}
+    if exception is not None:
+        try:
+            exception.mindie_diagnostic = reference
+        except Exception:
+            pass
+        try:
+            exception._mindie_failure_anchor = _FailureAnchor(reference)
+        except Exception:
+            pass
+    _remember_diagnostic(reference)
+    return reference
 
 
 def current_tool():
@@ -45,8 +181,10 @@ def observed_tool(name, *, component="remote-dev"):
                 return function(*args, **kwargs)
             started_at = datetime.now(timezone.utc).isoformat()
             started = time.monotonic()
+            operation = {"name": label, "started_at": started_at, "started": started}
             with get_recorder(component).operation(label) as op:
-                token = _tool.set({"name": label, "op": op, "started_at": started_at, "started": started})
+                operation["op"] = op
+                token = _tool.set(operation)
                 try:
                     value = function(*args, **kwargs)
                     result = value.get("result", value.get("structuredContent", value)) if isinstance(value, dict) else None
@@ -69,6 +207,13 @@ def observed_tool(name, *, component="remote-dev"):
                 except BaseException as exc:
                     if isinstance(exc, SystemExit) and exc.code in (None, 0):
                         raise
+                    try:
+                        if component == "remote-dev" and _internal_exception(exc):
+                            confirmed_failure(
+                                label, stage="tool_call", category="internal_exception", exception=exc,
+                            )
+                    except Exception:
+                        _warn_report_unavailable()
                     details = error_details(exc)
                     op.fail(details.pop("category"), **details)
                     # The original exception type/cause stays intact. A JSON-RPC
@@ -83,6 +228,10 @@ def observed_tool(name, *, component="remote-dev"):
                 finally:
                     _tool.reset(token)
             if isinstance(result, dict):
+                anchor = operation.get("_failure_anchor")
+                diagnostic = operation.get("diagnostic")
+                if type(anchor) is _FailureAnchor and anchor.diagnostic is diagnostic:
+                    result["diagnostic"] = diagnostic
                 result["diagnostics"] = op.summary()
                 if "schema_version" in result and "tool" in result:
                     result["invocation_id"] = op.operation_id

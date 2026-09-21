@@ -21,7 +21,7 @@ from .endpoint import Endpoint
 from .container_endpoint import pin_container_endpoint, pinned_endpoint
 from .errors import RemoteExecutionError
 from .local_process import OwnedProcess
-from remote_dev.observability import observed_operation
+from remote_dev.observability import confirmed_failure, observed_operation
 
 # ControlMaster socket directory. Consumers that already keep an OpenSSH mux
 # directory for their own tooling can point remote-dev at it so both share
@@ -1043,10 +1043,15 @@ def run_remote_python(
     try:
         data = json.loads(row["stdout"].strip())
     except json.JSONDecodeError as exc:
+        confirmed_failure("remote.python", stage="protocol_decode", category="command_protocol", exception=exc)
         return {"status": "failed", "error": f"remote python returned non-JSON: {exc}",
                 "error_details": {"category": "command_protocol", "submission_state": "acknowledged", "retryable": False},
                 "stdout_tail": row["stdout"][-4000:], "stderr_tail": row["stderr"][-4000:]}
-    return data if isinstance(data, dict) else {"status": "failed", "error": "remote python JSON was not an object"}
+    if not isinstance(data, dict):
+        confirmed_failure("remote.python", stage="protocol_decode", category="command_protocol")
+        return {"status": "failed", "error": "remote python JSON was not an object",
+                "error_details": {"category": "command_protocol", "submission_state": "acknowledged", "retryable": False}}
+    return data
 
 
 def _decode_stream(value: str | bytes | None) -> str:
