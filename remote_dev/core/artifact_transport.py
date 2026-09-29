@@ -14,7 +14,7 @@ import time
 from dataclasses import replace
 
 from .cancellation import current_event
-from .atomic import replace_file
+from .atomic import publish_file
 from .errors import RemoteExecutionError
 from .locking import path_lock
 
@@ -88,7 +88,7 @@ class ArtifactStream:
             raise ArtifactTransferError("artifact " + str(result.get("status", "failed")) + ": " + str(result.get("error", "")), self.expected_sha256, result.get("sha256"))
         return result
 
-    def pull(self, item, destination):
+    def pull(self, item, destination, *, overwrite=False):
         with path_lock(destination):
             self.expected_sha256 = item["sha256"]
             self.send(item)
@@ -114,7 +114,7 @@ class ArtifactStream:
                     raise ArtifactTransferError("artifact hash_mismatch", item["sha256"], digest.hexdigest())
                 if destination.is_symlink():
                     raise RemoteExecutionError("refusing to replace a local symlink")
-                replace_file(temporary, destination)
+                publish_file(temporary, destination, overwrite=overwrite)
             finally:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(temporary)

@@ -125,7 +125,7 @@ def _local_manifest(local_path: Path) -> dict[str, Any]:
     }
 
 
-def _safe_local_artifact_path(base: Path, relpath: str) -> Path:
+def _safe_local_artifact_path(base: Path, relpath: str, *, create_parents: bool = True) -> Path:
     if relpath == ".":
         relpath = "artifact"
     rel = PurePosixPath(relpath)
@@ -146,10 +146,11 @@ def _safe_local_artifact_path(base: Path, relpath: str) -> Path:
         probe = probe / part
         if probe.is_symlink() or probe.is_file():
             raise ValueError(f"artifact relpath escapes local dir: {relpath}")
-    try:
-        candidate.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ValueError(f"artifact relpath is not a creatable path: {relpath}") from exc
+    if create_parents:
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ValueError(f"artifact relpath is not a creatable path: {relpath}") from exc
     if candidate.is_symlink():
         raise ValueError(f"refusing to overwrite local symlink: {candidate}")
     return candidate
@@ -217,10 +218,23 @@ def _transfer_failure(endpoint, tool, started, start, exc, evidence):
     return {"text": result["summary"] + "\n" + message + "\n", "result": result}
 
 
+def _pull_destination_exists(endpoint, started, start, evidence, conflicts):
+    evidence["conflicts"] = conflicts
+    result = make_result(
+        tool="remote.artifact_pull", target=endpoint.to_result_target(),
+        outcome="blocked", status="destination_exists",
+        summary="Artifact pull would overwrite local files.",
+        started_at=started, duration_ms=_duration_ms(start),
+        preview={"stderr": "Choose another local_dir, rename the local file, or set overwrite=true."},
+        artifacts=[evidence], extra={"conflicts": conflicts},
+    )
+    return {"text": result["summary"] + "\n" + "\n".join(conflicts) + "\n", "result": result}
+
+
 @observed_tool("remote.artifact_pull")
 @serialize_mutation
 def remote_artifact_pull(endpoint: Endpoint, *, remote_path: str, local_dir: str | None = None,
-                         timeout_ms: int = 120000) -> dict[str, Any]:
+                         overwrite: bool = False, timeout_ms: int = 120000) -> dict[str, Any]:
     started, start = utc_now_iso(), time.monotonic()
     manifest_payload = remote_artifact_manifest(endpoint, remote_path=remote_path, timeout_ms=timeout_ms)
     manifest = manifest_payload["result"].get("manifest", {})
@@ -228,28 +242,37 @@ def remote_artifact_pull(endpoint: Endpoint, *, remote_path: str, local_dir: str
         return manifest_payload
     base = Path(local_dir) if local_dir else ensure_endpoint_state(endpoint) / "artifacts" / uuid.uuid4().hex
     base.mkdir(parents=True, exist_ok=True)
-    pulled, skipped, pending = [], [], []
+    pulled, skipped, pending, conflicts = [], [], [], []
     evidence = {"manifest": manifest, "pulled": pulled, "skipped": skipped, "local_dir": str(base), "remote_path": remote_path}
     try:
         for item in manifest.get("files", []):
-            path = _safe_local_artifact_path(base, str(item["relpath"]))
-            if path.exists() and _sha256_file(path) == item["sha256"]:
+            path = _safe_local_artifact_path(base, str(item["relpath"]), create_parents=False)
+            if path.is_file() and path.stat().st_size == item["size"] and _sha256_file(path) == item["sha256"]:
                 skipped.append({"relpath": item["relpath"], "local_path": str(path), "reason": "hash-match"})
+            elif path.exists() and (not overwrite or not path.is_file()):
+                conflicts.append(str(path))
             else:
                 pending.append((item, path))
+        if conflicts:
+            return _pull_destination_exists(endpoint, started, start, evidence, conflicts)
         if pending:
             with ArtifactStream(endpoint, "pull", len(pending), timeout_ms) as stream:
                 for item, path in pending:
-                    digest = stream.pull(item, path)
+                    _safe_local_artifact_path(base, str(item["relpath"]))
+                    digest = stream.pull(item, path, overwrite=overwrite)
                     pulled.append({"relpath": item["relpath"], "local_path": str(path), "sha256": digest, "size": item["size"]})
+    except FileExistsError as exc:
+        return _pull_destination_exists(endpoint, started, start, evidence, [str(exc.filename or exc)])
     except (RemoteExecutionError, OSError, ValueError) as exc:
         return _transfer_failure(endpoint, "remote.artifact_pull", started, start, exc, evidence)
-    manifest_path = base / "manifest.json"
-    atomic_write_json(manifest_path, manifest)
+    # remote_artifact_manifest already wrote a uniquely named manifest under
+    # the endpoint state. Do not place tool metadata in the user's local_dir:
+    # a remote tree can itself contain a file named manifest.json.
+    manifest_path = manifest_payload["result"].get("refs", {}).get("local_manifest")
     result = make_result(tool="remote.artifact_pull", target=endpoint.to_result_target(), outcome="success",
                          status="ok", summary=f"Pulled {len(pulled)} files from {remote_path}.",
                          started_at=started, duration_ms=_duration_ms(start),
-                         refs={"local_manifest": str(manifest_path)}, artifacts=[evidence])
+                         refs={"local_manifest": str(manifest_path)} if manifest_path else {}, artifacts=[evidence])
     return {"text": f"RemoteArtifactPull completed\nlocal_dir: {base}\npulled: {len(pulled)}\nskipped: {len(skipped)}\n", "result": result}
 
 

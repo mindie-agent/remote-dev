@@ -494,6 +494,12 @@ library APIs, not MCP tools, and they do not accept extra `-o` strings.
 Stdin bytes into a remote command are already `run_bytes`. Detached
 background work is `remote.bash --run-in-background` / `remote.job_*`.
 Directory trees move with `remote.artifact_push` / `artifact_pull`.
+`artifact_pull` checks every destination before transferring. Existing files
+with the same SHA-256 are skipped; different files return `destination_exists`
+without changing any destination unless `overwrite=true` (CLI: `--overwrite`).
+The caller can choose another `local_dir` or rename a local file instead.
+The manifest receipt is stored in remote-dev state and returned as
+`refs.local_manifest`, outside the destination directory.
 
 ## MCP server and clients
 

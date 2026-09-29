@@ -211,6 +211,16 @@ class McpSchemaTests(unittest.TestCase):
                     mcp_tools.call_tool(name, {**endpoint, field: "payload"})
                     self.assertEqual(execute.call_args.kwargs[field], "payload")
 
+    def test_artifact_pull_exposes_and_forwards_explicit_overwrite(self) -> None:
+        schema = TOOL_SCHEMAS["remote.artifact_pull"]
+        self.assertEqual(schema["properties"]["overwrite"]["default"], False)
+        endpoint = {"host": "example.invalid", "port": 22, "remote_path": "/tmp/result.json"}
+        with patch.object(mcp_tools, "remote_artifact_pull", return_value={}) as execute:
+            mcp_tools.call_tool("remote_artifact_pull", endpoint)
+            self.assertFalse(execute.call_args.kwargs["overwrite"])
+            mcp_tools.call_tool("remote_artifact_pull", {**endpoint, "overwrite": True})
+            self.assertTrue(execute.call_args.kwargs["overwrite"])
+
     def test_resources_include_endpoint_index(self) -> None:
         resources = {resource["uri"] for resource in list_resources()}
         self.assertIn("remote://endpoints", resources)

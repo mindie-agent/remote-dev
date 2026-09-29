@@ -10,6 +10,7 @@ from unittest import mock
 
 from local_ssh import local_python_ssh
 from remote_dev.core.artifact_transport import ArtifactStream, ArtifactTransferError
+from remote_dev.core.artifact_ops import remote_artifact_pull
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core.errors import RemoteExecutionError
 
@@ -76,7 +77,7 @@ class ArtifactStreamTests(unittest.TestCase):
         item = {"path": str(source), "size": source.stat().st_size, "sha256": "0" * 64}
         with ArtifactStream(self.endpoint, "pull", 1, 5000) as stream:
             with self.assertRaises(ArtifactTransferError):
-                stream.pull(item, destination)
+                stream.pull(item, destination, overwrite=True)
         self.assertEqual(destination.read_bytes(), b"existing bytes")
         self.assertEqual(list(self.base.glob(".remote-dev-*")), [])
 
@@ -88,8 +89,65 @@ class ArtifactStreamTests(unittest.TestCase):
         for path, size in ((source, 999), (destination, 8)):
             with self.subTest(path=path), ArtifactStream(self.endpoint, "pull", 1, 5000) as stream:
                 with self.assertRaises(RemoteExecutionError):
-                    stream.pull({"path": str(path), "size": size, "sha256": "0" * 64}, destination)
+                    stream.pull({"path": str(path), "size": size, "sha256": "0" * 64}, destination, overwrite=True)
             self.assertEqual(destination.read_bytes(), b"existing")
+
+    def test_pull_commit_refuses_a_destination_created_after_preflight(self):
+        source = self.root / "source"
+        source.write_bytes(b"server bytes")
+        destination = self.base / "destination"
+        destination.write_bytes(b"another writer")
+        item = {"path": str(source), "size": source.stat().st_size, "sha256": digest(source)}
+        with ArtifactStream(self.endpoint, "pull", 1, 5000) as stream:
+            with self.assertRaises(FileExistsError):
+                stream.pull(item, destination)
+        self.assertEqual(destination.read_bytes(), b"another writer")
+        self.assertEqual(list(self.base.glob(".remote-dev-*")), [])
+
+    @unittest.skipIf(os.name == "nt", "local SSH adapter cannot emulate a POSIX remote root on Windows")
+    def test_pull_conflict_requires_explicit_overwrite(self):
+        source = self.root / "source.bin"
+        source.write_bytes(b"first")
+        local = self.base / "download"
+        first = remote_artifact_pull(self.endpoint, remote_path=str(source), local_dir=str(local))["result"]
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual((local / "artifact").read_bytes(), b"first")
+
+        source.write_bytes(b"second")
+        blocked = remote_artifact_pull(self.endpoint, remote_path=str(source), local_dir=str(local))["result"]
+        self.assertEqual((blocked["outcome"], blocked["status"]), ("blocked", "destination_exists"))
+        self.assertEqual(blocked["conflicts"], [str(local / "artifact")])
+        self.assertEqual((local / "artifact").read_bytes(), b"first")
+
+        replaced = remote_artifact_pull(self.endpoint, remote_path=str(source), local_dir=str(local), overwrite=True)["result"]
+        self.assertEqual(replaced["status"], "ok")
+        self.assertEqual((local / "artifact").read_bytes(), b"second")
+        self.assertTrue(Path(replaced["refs"]["local_manifest"]).exists())
+        self.assertFalse((local / "manifest.json").exists())
+
+    @unittest.skipIf(os.name == "nt", "local SSH adapter cannot emulate a POSIX remote root on Windows")
+    def test_pull_preflights_every_file_and_preserves_remote_manifest_json(self):
+        source = self.root / "tree"
+        source.mkdir()
+        (source / "a.txt").write_bytes(b"remote a")
+        (source / "b.txt").write_bytes(b"remote b")
+        (source / "manifest.json").write_bytes(b"remote metadata")
+        local = self.base / "download"
+        local.mkdir()
+        (local / "b.txt").write_bytes(b"local b")
+
+        blocked = remote_artifact_pull(self.endpoint, remote_path=str(source), local_dir=str(local))["result"]
+        self.assertEqual(blocked["status"], "destination_exists")
+        self.assertFalse((local / "a.txt").exists())
+        self.assertFalse((local / "manifest.json").exists())
+        self.assertEqual((local / "b.txt").read_bytes(), b"local b")
+
+        changed = remote_artifact_pull(self.endpoint, remote_path=str(source), local_dir=str(local), overwrite=True)["result"]
+        self.assertEqual(changed["status"], "ok")
+        self.assertEqual((local / "a.txt").read_bytes(), b"remote a")
+        self.assertEqual((local / "b.txt").read_bytes(), b"remote b")
+        self.assertEqual((local / "manifest.json").read_bytes(), b"remote metadata")
+        self.assertTrue(Path(changed["refs"]["local_manifest"]).exists())
 
     def test_client_allocations_are_bounded_for_a_large_transfer(self):
         source = self.root / "large.bin"
