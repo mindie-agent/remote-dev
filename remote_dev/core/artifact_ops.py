@@ -19,6 +19,14 @@ from .artifact_transport import ArtifactStream, ArtifactTransferError
 from .errors import RemoteExecutionError, error_details
 from .state_store import atomic_write_json, ensure_endpoint_state
 
+ARTIFACT_TIMEOUT_MAX_MS = 120000
+
+
+def validate_artifact_timeout_ms(timeout_ms: int) -> int:
+    if type(timeout_ms) is not int or not 1 <= timeout_ms <= ARTIFACT_TIMEOUT_MAX_MS:
+        raise ValueError(f"artifact timeout_ms must be an integer from 1 to {ARTIFACT_TIMEOUT_MAX_MS} ms")
+    return timeout_ms
+
 REMOTE_MANIFEST_PY = r'''
 import hashlib
 import json
@@ -235,6 +243,7 @@ def _pull_destination_exists(endpoint, started, start, evidence, conflicts):
 @serialize_mutation
 def remote_artifact_pull(endpoint: Endpoint, *, remote_path: str, local_dir: str | None = None,
                          overwrite: bool = False, timeout_ms: int = 120000) -> dict[str, Any]:
+    validate_artifact_timeout_ms(timeout_ms)
     started, start = utc_now_iso(), time.monotonic()
     manifest_payload = remote_artifact_manifest(endpoint, remote_path=remote_path, timeout_ms=timeout_ms)
     manifest = manifest_payload["result"].get("manifest", {})
@@ -280,6 +289,7 @@ def remote_artifact_pull(endpoint: Endpoint, *, remote_path: str, local_dir: str
 @serialize_mutation
 def remote_artifact_push(endpoint: Endpoint, *, local_path: str, remote_path: str,
                          timeout_ms: int = 120000) -> dict[str, Any]:
+    validate_artifact_timeout_ms(timeout_ms)
     started, start = utc_now_iso(), time.monotonic()
     pushed = []
     evidence = {"pushed": pushed}

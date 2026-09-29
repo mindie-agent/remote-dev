@@ -189,8 +189,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 
     ),
     "remote.artifact_manifest": schema({"remote_path": {"type": "string"}}, ["remote_path"]),
-    "remote.artifact_pull": schema({"remote_path": {"type": "string"}, "local_dir": {"type": "string"}, "overwrite": {"type": "boolean", "default": False, "description": "Replace existing local files only when explicitly true. Hash-identical files are skipped."}}, ["remote_path"]),
-    "remote.artifact_push": schema({"local_path": {"type": "string"}, "remote_path": {"type": "string"}}, ["local_path", "remote_path"]),
+    "remote.artifact_pull": schema({"remote_path": {"type": "string"}, "local_dir": {"type": "string"}, "overwrite": {"type": "boolean", "default": False, "description": "Replace existing local files only when explicitly true. Hash-identical files are skipped."}, "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 120000}, "timeout": {"type": "integer", "minimum": 1, "maximum": 120000}}, ["remote_path"]),
+    "remote.artifact_push": schema({"local_path": {"type": "string"}, "remote_path": {"type": "string"}, "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 120000}, "timeout": {"type": "integer", "minimum": 1, "maximum": 120000}}, ["local_path", "remote_path"]),
     "remote.context_snapshot": schema({"live_probe": {"type": "boolean", "default": True}}),
     "remote.probe": schema({"modules": {"type": "array", "items": {"type": "string"}, "description": "Explicit module imports to check; default empty."}, "diagnose_connection": {"type": "boolean", "default": False, "description": "Compare SSH connections with a fixed read-only probe; never replays a business command."}}),
 }

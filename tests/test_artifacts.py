@@ -17,6 +17,17 @@ import remote_dev.core.state_store as state_store  # noqa: E402
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_transfer_api_rejects_overlong_timeout_before_work(self) -> None:
+        endpoint = Endpoint(host="192.0.2.10", port=22)
+        with mock.patch.object(artifact_ops, "_local_manifest") as manifest, \
+             mock.patch.object(artifact_ops, "remote_artifact_manifest") as remote_manifest:
+            with self.assertRaisesRegex(ValueError, "120000 ms"):
+                artifact_ops.remote_artifact_push(endpoint, local_path="/tmp/file", remote_path="/tmp/file", timeout_ms=120001)
+            with self.assertRaisesRegex(ValueError, "120000 ms"):
+                artifact_ops.remote_artifact_pull(endpoint, remote_path="/tmp/file", timeout_ms=120001)
+            manifest.assert_not_called()
+            remote_manifest.assert_not_called()
+
     def test_artifact_manifest_path_escape_returns_blocked_result(self) -> None:
         endpoint = Endpoint(host="1.2.3.4", port=46000, root="/vllm-workspace")
         payload = artifact_ops.remote_artifact_manifest(endpoint, remote_path="/etc/passwd")
