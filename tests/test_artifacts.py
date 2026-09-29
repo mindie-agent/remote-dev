@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import sys
+import hashlib
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -107,6 +109,27 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(payload["result"]["status"], "path_traversal")
         finally:
             artifact_ops.remote_artifact_manifest = original_manifest  # type: ignore[assignment]
+
+    def test_artifact_pull_conflict_blocks_before_opening_a_stream(self) -> None:
+        endpoint = Endpoint(host="192.0.2.10", port=22)
+        incoming = b"new content"
+        manifest = {
+            "status": "ok", "is_dir": False,
+            "files": [{"relpath": ".", "path": "/remote/new.txt", "size": len(incoming),
+                       "sha256": hashlib.sha256(incoming).hexdigest()}],
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, REMOTE_DEV_STATE_DIR=tmp):
+            destination = Path(tmp) / "download"
+            destination.mkdir()
+            (destination / "artifact").write_bytes(b"existing content")
+            receipt = {"result": {"manifest": manifest, "refs": {"local_manifest": str(Path(tmp) / "receipt.json")}}}
+            with mock.patch.object(artifact_ops, "remote_artifact_manifest", return_value=receipt), \
+                 mock.patch.object(artifact_ops, "ArtifactStream") as stream:
+                result = artifact_ops.remote_artifact_pull(endpoint, remote_path="/remote/new.txt", local_dir=str(destination))["result"]
+            stream.assert_not_called()
+            self.assertEqual((result["outcome"], result["status"]), ("blocked", "destination_exists"))
+            self.assertEqual(result["conflicts"], [str(destination / "artifact")])
+            self.assertEqual((destination / "artifact").read_bytes(), b"existing content")
 
 
 if __name__ == "__main__":

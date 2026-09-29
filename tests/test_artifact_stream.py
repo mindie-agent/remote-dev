@@ -104,6 +104,7 @@ class ArtifactStreamTests(unittest.TestCase):
         self.assertEqual(destination.read_bytes(), b"another writer")
         self.assertEqual(list(self.base.glob(".remote-dev-*")), [])
 
+    @unittest.skipIf(os.name == "nt", "local SSH adapter cannot emulate a POSIX remote root on Windows")
     def test_pull_conflict_requires_explicit_overwrite(self):
         source = self.root / "source.bin"
         source.write_bytes(b"first")
@@ -124,6 +125,7 @@ class ArtifactStreamTests(unittest.TestCase):
         self.assertTrue(Path(replaced["refs"]["local_manifest"]).exists())
         self.assertFalse((local / "manifest.json").exists())
 
+    @unittest.skipIf(os.name == "nt", "local SSH adapter cannot emulate a POSIX remote root on Windows")
     def test_pull_preflights_every_file_and_preserves_remote_manifest_json(self):
         source = self.root / "tree"
         source.mkdir()
