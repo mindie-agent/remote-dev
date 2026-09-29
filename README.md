@@ -1,8 +1,10 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/mindie-agent/mindie-agent/main/assets/brand/mindie-agent-logo.png" alt="MindIE Agent logo" width="128" height="128">
+  <img src="assets/brand/remote-dev-logo.png" alt="remote-dev logo" width="128" height="128">
 </p>
 
 # remote-dev
+
+Part of [MindIE Agent](https://github.com/mindie-agent/mindie-agent).
 
 A remote development substrate for coding agents. It makes a remote Linux
 host reachable over SSH feel like the local working tree: every native editor
