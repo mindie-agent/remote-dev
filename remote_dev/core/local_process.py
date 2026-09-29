@@ -43,7 +43,7 @@ class OwnedProcess:
         try:
             self.process = subprocess.Popen(list(argv), **options)
             if self._job is not None:
-                self._job.assign_and_resume(self.process.pid)
+                self._job.assign_and_resume(self.process)
         except BaseException:
             if self._job is not None:
                 self._job.close()
@@ -166,13 +166,7 @@ class _WindowsJob:
                         ("page_faults", wintypes.DWORD), ("total_processes", wintypes.DWORD),
                         ("active_processes", wintypes.DWORD), ("terminated_processes", wintypes.DWORD)]
 
-        class ThreadEntry(ctypes.Structure):
-            _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD),
-                        ("thread_id", wintypes.DWORD), ("owner_pid", wintypes.DWORD),
-                        ("base_priority", wintypes.LONG), ("delta_priority", wintypes.LONG),
-                        ("flags", wintypes.DWORD)]
-
-        self.Accounting, self.ThreadEntry = Accounting, ThreadEntry
+        self.Accounting = Accounting
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
 
         def api(name, restype, *argtypes):
@@ -187,12 +181,6 @@ class _WindowsJob:
         self.terminate = api("TerminateJobObject", wintypes.BOOL, wintypes.HANDLE, wintypes.UINT)
         self.query = api("QueryInformationJobObject", wintypes.BOOL, wintypes.HANDLE,
                          ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p)
-        self.open_process = api("OpenProcess", wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        self.snapshot = api("CreateToolhelp32Snapshot", wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD)
-        self.first_thread = api("Thread32First", wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(ThreadEntry))
-        self.next_thread = api("Thread32Next", wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(ThreadEntry))
-        self.open_thread = api("OpenThread", wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        self.resume_thread = api("ResumeThread", wintypes.DWORD, wintypes.HANDLE)
         self.close_handle = api("CloseHandle", wintypes.BOOL, wintypes.HANDLE)
         self.handle = self.check(create(None, None))
         try:
@@ -208,31 +196,9 @@ class _WindowsJob:
             raise self.ctypes.WinError(self.ctypes.get_last_error())
         return value
 
-    def assign_and_resume(self, pid: int) -> None:
-        process = self.check(self.open_process(0x0101, False, pid))  # SET_QUOTA | TERMINATE
-        try:
-            self.check(self.assign(self.handle, process))
-        finally:
-            self.close_handle(process)
-        snapshot = self.snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
-        if snapshot == self.ctypes.c_void_p(-1).value:
-            raise self.ctypes.WinError(self.ctypes.get_last_error())
-        try:
-            row = self.ThreadEntry()
-            row.size = self.ctypes.sizeof(row)
-            more = self.first_thread(snapshot, self.ctypes.byref(row))
-            while more and row.owner_pid != pid:
-                more = self.next_thread(snapshot, self.ctypes.byref(row))
-            if not more:
-                raise RuntimeError("cannot find the owned suspended process's primary thread")
-            thread = self.check(self.open_thread(0x0002, False, row.thread_id))
-            try:
-                if self.resume_thread(thread) == 0xFFFFFFFF:
-                    raise self.ctypes.WinError(self.ctypes.get_last_error())
-            finally:
-                self.close_handle(thread)
-        finally:
-            self.close_handle(snapshot)
+    def assign_and_resume(self, process) -> None:
+        self.check(self.assign(self.handle, int(process._handle)))
+        _resume_windows_process(process)
 
     def stop(self, timeout: float) -> None:
         self.check(self.terminate(self.handle, 1))
@@ -251,3 +217,25 @@ class _WindowsJob:
         if self.handle is not None:
             self.close_handle(self.handle)
             self.handle = None
+
+
+def _resume_windows_process(process):
+    """Resume only the owned, suspended child after Job assignment.
+
+    NtResumeProcess is also used by psutil's Windows resume implementation.
+    The retained Popen handle avoids PID reuse and system-wide thread scans.
+    NTSTATUS is converted explicitly; GetLastError is not its error channel.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    native = ctypes.WinDLL("ntdll")
+    resume = native.NtResumeProcess
+    resume.argtypes = [wintypes.HANDLE]
+    resume.restype = wintypes.LONG
+    status = resume(int(process._handle))
+    if status < 0:
+        convert = native.RtlNtStatusToDosError
+        convert.argtypes = [wintypes.LONG]
+        convert.restype = wintypes.ULONG
+        raise ctypes.WinError(convert(status))
