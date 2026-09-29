@@ -196,6 +196,7 @@ def build_parser(tool: str) -> argparse.ArgumentParser:
         parser.add_argument("--remote-path", required=False)
         if tool == "artifact_pull":
             parser.add_argument("--local-dir")
+            parser.add_argument("--overwrite", action="store_true", help="Replace different local files; the default is to report a conflict.")
         if tool == "artifact_push":
             parser.add_argument("--local-path")
     elif tool == "context_snapshot":

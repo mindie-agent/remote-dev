@@ -47,7 +47,7 @@ def list_tools() -> list[dict[str, Any]]:
         "remote.job_stop": "Stop a remote background job through the shared process supervisor.",
         "remote.job_stdin": "Write to a remote session's stdin (Codex write_stdin habit), with optional EOF and output polling.",
         "remote.artifact_manifest": "Build a remote artifact sha256 manifest.",
-        "remote.artifact_pull": "Pull a remote artifact through SSH streaming with hash verification.",
+        "remote.artifact_pull": "Pull a remote artifact through SSH streaming with hash verification; reject local overwrite by default.",
         "remote.artifact_push": "Push a local artifact through SSH streaming with hash verification.",
         "remote.context_snapshot": "Write a compact endpoint context snapshot.",
         "remote.probe": "Probe basic endpoint facts.",
@@ -314,7 +314,7 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         return remote_artifact_manifest(endpoint, remote_path=str(args["remote_path"]), timeout_ms=timeout_ms)
     if name == "remote.artifact_pull":
         assert endpoint is not None
-        return remote_artifact_pull(endpoint, remote_path=str(args["remote_path"]), local_dir=args.get("local_dir"), timeout_ms=timeout_ms)
+        return remote_artifact_pull(endpoint, remote_path=str(args["remote_path"]), local_dir=args.get("local_dir"), overwrite=bool(args.get("overwrite", False)), timeout_ms=timeout_ms)
     if name == "remote.artifact_push":
         assert endpoint is not None
         return remote_artifact_push(endpoint, local_path=str(args["local_path"]), remote_path=str(args["remote_path"]), timeout_ms=timeout_ms)

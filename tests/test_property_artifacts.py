@@ -324,7 +324,7 @@ class TransferHarness:
         class Stream:
             def __enter__(self): return self
             def __exit__(self, *args): pass
-            def pull(self, item, destination):
+            def pull(self, item, destination, *, overwrite=False):
                 path = Path(item["path"])
                 if str(path) in harness.missing:
                     raise OSError("source missing")
@@ -379,7 +379,7 @@ class TransferProperties(unittest.TestCase):
                 harness.missing.add(str(tree / victim))
             payload = artifact_ops.remote_artifact_pull(harness.endpoint, remote_path=str(tree), local_dir=str(harness.local_dir))
             result = payload["result"]
-            landed = {str(p.relative_to(harness.local_dir)): p for p in harness.local_dir.rglob("*") if p.is_file() and p.name != "manifest.json"}
+            landed = {str(p.relative_to(harness.local_dir)): p for p in harness.local_dir.rglob("*") if p.is_file()}
             self.assertFalse([name for name in landed if name.endswith(".tmp")], "temporary files must not remain")
             for rel, path in landed.items():
                 self.assertIn(rel, expected, f"unexpected file landed: {rel}")
@@ -387,7 +387,8 @@ class TransferProperties(unittest.TestCase):
             if fault == "none":
                 self.assertEqual(result["status"], "ok", payload["text"])
                 self.assertEqual(set(landed), set(expected))
-                self.assertTrue((harness.local_dir / "manifest.json").exists())
+                self.assertTrue(Path(result["refs"]["local_manifest"]).exists())
+                self.assertFalse((harness.local_dir / "manifest.json").exists())
                 pulled = result["artifacts"][0]["pulled"]
                 self.assertEqual({item["relpath"]: item["sha256"] for item in pulled}, {rel: value[0] for rel, value in expected.items()})
                 # A second pull is a no-op: everything is skipped by hash match.

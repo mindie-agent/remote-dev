@@ -103,6 +103,20 @@ sys.addaudithook(audit)
                 self.assertEqual(write.call_args.kwargs["file_path"], "/tmp/example")
                 self.assertTrue(write.call_args.kwargs["overwrite"])
 
+    def test_artifact_pull_cli_requires_explicit_overwrite(self) -> None:
+        from unittest import mock
+        from remote_dev import cli
+        from remote_dev.mcp import tools
+
+        parser = cli.build_parser("artifact_pull")
+        args = parser.parse_args(["--host", "example.invalid", "--port", "22", "--remote-path", "/tmp/result"])
+        with mock.patch.object(tools, "remote_artifact_pull", return_value={}) as pull:
+            cli.run_tool("artifact_pull", args)
+            self.assertFalse(pull.call_args.kwargs["overwrite"])
+            args = parser.parse_args(["--host", "example.invalid", "--port", "22", "--remote-path", "/tmp/result", "--overwrite"])
+            cli.run_tool("artifact_pull", args)
+            self.assertTrue(pull.call_args.kwargs["overwrite"])
+
     def test_cli_keeps_transport_policy_out_of_developer_tools(self) -> None:
         from remote_dev.cli import build_parser, endpoint_payload
 
