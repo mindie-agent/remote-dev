@@ -500,6 +500,9 @@ library APIs, not MCP tools, and they do not accept extra `-o` strings.
 Stdin bytes into a remote command are already `run_bytes`. Detached
 background work is `remote.bash --run-in-background` / `remote.job_*`.
 Directory trees move with `remote.artifact_push` / `artifact_pull`.
+Both transfers default to a 120000 ms timeout. Explicit `timeout_ms` or
+`timeout` values must be integers from 1 through 120000 ms; larger values
+are rejected before endpoint resolution or transfer.
 `artifact_pull` checks every destination before transferring. Existing files
 with the same SHA-256 are skipped; different files return `destination_exists`
 without changing any destination unless `overwrite=true` (CLI: `--overwrite`).

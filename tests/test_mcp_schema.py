@@ -221,6 +221,28 @@ class McpSchemaTests(unittest.TestCase):
             mcp_tools.call_tool("remote_artifact_pull", {**endpoint, "overwrite": True})
             self.assertTrue(execute.call_args.kwargs["overwrite"])
 
+    def test_artifact_transfer_timeout_is_bounded_before_endpoint_resolution(self) -> None:
+        for name, required in (("remote_artifact_pull", {"remote_path": "/tmp/file"}),
+                               ("remote_artifact_push", {"local_path": "/tmp/file", "remote_path": "/tmp/file"})):
+            schema = TOOL_SCHEMAS[name.replace("_", ".", 1)]
+            for key in ("timeout_ms", "timeout"):
+                self.assertEqual(schema["properties"][key]["maximum"], 120000)
+                self.assertEqual(schema["properties"][key]["minimum"], 1)
+                with self.subTest(name=name, key=key), patch.object(mcp_tools, "resolve_endpoint") as resolve:
+                    with self.assertRaisesRegex(ValueError, "120000 ms"):
+                        mcp_tools.call_tool(name, {**required, key: 120001})
+                    resolve.assert_not_called()
+            with self.subTest(name=name, key="ignored_alias"), patch.object(mcp_tools, "resolve_endpoint") as resolve:
+                with self.assertRaisesRegex(ValueError, "120000 ms"):
+                    mcp_tools.call_tool(name, {**required, "timeout_ms": 120000, "timeout": 120001})
+                resolve.assert_not_called()
+
+    def test_artifact_transfer_accepts_exactly_120_seconds(self) -> None:
+        endpoint = {"host": "example.invalid", "port": 22, "local_path": "/tmp/source", "remote_path": "/tmp/dest"}
+        with patch.object(mcp_tools, "remote_artifact_push", return_value={}) as execute:
+            mcp_tools.call_tool("remote_artifact_push", {**endpoint, "timeout_ms": 120000})
+            self.assertEqual(execute.call_args.kwargs["timeout_ms"], 120000)
+
     def test_resources_include_endpoint_index(self) -> None:
         resources = {resource["uri"] for resource in list_resources()}
         self.assertIn("remote://endpoints", resources)

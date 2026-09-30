@@ -6,7 +6,7 @@ from typing import Any
 from remote_dev.observability import observed_tool
 from remote_dev.core.errors import caller_error
 
-from remote_dev.core.artifact_ops import remote_artifact_manifest, remote_artifact_pull, remote_artifact_push
+from remote_dev.core.artifact_ops import remote_artifact_manifest, remote_artifact_pull, remote_artifact_push, validate_artifact_timeout_ms
 from remote_dev.core.context_snapshot import remote_context_snapshot, remote_probe
 from remote_dev.core.endpoint import has_selector, resolve_endpoint, selector_fields
 from remote_dev.core.file_ops import remote_edit, remote_ls, remote_multi_edit, remote_read, remote_write
@@ -230,6 +230,13 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     missing = [key for key in TOOL_SCHEMAS[name].get("required", ()) if key not in args]
     if missing:
         raise caller_error(f"{name} requires {', '.join(missing)}", KeyError)
+    if name in {"remote.artifact_pull", "remote.artifact_push"}:
+        for key in ("timeout_ms", "timeout"):
+            if key in args:
+                try:
+                    validate_artifact_timeout_ms(args[key])
+                except ValueError as exc:
+                    raise caller_error(f"{name} {key}: {exc}") from exc
     endpoint = None
     # Job tools can locate their endpoint from the local job record, so they
     # only resolve when the caller supplied an explicit selector.
