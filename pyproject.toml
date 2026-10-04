@@ -11,7 +11,7 @@ license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "Qi Mao" }]
 dependencies = [
-  "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@7eed6cdb9935f2922b5b280e9d78ad8eb823f5ce",
+  "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@210e96dcbbde364f13a6cd45a4f50488226a8a29",
 ]
 classifiers = [
   "Programming Language :: Python :: 3",
