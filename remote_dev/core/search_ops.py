@@ -78,8 +78,13 @@ def collect_gitignore_rules(base):
     root = git_root(base) or base.resolve()
     rules = []
     seen = set()
-    candidates = [root / ".gitignore"]
-    candidates.extend(sorted(root.rglob(".gitignore")))
+    candidates = []
+    def scan_error(error):
+        raise error
+    for directory, _dirs, files in os.walk(root, onerror=scan_error):
+        if ".gitignore" in files:
+            candidates.append(pathlib.Path(directory) / ".gitignore")
+    candidates.sort()
     for gi in candidates:
         resolved = gi.resolve()
         if resolved in seen or not gi.is_file():

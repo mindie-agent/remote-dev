@@ -228,3 +228,14 @@ def test_absent_state_remains_empty_and_scan_scope_stays_shallow(endpoint):
     assert len(state_store.list_endpoint_records()) == 1
     assert state_store.list_job_records(endpoint.endpoint_id) == []
     assert state_store.find_job_record('job-absent-001') is None
+
+
+def test_completed_manifest_survives_state_directory_failure(endpoint):
+    from remote_dev.core import artifact_ops
+    acknowledged = {'status': 'ok', 'file_count': 1, 'files': [{'path': 'result.bin', 'size': 42}]}
+    with mock.patch.object(artifact_ops, 'run_remote_python', return_value=acknowledged), mock.patch.object(
+            artifact_ops, 'ensure_endpoint_state', side_effect=OSError('cannot create receipt directory')):
+        result = artifact_ops.remote_artifact_manifest(endpoint, remote_path='result.bin')['result']
+    assert result['operation_completed'] and result['status'] == 'local_recording_failed'
+    assert result['manifest']['files'] == acknowledged['files']
+    assert result['refs'] == {}

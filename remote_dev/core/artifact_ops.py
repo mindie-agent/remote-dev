@@ -187,8 +187,8 @@ def remote_artifact_manifest(endpoint: Endpoint, *, remote_path: str, timeout_ms
         data["endpoint_id"] = endpoint.endpoint_id
         artifact_id = f"manifest-{int(time.time())}-{uuid.uuid4().hex[:8]}"
         data["artifact_id"] = artifact_id
-        manifest_path = ensure_endpoint_state(endpoint) / "artifacts" / artifact_id / "manifest.json"
         try:
+            manifest_path = ensure_endpoint_state(endpoint) / "artifacts" / artifact_id / "manifest.json"
             atomic_write_json(manifest_path, data)
         except (OSError, ValueError, RuntimeError) as exc:
             recording_error = f"{type(exc).__name__}: {exc}"
