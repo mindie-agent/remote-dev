@@ -429,6 +429,10 @@ def control_job(request, source, cancel_event=None):
     """
     action = request["action"]
     if action == "launch":
+        if cancel_event is not None and cancel_event.is_set():
+            # A pre-cancelled launch has not prepared or opened its gate. If
+            # this identity already exists, reconcile/cancel that same job.
+            return {**cancel_and_drain(request, source), "cancellation_requested": True}
         started = time.monotonic()
         prepared = control_job({**request, "action": "prepare"}, source, cancel_event)
         prepared_at = time.monotonic()

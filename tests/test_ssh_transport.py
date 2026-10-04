@@ -677,7 +677,7 @@ class LiveStreamTests(unittest.TestCase):
         def failed_stop(owner, **kwargs):
             stop(owner, **kwargs)
             raise OSError("terminal cleanup fixture")
-        command = [sys.executable, "-c", "import sys;print('known output');sys.exit(7)"]
+        command = [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'known output\\n');sys.exit(7)"]
         with mock.patch.object(ssh_transport, "stream_ssh_command", return_value=command), mock.patch.object(
                 ssh_transport.OwnedProcess, "stop", failed_stop):
             with self.assertRaises(RemoteExecutionError) as caught:

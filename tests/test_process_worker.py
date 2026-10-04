@@ -391,6 +391,21 @@ class ProcessWorkerTests(unittest.TestCase):
 
 @unittest.skipIf(sys.platform == "win32", "Linux worker is not a native Windows module")
 class ProcessWorkerEntrypointTests(unittest.TestCase):
+    def test_precancelled_launch_does_not_prepare_or_spawn(self):
+        import threading
+        from unittest import mock
+        worker = load_worker()
+        event = threading.Event()
+        event.set()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+                worker.subprocess, "Popen", side_effect=AssertionError("cancelled launch must not spawn")):
+            request = {"root": directory, "job_id": "job-never-run", "action": "launch",
+                       "spec": {"cwd": directory, "command": "touch forbidden", "env": {},
+                                "timeout_seconds": None}, "authorization": {"token": "test"}}
+            result = worker.control_job(request, worker_source(), event)
+            self.assertEqual(result, {"state": "absent", "quiet": True, "cancellation_requested": True})
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
     def test_main_without_control_bootstrap_fails_with_clear_message(self):
         script = Path(__file__).resolve().parents[1] / "remote_dev" / "processes" / "worker.py"
         request = {"root": "/tmp", "job_id": "job-eeeeeeee", "action": "status"}

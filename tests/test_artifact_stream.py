@@ -108,7 +108,11 @@ class ArtifactStreamTests(unittest.TestCase):
         destination.write_bytes(b"existing bytes")
         manifest = artifact_ops._local_manifest(source)
         manifest["files"][0]["sha256"] = "0" * 64
-        with mock.patch.object(artifact_ops, "_local_manifest", return_value=manifest):
+        # The shipped remote worker targets POSIX paths. This client test
+        # runs its byte protocol on the local OS, including Windows, so keep
+        # path translation separate from the negative-ACK assertion.
+        with mock.patch.object(artifact_ops, "_local_manifest", return_value=manifest), mock.patch.object(
+                artifact_ops, "join_under_root", return_value=str(destination)):
             result = artifact_ops.remote_artifact_push(self.endpoint, local_path=str(source), remote_path=str(destination))["result"]
         self.assertEqual(result["status"], "hash_mismatch")
         self.assertEqual(result["error_details"]["submission_state"], "acknowledged")
