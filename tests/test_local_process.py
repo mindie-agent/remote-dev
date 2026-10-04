@@ -103,6 +103,130 @@ def test_literal_argv_unicode_cwd_env_and_binary_pipes(tmp_path):
     assert os.environ.get('LOCAL_PROCESS_VALUE') == original_env
 
 
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX owner pipe; Windows Job owns caller death')
+@pytest.mark.parametrize('phase', ['running', 'target_exited', 'after_term'])
+def test_caller_sigkill_stops_owned_tree_even_after_target_exit_or_graceful_stop(tmp_path, phase):
+    command = tree_command(tmp_path, phase == 'target_exited')
+    code = f'''
+import pathlib, signal, subprocess, sys, time
+sys.path.insert(0, {str(Path(local_process.__file__).resolve().parents[2])!r})
+from remote_dev.core.local_process import OwnedProcess
+root = pathlib.Path({str(tmp_path)!r})
+owner = OwnedProcess({command!r}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+(root / 'group').write_text(str(owner.process.pid))
+while not (root / 'ready').exists(): time.sleep(.01)
+if {phase!r} == 'target_exited': owner.process.wait()
+if {phase!r} == 'after_term':
+    original = owner._signal_group
+    def during_stop(sig):
+        original(sig)
+        if sig == signal.SIGTERM:
+            (root / 'owner-ready').touch()
+            time.sleep(12)
+    owner._signal_group = during_stop
+    owner.stop(force=False)
+else:
+    (root / 'owner-ready').touch()
+    time.sleep(12)
+'''
+    caller = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    unrelated = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(12)'])
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / 'owner-ready').exists() and time.monotonic() < deadline:
+            if caller.poll() is not None:
+                pytest.fail(caller.stderr.read().decode('utf-8', 'replace'))
+            time.sleep(.01)
+        assert (tmp_path / 'owner-ready').exists(), 'caller fixture did not reach selected lifecycle boundary'
+        caller.kill(); caller.wait(timeout=3)
+        assert_tree_stopped(tmp_path)
+        assert unrelated.poll() is None
+    finally:
+        if caller.poll() is None:
+            caller.kill(); caller.wait(timeout=3)
+        caller.stderr.close()
+        if (tmp_path / 'group').exists():
+            try:
+                os.killpg(int((tmp_path / 'group').read_text()), 9)
+            except ProcessLookupError:
+                pass
+        unrelated.kill(); unrelated.wait(timeout=3)
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='explicit POSIX detached session contract')
+def test_caller_death_preserves_an_explicitly_detached_service(tmp_path):
+    detached = "import os,pathlib,time;pathlib.Path(" + repr(str(tmp_path / 'service')) + ").write_text(str(os.getpid()));time.sleep(15)"
+    target = "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c'," + repr(detached) + "],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);time.sleep(15)"
+    code = (f"import sys,time;sys.path.insert(0,{str(Path(local_process.__file__).resolve().parents[2])!r});"
+            "from remote_dev.core.local_process import OwnedProcess;"
+            f"owner=OwnedProcess([sys.executable,'-c',{target!r}]);time.sleep(15)")
+    caller = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / 'service').exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert (tmp_path / 'service').exists()
+        service = int((tmp_path / 'service').read_text())
+        caller.kill(); caller.wait(timeout=3)
+        time.sleep(.1)
+        assert live(service), 'explicitly detached service lost its independent lifetime'
+    finally:
+        if caller.poll() is None:
+            caller.kill(); caller.wait(timeout=3)
+        if (tmp_path / 'service').exists():
+            try:
+                os.kill(int((tmp_path / 'service').read_text()), 9)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX return codes')
+@pytest.mark.parametrize('command, expected', [
+    ('raise SystemExit(17)', 17),
+    ('import os,signal;os.kill(os.getpid(),signal.SIGTERM)', -15),
+    ('import os,signal;signal.signal(signal.SIGPIPE,signal.SIG_DFL);os.kill(os.getpid(),signal.SIGPIPE)', -13),
+    ('import os,signal;os.kill(os.getpid(),signal.SIGKILL)', -9),
+])
+def test_target_exit_and_signal_status_are_not_replaced_by_supervisor(command, expected):
+    with OwnedProcess([sys.executable, '-c', command], stdin=subprocess.DEVNULL,
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE) as owner:
+        stdout, stderr = owner.process.communicate(timeout=3)
+        assert owner.process.returncode == expected
+        assert stdout == stderr == b''
+
+
+def test_missing_target_retains_native_start_failure(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        OwnedProcess([str(tmp_path / 'missing executable')])
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX descriptor inheritance')
+def test_explicit_target_descriptors_survive_supervisor(tmp_path):
+    with (tmp_path / 'target-output').open('w+b') as output:
+        descriptor = output.fileno()
+        with OwnedProcess([sys.executable, '-c', f'import os;os.write({descriptor},b"target")'],
+                          pass_fds=(descriptor,), stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as owner:
+            owner.process.communicate(timeout=3)
+            assert owner.process.returncode == 0
+        output.seek(0)
+        assert output.read() == b'target'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX startup receipt')
+def test_missing_start_receipt_after_execution_remains_uncertain(tmp_path):
+    from remote_dev.core.errors import RemoteExecutionError
+    (tmp_path / '_posix_owner.py').write_text('import subprocess,sys;subprocess.run(sys.argv[4:],check=True)')
+    marker = tmp_path / 'effect'
+    command = f'from pathlib import Path;Path({str(marker)!r}).write_text("once")'
+    with mock.patch.object(local_process, '__file__', str(tmp_path / 'local_process.py')):
+        with pytest.raises(RemoteExecutionError) as caught:
+            OwnedProcess([sys.executable, '-c', command])
+    assert marker.read_text() == 'once'
+    assert caught.value.submission_state == 'uncertain'
+    assert caught.value.retryable is False
+
+
 @pytest.mark.parametrize('parent_exit', [False, True])
 def test_owned_stop_ends_grandchildren_and_inherited_pipes(tmp_path, parent_exit):
     unrelated = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(15)'])

@@ -996,6 +996,8 @@ def _rewrite_ssh_argv(args: object, fake_script: Path) -> object:
     if not isinstance(args, (list, tuple)) or not args:
         return args
     argv = [str(item) for item in args]
+    if len(argv) >= 7 and Path(argv[2]).name == "_posix_owner.py":
+        return [*argv[:6], *_rewrite_ssh_argv(argv[6:], fake_script)]
     if Path(argv[0]).name.lower() not in {"ssh", "ssh.exe"}:
         return args
     return [sys.executable, str(fake_script), *argv[1:]]
