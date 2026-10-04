@@ -583,7 +583,6 @@ def _patch_result(
     status = str(data.get("status", "failed"))
     changed = data.get("changed_files", []) if isinstance(data.get("changed_files"), list) else []
     outcome = "success" if status == "applied" else ("blocked" if status in {"path_outside_root", "symlink_not_allowed", "not_file", "file_exists"} else "failed")
-    patch_dir = ensure_endpoint_state(endpoint) / "patches"
     result = make_result(
         tool="remote.apply_patch",
         target={**endpoint.to_result_target(), "cwd": cwd},
@@ -594,12 +593,19 @@ def _patch_result(
         duration_ms=_duration_ms(start),
         preview={"diff": data.get("diff_preview", ""), "diffstat": data.get("diffstat", "")},
         changed_files=changed,
-        extra={"error": data.get("error"), "error_details": data.get("error_details")},
+        extra={"error": data.get("error"), "error_details": data.get("error_details"),
+               "rollback_status": data.get("rollback_status")},
     )
-    ref_path = patch_dir / f"{result['invocation_id']}.json"
-    result["refs"]["metadata"] = str(ref_path)
-    atomic_write_json(ref_path, result)
-    return {"text": _format_patch_text(endpoint, cwd, result), "result": result}
+    payload = {"text": _format_patch_text(endpoint, cwd, result), "result": result}
+    try:
+        patch_dir = ensure_endpoint_state(endpoint) / "patches"
+        ref_path = patch_dir / f"{result['invocation_id']}.json"
+        atomic_write_json(ref_path, result)
+        result["refs"]["metadata"] = str(ref_path)
+    except (OSError, ValueError, RuntimeError) as exc:
+        from remote_dev.result import recording_failure
+        return recording_failure(payload, exc, stage="patch_receipt", operation_completed=status == "applied")
+    return payload
 
 
 def _format_patch_text(endpoint: Endpoint, cwd: str, result: dict[str, Any]) -> str:

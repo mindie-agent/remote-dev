@@ -293,8 +293,9 @@ def find_job_record(job_id: str) -> tuple[Path, dict[str, Any]] | None:
         return None
     for path in root.glob(f"*/jobs/{job_id}.json"):
         data = read_json(path)
-        if isinstance(data, dict):
-            return path, data
+        if not isinstance(data, dict):
+            raise ValueError(f"invalid job record: {path}")
+        return path, data
     return None
 
 
@@ -304,12 +305,10 @@ def list_endpoint_records() -> list[dict[str, Any]]:
         return []
     records: list[dict[str, Any]] = []
     for path in sorted(root.glob("*/endpoint.json")):
-        try:
-            data = read_json(path)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(data, dict):
-            records.append({**data, "state_dir": str(path.parent)})
+        data = read_json(path)
+        if not isinstance(data, dict):
+            raise ValueError(f"invalid endpoint record: {path}")
+        records.append({**data, "state_dir": str(path.parent)})
     return records
 
 
@@ -331,12 +330,10 @@ def list_job_records(endpoint_id: str) -> list[dict[str, Any]]:
         return []
     records: list[dict[str, Any]] = []
     for path in sorted(directory.glob("*.json")):
-        try:
-            data = read_json(path)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(data, dict):
-            records.append({**data, "local_record": str(path)})
+        data = read_json(path)
+        if not isinstance(data, dict):
+            raise ValueError(f"invalid job record: {path}")
+        records.append({**data, "local_record": str(path)})
     return records
 
 

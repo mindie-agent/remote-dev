@@ -107,7 +107,12 @@ def remote_probe(endpoint: Endpoint, *, timeout_ms: int | None = None, diagnose_
     data = run_remote_python(endpoint, REMOTE_PROBE_PY, {"root": endpoint.root, "modules": modules or []}, timeout_ms=timeout_ms)
     status = str(data.get("status", "failed"))
     summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
-    snapshot = write_context_snapshot(endpoint, summary, data) if status == "ok" else None
+    recording_error = None
+    try:
+        snapshot = write_context_snapshot(endpoint, summary, data) if status == "ok" else None
+    except (OSError, ValueError, RuntimeError) as exc:
+        snapshot = None
+        recording_error = f"{type(exc).__name__}: {exc}"
     result = make_result(
         tool="remote.probe",
         target=endpoint.to_result_target(),
@@ -131,6 +136,11 @@ def remote_probe(endpoint: Endpoint, *, timeout_ms: int | None = None, diagnose_
             hostname=summary.get("hostname", ""),
             python=summary.get("python", ""),
         )
+    if recording_error:
+        result.update(outcome="failed", status="local_recording_failed", operation_completed=True,
+                      recording_error=recording_error,
+                      summary="Remote probe completed, but the local context snapshot could not be recorded.")
+        text += result["summary"] + "\n" + recording_error + "\n"
     return {"text": text, "result": result}
 
 

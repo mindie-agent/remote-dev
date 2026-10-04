@@ -107,7 +107,7 @@ class SshTransportTests(unittest.TestCase):
             observed["kwargs"] = kwargs
             return subprocess.CompletedProcess(args=args, returncode=0, stdout=b"", stderr=b"")
 
-        with mock.patch.object(ssh_transport.subprocess, "run", fake_run):
+        with mock.patch.object(ssh_transport, "_capture_command", fake_run):
             ssh_transport.run_bytes(endpoint, "cat '/tmp/path with spaces'")
 
         args = observed["args"]
@@ -255,7 +255,7 @@ class SshMuxIsolationTests(unittest.TestCase):
             return subprocess.CompletedProcess(args=args, returncode=0, stdout=b"bytes-out", stderr=b"")
 
         with mock.patch.dict(os.environ, {SSH_MUX_ENV: "0"}):
-            with mock.patch.object(ssh_transport.subprocess, "run", fake_run):
+            with mock.patch.object(ssh_transport, "_capture_command", fake_run):
                 script_result = ssh_transport.run_script(self.endpoint, "echo hi")
                 script_args = list(observed["args"])
                 bytes_result = ssh_transport.run_bytes(self.endpoint, "cat '/tmp/path with spaces'", stdin=b"abc")

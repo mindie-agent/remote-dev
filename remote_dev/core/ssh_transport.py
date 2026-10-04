@@ -95,6 +95,85 @@ class RemoteCompleted:
     timed_out: bool = False
     timings: dict[str, float | None] = field(default_factory=dict)
     cancelled: bool = False
+    cleanup_error: str | None = None
+
+
+@dataclass
+class RemoteBytesCompleted:
+    """Binary SDK result with explicit execution and cleanup facts."""
+    args: list[str]
+    returncode: int | None
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool = False
+    cancelled: bool = False
+    cleanup_error: str | None = None
+
+
+def _capture_command(command, *, input=None, timeout=None):
+    """Capture one owned SSH process; quiet work has no default deadline."""
+    from .cancellation import current_event
+    cancelled = current_event()
+    if cancelled is not None and cancelled.is_set():
+        raise RemoteExecutionError("SSH capture cancelled before launch", category="cancelled", submission_state="not_sent")
+    owner = OwnedProcess(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = owner.process
+    deadline = None if timeout is None else time.monotonic() + timeout
+    first_input = input
+    stdout = stderr = b""
+    observed_exit = None
+    timed_out = was_cancelled = False
+    cleanup = []
+    primary = None
+    try:
+        while True:
+            was_cancelled = cancelled is not None and cancelled.is_set()
+            timed_out = deadline is not None and time.monotonic() >= deadline
+            if was_cancelled or timed_out:
+                observed_exit = proc.poll()
+                try:
+                    owner.stop()
+                    stdout, stderr = proc.communicate(timeout=1)
+                except subprocess.TimeoutExpired as exc:
+                    stdout, stderr = exc.stdout or stdout, exc.stderr or stderr
+                    cleanup.append("SSH output pipes did not close after cancellation")
+                except Exception as exc:
+                    cleanup.append(f"{type(exc).__name__}: {exc}")
+                break
+            try:
+                stdout, stderr = proc.communicate(input=first_input, timeout=.05)
+                observed_exit = proc.returncode
+                break
+            except subprocess.TimeoutExpired as exc:
+                first_input = None
+                stdout, stderr = exc.stdout or stdout, exc.stderr or stderr
+                if proc.poll() is not None:
+                    # The leader exited. A descendant retaining an inherited
+                    # pipe is cleanup work, not an ongoing SSH operation.
+                    observed_exit = proc.returncode
+                    try:
+                        owner.stop()
+                        stdout, stderr = proc.communicate(timeout=1)
+                    except subprocess.TimeoutExpired as tail:
+                        stdout, stderr = tail.stdout or stdout, tail.stderr or stderr
+                        cleanup.append("SSH output pipes did not close after process exit")
+                    except Exception as cleanup_error:
+                        cleanup.append(f"{type(cleanup_error).__name__}: {cleanup_error}")
+                    break
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        try:
+            owner.stop()
+        except Exception as exc:
+            if primary is not None:
+                record_cleanup_failure(primary, exc)
+            else:
+                cleanup.append(f"{type(exc).__name__}: {exc}")
+    # Keep the observed exit before cleanup; a later SIGKILL is not an ACK.
+    return RemoteBytesCompleted(list(command), observed_exit, stdout, stderr, timed_out, was_cancelled,
+                                "; ".join(cleanup) if cleanup else None)
 
 
 def _control_master_options(identity_file: str | None = None) -> list[str]:
@@ -372,19 +451,9 @@ def run_script(endpoint: Endpoint, script: str, *, timeout_ms: int | None = None
             raise ValueError("connection trace is restricted to small diagnostic probes")
         command.insert(1, "-v")
         return _run_traced_script(command, payload, timeout_ms, started, prepared)
-    try:
-        proc = subprocess.run(
-            command,
-            # A text-mode stdin rewrites LF to CRLF on Windows, corrupting
-            # shell options, heredocs and Python payloads on the Linux peer.
-            input=payload,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-        code, stdout, stderr, timed_out = proc.returncode, proc.stdout, proc.stderr, False
-    except subprocess.TimeoutExpired as exc:
-        code, stdout, stderr, timed_out = None, exc.stdout, exc.stderr, True
+    # Byte-oriented stdin preserves LF on Windows and binary payloads.
+    proc = _capture_command(command, input=payload, timeout=timeout)
+    code, stdout, stderr, timed_out = proc.returncode, proc.stdout, proc.stderr, getattr(proc, 'timed_out', False)
     finished = time.perf_counter()
     stdout, stderr = _decode_stream(stdout), _decode_stream(stderr)
     decoded = time.perf_counter()
@@ -395,7 +464,8 @@ def run_script(endpoint: Endpoint, script: str, *, timeout_ms: int | None = None
                # subprocess.run cannot distinguish handshake, remote execution
                # and transfer. Explicit probes may add a remote command timer.
                "connection_ms": None, "remote_execution_ms": None, "transfer_ms": None}
-    return RemoteCompleted(code, stdout, stderr, timed_out=timed_out, timings=timings)
+    return RemoteCompleted(code, stdout, stderr, timed_out=timed_out, timings=timings,
+                           cancelled=getattr(proc, 'cancelled', False), cleanup_error=getattr(proc, 'cleanup_error', None))
 
 
 def _run_traced_script(command, payload, timeout_ms, started, prepared):
@@ -1012,15 +1082,12 @@ def run_bytes(
     *,
     stdin: bytes | None = None,
     timeout_ms: int | None = None,
-) -> subprocess.CompletedProcess[bytes]:
+) -> RemoteBytesCompleted:
     timeout = None if timeout_ms is None else timeout_ms / 1000
-    return subprocess.run(
+    return _capture_command(
         ssh_command(endpoint, f"bash -c {shlex.quote(remote_command)}"),
         input=stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
         timeout=timeout,
-        check=False,
     )
 
 
@@ -1068,24 +1135,30 @@ def run_remote_python(
     if row.get("timed_out") or row.get("cancelled"):
         return {"status": "timeout" if row.get("timed_out") else "cancelled",
                 "error_details": {"category": "command_timeout" if row.get("timed_out") else "command_cancelled",
-                                  "submission_state": "acknowledged", "retryable": False},
+                                  "submission_state": "uncertain" if payload.get("_mutation") else "acknowledged", "retryable": False,
+                                  "exit_code": row["returncode"], "stderr_tail": row["stderr"][-4000:]},
+                "remote_outcome": "unknown" if payload.get("_mutation") else "failed",
                 "error": "remote python timed out" if row.get("timed_out") else "remote python cancelled",
                 "stdout_tail": row["stdout"][-4000:], "stderr_tail": row["stderr"][-4000:]}
     if row["returncode"] != 0:
         return {"status": "failed", "error": "remote python failed", "exit_code": row["returncode"],
-                "error_details": {"category": "command_exit", "submission_state": "acknowledged", "retryable": False},
+                "error_details": {"category": "command_exit", "submission_state": "uncertain" if payload.get("_mutation") else "acknowledged", "retryable": False,
+                                  "exit_code": row["returncode"], "stderr_tail": row["stderr"][-4000:]},
+                "remote_outcome": "unknown" if payload.get("_mutation") else "failed",
                 "stdout_tail": row["stdout"][-4000:], "stderr_tail": row["stderr"][-4000:]}
     try:
         data = json.loads(row["stdout"].strip())
     except json.JSONDecodeError as exc:
         confirmed_failure("remote.python", stage="protocol_decode", category="command_protocol", exception=exc)
         return {"status": "failed", "error": f"remote python returned non-JSON: {exc}",
-                "error_details": {"category": "command_protocol", "submission_state": "acknowledged", "retryable": False},
+                "error_details": {"category": "command_protocol", "submission_state": "uncertain" if payload.get("_mutation") else "acknowledged", "retryable": False,
+                                  "exit_code": row["returncode"], "stderr_tail": row["stderr"][-4000:]},
                 "stdout_tail": row["stdout"][-4000:], "stderr_tail": row["stderr"][-4000:]}
     if not isinstance(data, dict):
         confirmed_failure("remote.python", stage="protocol_decode", category="command_protocol")
         return {"status": "failed", "error": "remote python JSON was not an object",
-                "error_details": {"category": "command_protocol", "submission_state": "acknowledged", "retryable": False}}
+                "error_details": {"category": "command_protocol", "submission_state": "uncertain" if payload.get("_mutation") else "acknowledged", "retryable": False,
+                                  "exit_code": row["returncode"], "stderr_tail": row["stderr"][-4000:]}}
     return data
 
 
@@ -1254,15 +1327,20 @@ class LocalForward:
                 raise RemoteExecutionError("ssh local forward cancelled")
             rc = self._proc.poll()
             if rc is not None:
-                self._owner.stop()
-                stderr = self._consume_stderr()
                 rewritten = _rewrite_forward_exit(rc)
                 detail = f"rc={rewritten}"
                 if rc != rewritten:
                     detail += f", ssh rc={rc}"
-                raise RemoteExecutionError(
-                    f"ssh local forward exited early ({detail}): {stderr[:2000]}"
-                )
+                failure = RemoteExecutionError(f"ssh local forward exited early ({detail})")
+                failure.exit_code = rc
+                try:
+                    self._owner.stop()
+                    stderr = self._consume_stderr()
+                    failure.args = (str(failure) + ": " + stderr[:2000],)
+                    failure.stderr_tail = stderr[-4000:]
+                except Exception as cleanup_error:
+                    record_cleanup_failure(failure, cleanup_error)
+                raise failure
             try:
                 with socket.socket(family, socket.SOCK_STREAM) as sock:
                     sock.settimeout(0.5)
@@ -1288,8 +1366,13 @@ class LocalForward:
     def __enter__(self) -> LocalForward:
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    def __exit__(self, _type, error, _traceback) -> None:
+        try:
+            self.close()
+        except Exception as cleanup_error:
+            if error is None:
+                raise
+            record_cleanup_failure(error, cleanup_error)
 
 
 def open_local_forward(

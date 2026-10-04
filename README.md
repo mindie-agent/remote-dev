@@ -222,10 +222,12 @@ by both the MCP dispatcher and the CLI `--input-json` path):
   Normal Bash startup (including BASH_ENV and SSH .bashrc behavior) is retained;
   arbitrary dynamic initialization is never cached.
 - Managed callers using `processes.control(..., "prepare", spec=...)` can set
-  `prepared_timeout_seconds` (default 120, between 1 and 86400 seconds) for their
-  bounded queue/activation wait. Expiration cancels the unopened gate without
-  running user code. Command `timeout_seconds` starts after activation; a lease
-  heartbeat does not implicitly extend the remote prepared deadline.
+  `prepared_timeout_seconds` for their own queue wait. `go` separately accepts
+  `activation_timeout_seconds` for a caller-defined activation delivery window.
+  Both default to None and accept finite positive numbers when explicitly set.
+  Expiration cancels the unopened gate without running user code. Command
+  `timeout_seconds` starts after activation; a lease heartbeat does not
+  implicitly extend a caller-supplied prepared deadline.
 - Tool arguments outside the published schema, native aliases and registered
   endpoint selectors are rejected before execution. MCP `remote.bash` uses
   `yield_time_ms` and continuation through `session_id`; `wait=True` is an SDK
@@ -625,3 +627,18 @@ operation ID. It excludes raw commands, paths, endpoints and business logs, and
 reports missing or truncated evidence. It never replays work or uploads an issue
 by itself. Monotonic clocks are process-local: do not subtract remote/local UTC
 stamps or sum overlapping RPC, command and parallel-role phase durations.
+
+Observed execution and local recording are separate results. If a command,
+stdin write, file edit or patch is acknowledged and its local receipt cannot be
+saved, the response keeps the actual output, exit/input acknowledgement, file
+hashes or changed paths and reports `local_recording_failed`. Continue observing
+the original job or reading the changed file; do not replay the acknowledged
+write. Unknown supervisor states are failures with an explicit uncertain outcome.
+The supervisor's own failure evidence is kept in its owned `supervisor.log` and
+is separate from user command stdout/stderr.
+
+Direct SDK `run_script` and `run_bytes` use the same owned local process groups as
+attached streams. `run_bytes` returns `RemoteBytesCompleted` with binary output,
+observed return code, `timed_out`, `cancelled` and a separate `cleanup_error`;
+`RemoteCompleted` exposes the same cleanup fact for text capture. Neither has a
+default execution deadline. Local cleanup does not prove a remote write failed.

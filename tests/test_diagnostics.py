@@ -91,11 +91,10 @@ def test_probe_reports_observed_time_and_leaves_connection_transfer_unknown():
 
 @pytest.mark.parametrize("timeout", [False, True])
 def test_script_transport_times_success_and_timeout_without_changing_output(timeout):
-    from remote_dev.core.ssh_transport import run_script
+    from remote_dev.core.ssh_transport import run_script, RemoteBytesCompleted
     endpoint = resolve_endpoint({"host": "192.0.2.1", "port": 22, "ssh_mux": False})
-    kwargs = ({"side_effect": subprocess.TimeoutExpired("ssh", 1, output=b"partial", stderr=b"detail")}
-              if timeout else {"return_value": subprocess.CompletedProcess([], 7, b"partial", b"detail")})
-    with patch("remote_dev.core.ssh_transport.subprocess.run", **kwargs):
+    row = RemoteBytesCompleted([], None if timeout else 7, b"partial", b"detail", timed_out=timeout)
+    with patch("remote_dev.core.ssh_transport._capture_command", return_value=row):
         result = run_script(endpoint, "printf test", timeout_ms=1000)
     assert (result.stdout, result.stderr, result.timed_out) == ("partial", "detail", timeout)
     assert result.returncode == (None if timeout else 7)

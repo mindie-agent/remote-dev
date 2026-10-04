@@ -26,7 +26,8 @@ class RemoteExecutionError(RemoteDevError):
 def record_cleanup_failure(error, cleanup_error):
     """Keep the primary failure and expose cleanup separately to callers."""
     detail = f"{type(cleanup_error).__name__}: {cleanup_error}"[:1000]
-    error.cleanup_error = detail
+    previous = getattr(error, "cleanup_error", None)
+    error.cleanup_error = (previous + "; " + detail)[:4000] if previous else detail
     error.add_note("Cleanup also failed: " + detail)
 
 
@@ -40,6 +41,9 @@ def error_details(exc):
             result["cleanup_error"] = current.cleanup_error
         if getattr(current, "operation_completed", None) is not None:
             result["operation_completed"] = current.operation_completed
+        for key in ("exit_code", "stderr_tail"):
+            if getattr(current, key, None) is not None:
+                result[key] = getattr(current, key)
         if getattr(current, "category", None) == "caller":
             result.update(category="caller", submission_state="not_sent", retryable=False)
             break

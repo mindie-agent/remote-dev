@@ -369,9 +369,13 @@ def remote_read(
     status = str(data.get("status", "failed"))
     refs: dict[str, Any] = {}
     ledger_scope = resolve_ledger_scope(client_context_id)
+    recording_error = None
     if status in {"ok", "partial"} and isinstance(data.get("file"), dict) and data["file"].get("sha256"):
-        ledger = write_read_ledger(endpoint, data["file"], client_context_id)
-        refs["read_ledger"] = str(ledger)
+        try:
+            ledger = write_read_ledger(endpoint, data["file"], client_context_id)
+            refs["read_ledger"] = str(ledger)
+        except (OSError, ValueError, RuntimeError) as exc:
+            recording_error = exc
     file_info = data.get("file", {}) if isinstance(data.get("file"), dict) else {}
     warnings.extend(data.get("warnings", []) if isinstance(data.get("warnings"), list) else [])
     result = make_result(
@@ -388,7 +392,11 @@ def remote_read(
         extra={"file": {k: v for k, v in file_info.items() if k != "content"}, "error": data.get("error"), "error_details": data.get("error_details"), "ledger_scope": ledger_scope},
     )
     text = _format_read_text(endpoint, result, file_info)
-    return {"text": text, "result": result}
+    payload = {"text": text, "result": result}
+    if recording_error:
+        from remote_dev.result import recording_failure
+        return recording_failure(payload, recording_error, stage="read_ledger", operation_completed=True)
+    return payload
 
 
 @observed_tool("remote.ls")
@@ -602,8 +610,12 @@ def _write_like_result(
     file_info = data.get("file", {}) if isinstance(data.get("file"), dict) else {}
     refs: dict[str, Any] = {}
     ledger_scope = resolve_ledger_scope(client_context_id)
+    recording_error = None
     if status in {"written", "edited"} and file_info:
-        refs["read_ledger"] = str(write_read_ledger(endpoint, file_info, client_context_id))
+        try:
+            refs["read_ledger"] = str(write_read_ledger(endpoint, file_info, client_context_id))
+        except (OSError, ValueError, RuntimeError) as exc:
+            recording_error = exc
     changed = []
     if file_info:
         changed.append({
@@ -625,7 +637,11 @@ def _write_like_result(
         changed_files=changed,
         extra={"file": file_info, "error": data.get("error"), "error_details": data.get("error_details"), "ledger_scope": ledger_scope},
     )
-    return {"text": _format_write_text(endpoint, result, data), "result": result}
+    payload = {"text": _format_write_text(endpoint, result, data), "result": result}
+    if recording_error:
+        from remote_dev.result import recording_failure
+        return recording_failure(payload, recording_error, stage="read_ledger", operation_completed=True)
+    return payload
 
 
 def _path_blocked_result(

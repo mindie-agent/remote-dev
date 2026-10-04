@@ -147,10 +147,10 @@ class ProcessWorkerTests(unittest.TestCase):
 
     def test_prepared_deadline_default_long_override_and_invalid_values(self):
         _, default = self.prepare("r", "true")
-        self.assertEqual(default["receipt"]["prepared_timeout_seconds"], 120)
+        self.assertIsNone(default["receipt"]["prepared_timeout_seconds"])
         _, queued = self.prepare("s", "true", prepared_timeout_seconds=7200)
         self.assertEqual(queued["receipt"]["prepared_timeout_seconds"], 7200)
-        for value in (None, 0, 0.5, -1, True, 86401, float("inf"), float("nan"), "120"):
+        for value in (0, -1, True, float("inf"), float("nan"), "120"):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "prepared_timeout_seconds"):
                 self.call("job-invalid-timeout", "prepare", spec={"cwd":str(self.root), "command":"true",
                           "env":{}, "timeout_seconds":10, "prepared_timeout_seconds":value})

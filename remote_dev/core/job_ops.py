@@ -4,6 +4,7 @@ from remote_dev.observability import current_tool, observed_tool
 
 import re
 import json
+import copy
 from dataclasses import asdict
 import shlex
 import time
@@ -29,6 +30,8 @@ RESERVED_ENV_PREFIX = "REMOTE_DEV_JOB_"
 STOP_DRAIN_SECONDS = 2.0
 MAX_YIELD_MS = 300000
 MAX_INCREMENTAL_READ_BYTES = 32768
+UNKNOWN_JOB_STATES = frozenset({"unknown", "uncertain", "lost", "lost_outcome"})
+TERMINAL_JOB_STATES = frozenset({"succeeded", "failed", "timeout", "cancelled"})
 
 
 def _duration_ms(start: float) -> int:
@@ -200,8 +203,12 @@ def _yield_ms(value: int | None, default: int) -> int:
 def _save_output(record, path, row):
     # Hold the record lock from read through exchange and cursor commit.
     # Overwrite from the committed length after a crash before cursor commit.
-    cursors = record.setdefault("stdin_cursors", {})
-    local_offsets = record.setdefault("local_output_offsets", {})
+    # Do not expose a cursor that the local transaction did not commit. If a
+    # file write or the receipt fails, the remote observation still exists and
+    # the next read resumes the previous committed cursor without replaying input.
+    updated = copy.deepcopy(record)
+    cursors = updated.setdefault("stdin_cursors", {})
+    local_offsets = updated.setdefault("local_output_offsets", {})
     for name in ("stdout", "stderr"):
         log = path.with_name(path.stem + "." + name + ".log")
         with log.open("r+b" if log.exists() else "w+b") as stream:
@@ -210,8 +217,10 @@ def _save_output(record, path, row):
             stream.truncate()
             local_offsets[name] = stream.tell()
         cursors[name + "_offset"] = int(row.get(name + "_offset", cursors.get(name + "_offset", 0)))
-    record["state"] = row.get("state", "unknown")
-    atomic_write_json(path, record)
+    updated["state"] = row.get("state", "unknown")
+    atomic_write_json(path, updated)
+    record.clear()
+    record.update(updated)
 
 
 def _session_result(endpoint, record, path, row, *, tool, started, start, budget):
@@ -220,7 +229,8 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
     pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
     exit_code = (row.get("result") or {}).get("exit_code")
     accepted = row.get("accepted", True)
-    outcome = ("failed" if not accepted or state in {"failed", "absent", "lost"}
+    uncertain = state in UNKNOWN_JOB_STATES or bool(row.get("unknown"))
+    outcome = ("failed" if not accepted or uncertain or state in {"failed", "absent"}
                else "timeout" if state == "timeout" else "cancelled" if state == "cancelled" or row.get("cancellation_requested") else "success")
     job_id = record["job_id"]
     summary = f"Remote command {state}." + (f" Exit code: {exit_code}." if exit_code is not None else "")
@@ -234,6 +244,8 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
         warnings.append("Output remains; poll the session to continue from the saved cursor.")
     if not accepted:
         warnings.append(str(row.get("reason") or "stdin rejected"))
+    if uncertain:
+        warnings.append("Remote execution outcome is uncertain; inspect this job without launching or resending input.")
     refs = {"job_record": str(path), "remote_dir": record["remote_dir"]}
     refs.update({name: str(path.with_name(path.stem + "." + name + ".log")) for name in ("stdout", "stderr")})
     result = make_result(
@@ -249,6 +261,12 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
                "stdin": {key: row[key] for key in ("accepted", "written", "written_chars", "eof", "eof_deferred", "stdin_buffer_full", "retryable") if key in row},
                "environment": {key: record.get(key) for key in ("runtime_env", "runtime_env_file", "env_keys", "timeout_ms")}},
     )
+    if uncertain:
+        result["error_details"] = {"category": "job_outcome_unknown", "submission_state": "uncertain", "retryable": False}
+        result["unknown"] = row.get("unknown") or [str(row.get("reason") or state)]
+    if row.get("supervisor_error"):
+        result["supervisor_error"] = row["supervisor_error"]
+        warnings.append("The remote supervisor failed; its error is separate from command output.")
     text = summary + "\n"
     if result["session_id"]:
         text += f"session_id: {job_id}\n"
@@ -258,6 +276,28 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
         if body:
             text += f"__{name.upper()}__\n{body}"
     return {"text": text, "result": result}
+
+
+def _recording_failure(endpoint, record, path, row, error, *, tool, started, start, budget):
+    """An acknowledged remote result survives a failed local output commit."""
+    payload = _session_result(endpoint, record, path, row, tool=tool, started=started, start=start, budget=budget)
+    result = payload["result"]
+    result["execution_outcome"] = result["outcome"]
+    result["outcome"] = "failed"
+    result["status"] = "local_recording_failed"
+    result["session_id"] = record["job_id"]
+    result["local_recording"] = {
+        "status": "failed", "error": f"{type(error).__name__}: {error}",
+        "error_details": error_details(error),
+        "observed_cursors": {name + "_offset": row.get(name + "_offset") for name in ("stdout", "stderr")},
+    }
+    result["error_details"] = {"category": "local_recording", "submission_state": "acknowledged", "retryable": False,
+                               "operation_completed": bool(row.get("quiet")) and row.get("state") in TERMINAL_JOB_STATES}
+    message = "Remote result was received, but local output/cursor recording failed. Do not relaunch the command or resend acknowledged input."
+    result["summary"] += " " + message
+    result["warnings"].append(message)
+    payload["text"] += "\n" + message + "\n" + result["local_recording"]["error"] + "\n"
+    return payload
 
 
 @pinned_endpoint
@@ -297,15 +337,21 @@ def start_remote_job(
                           stdout_offset=0, stderr_offset=0, max_bytes=budget, shared_budget=True,
                           wait_for_exit=wait,
                           yield_time_ms=_yield_ms(yield_time_ms, 10000))
-            _save_output(record, path, row)
+            try:
+                _save_output(record, path, row)
+            except (OSError, ValueError, RuntimeError) as error:
+                return _recording_failure(endpoint, record, path, row, error, tool="remote.bash", started=started, start=start, budget=budget)
             first_output = {name: str(row.get(name) or "") for name in ("stdout", "stderr")}
             while wait and (not row.get("quiet") or any(row.get(name + "_bytes_remaining") for name in ("stdout", "stderr"))):
-                if row.get("state") in {"absent", "lost", "unknown"} or row.get("unknown"):
+                if row.get("state") in UNKNOWN_JOB_STATES | {"absent"} or row.get("unknown"):
                     break
                 row = control(endpoint, job_id, "exchange", **record["stdin_cursors"],
                               max_bytes=MAX_INCREMENTAL_READ_BYTES, shared_budget=True,
                               wait_for_exit=True, yield_time_ms=1000)
-                _save_output(record, path, row)
+                try:
+                    _save_output(record, path, row)
+                except (OSError, ValueError, RuntimeError) as error:
+                    return _recording_failure(endpoint, record, path, row, error, tool="remote.bash", started=started, start=start, budget=budget)
                 for name in ("stdout", "stderr"):
                     left = max(0, budget - sum(len(body.encode("utf-8")) for body in first_output.values()))
                     first_output[name] += str(row.get(name) or "").encode("utf-8")[:left].decode("utf-8", "ignore")
@@ -349,7 +395,7 @@ def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, An
     result = make_result(
         tool="remote.job_status",
         target=endpoint.to_result_target(),
-        outcome="success",
+        outcome="failed" if status in UNKNOWN_JOB_STATES | {"absent"} or supervisor.get("unknown") else "success",
         status=status,
         summary=f"Remote job {job_id} is {status}.",
         started_at=started,
@@ -469,7 +515,10 @@ def remote_job_stdin(endpoint: Endpoint | None, *, job_id: str, chars: str | Non
                             "stdin_buffer_full", "retryable", "reason", "cancellation_requested"):
                     if key in observed:
                         row[key] = observed[key]
-        _save_output(record, path, row)
+        try:
+            _save_output(record, path, row)
+        except (OSError, ValueError, RuntimeError) as error:
+            return _recording_failure(endpoint, record, path, row, error, tool="remote.job_stdin", started=started, start=start, budget=budget)
     return _session_result(endpoint, record, path, row, tool="remote.job_stdin", started=started, start=start, budget=budget)
 
 

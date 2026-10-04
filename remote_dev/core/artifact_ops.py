@@ -182,12 +182,17 @@ def remote_artifact_manifest(endpoint: Endpoint, *, remote_path: str, timeout_ms
         {"root": endpoint.root, "cwd": endpoint.effective_cwd, "remote_path": path},
         timeout_ms=timeout_ms,
     )
+    recording_error = None
     if isinstance(data, dict) and data.get("status") == "ok":
         data["endpoint_id"] = endpoint.endpoint_id
         artifact_id = f"manifest-{int(time.time())}-{uuid.uuid4().hex[:8]}"
         data["artifact_id"] = artifact_id
         manifest_path = ensure_endpoint_state(endpoint) / "artifacts" / artifact_id / "manifest.json"
-        atomic_write_json(manifest_path, data)
+        try:
+            atomic_write_json(manifest_path, data)
+        except (OSError, ValueError, RuntimeError) as exc:
+            recording_error = f"{type(exc).__name__}: {exc}"
+            manifest_path = None
     else:
         manifest_path = None
     status = str(data.get("status", "failed"))
@@ -203,6 +208,11 @@ def remote_artifact_manifest(endpoint: Endpoint, *, remote_path: str, timeout_ms
         artifacts=[data] if status == "ok" else [],
         extra={"manifest": data, "error": data.get("error"), "error_details": data.get("error_details")},
     )
+    if recording_error:
+        result.update(outcome="failed", status="local_recording_failed", operation_completed=True,
+                      recording_error=recording_error,
+                      summary="Remote artifact manifest was received, but local recording failed.")
+        return {"text": result["summary"] + "\n" + recording_error + "\n", "result": result}
     return {"text": f"RemoteArtifactManifest {status}: {path}\nfiles: {data.get('file_count', 0)}\n", "result": result}
 
 
@@ -240,7 +250,7 @@ def remote_artifact_pull(endpoint: Endpoint, *, remote_path: str, local_dir: str
     started, start = utc_now_iso(), time.monotonic()
     manifest_payload = remote_artifact_manifest(endpoint, remote_path=remote_path, timeout_ms=timeout_ms)
     manifest = manifest_payload["result"].get("manifest", {})
-    if manifest.get("status") != "ok":
+    if manifest_payload["result"]["outcome"] != "success" or manifest.get("status") != "ok":
         return manifest_payload
     base = Path(local_dir) if local_dir else ensure_endpoint_state(endpoint) / "artifacts" / uuid.uuid4().hex
     base.mkdir(parents=True, exist_ok=True)

@@ -71,7 +71,7 @@ class RemoteJobControlTests(unittest.TestCase):
     def test_uncertain_supervisor_is_not_quiet_success_of_the_job(self) -> None:
         result = self._status(_supervisor(state="uncertain", quiet=False, unknown=["supervisor lost"]))
         self.assertEqual(result["status"], "uncertain")
-        self.assertEqual(result["outcome"], "success")
+        self.assertEqual(result["outcome"], "failed")
         self.assertFalse(result["job"]["quiet"])
 
     def test_tail_uses_supervisor_logs_not_shell_sentinels(self) -> None:

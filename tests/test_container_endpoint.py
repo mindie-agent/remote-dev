@@ -178,7 +178,7 @@ def test_host_only_entries_reject_containers_before_any_process_or_lookup(call):
 
 
 def test_script_and_binary_primitives_use_the_fixed_container():
-    with mock.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'out', b'err')) as run:
+    with mock.patch.object(ssh, '_capture_command', return_value=subprocess.CompletedProcess([], 0, b'out', b'err')) as run:
         assert ssh.run_script(endpoint(), 'printf out').stdout == 'out'
         assert shlex.split(run.call_args.args[0][-1]) == ['docker', 'exec', '-i', A, 'bash', '-s']
         assert run.call_args.kwargs['input'] == b'printf out'
@@ -189,7 +189,7 @@ def test_script_and_binary_primitives_use_the_fixed_container():
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='Remote scripts target Linux Bash')
 def test_binary_and_stdin_scripts_keep_actual_bash_pipe_redirect_and_env_semantics(tmp_path):
-    original = subprocess.run
+    original = ssh._capture_command
     def launch(argv, **kwargs):
         command = shlex.split(argv[-1])
         assert command[:4] == ['docker', 'exec', '-i', A]
@@ -197,7 +197,7 @@ def test_binary_and_stdin_scripts_keep_actual_bash_pipe_redirect_and_env_semanti
         return original(command[4:], **kwargs)
     output = tmp_path / 'output file'
     script = "value='original environment'; printf '%s\\n' \"$value\" | cat > " + shlex.quote(str(output)) + "; cat " + shlex.quote(str(output))
-    with mock.patch.object(subprocess, 'run', side_effect=launch):
+    with mock.patch.object(ssh, '_capture_command', side_effect=launch):
         result = ssh.run_bytes(endpoint(), script)
         assert result.returncode == 0 and result.stdout == b'original environment\n'
         assert output.read_text() == 'original environment\n'

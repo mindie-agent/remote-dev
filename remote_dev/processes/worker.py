@@ -41,7 +41,6 @@ STDIN_BUFFER_CAP = 262144
 STDIN_WRITE_CHUNK = getattr(select, "PIPE_BUF", 512)
 # States in which a job may still append to its logs.
 LIVE_JOB_STATES = frozenset({"prepared", "running", "uncertain"})
-DEFAULT_PREPARED_TIMEOUT_SECONDS = 120
 
 
 def _utf8_incomplete_tail(chunk):
@@ -199,7 +198,7 @@ def job_status(directory):
         unknown.append("supervisor lost without a descendant-drained receipt")
     if gate and processes:
         spec = read_json(directory / "spec.json")
-        opened = gate.get("opened_at", gate["valid_until"] - 30)
+        opened = gate["opened_at"]
         timeout_seconds = (spec or {}).get("timeout_seconds")
         if timeout_seconds is not None and time.time() >= opened + timeout_seconds:
             # The shell may exit while a background descendant stays alive.
@@ -228,6 +227,7 @@ def job_status(directory):
         public["process_guard"]["retain_until_release"] = True
     return {"state": state, "quiet": not processes and not unknown, "receipt": public,
             "processes": processes, "unknown": unknown, "result": result,
+            "supervisor_error": read_json(directory / "supervisor-error.json"),
             "remote_dir": str(directory), "gate_open": bool(gate)}
 
 
@@ -249,16 +249,17 @@ def worker(directory):
     if interactive:
         fifo_fd = os.open(directory / "stdin.pipe", os.O_RDONLY | os.O_NONBLOCK)
     atomic_json(directory / "supervisor-ready.json", {"pid": os.getpid()})
-    deadline = time.monotonic() + spec.get("prepared_timeout_seconds", DEFAULT_PREPARED_TIMEOUT_SECONDS)
+    prepared_timeout = spec.get("prepared_timeout_seconds")
+    deadline = None if prepared_timeout is None else time.monotonic() + prepared_timeout
     while not (directory / "go.json").exists():
-        if (directory / "stop.json").exists() or time.monotonic() >= deadline:
+        if (directory / "stop.json").exists() or (deadline is not None and time.monotonic() >= deadline):
             if fifo_fd is not None:
                 os.close(fifo_fd)
             atomic_json(directory / "result.json", {"state": "cancelled", "reason": "start gate not opened", "descendants_drained": True})
             return
         time.sleep(0.1)
     gate = read_json(directory / "go.json")
-    if (directory / "stop.json").exists() or gate["valid_until"] <= time.time():
+    if (directory / "stop.json").exists() or (gate.get("valid_until") is not None and gate["valid_until"] <= time.time()):
         if fifo_fd is not None:
             os.close(fifo_fd)
         atomic_json(directory / "result.json", {"state": "cancelled", "reason": "activation ticket expired", "descendants_drained": True})
@@ -510,9 +511,9 @@ def control_job(request, source, cancel_event=None):
             timeout_seconds = spec.get("timeout_seconds")
             if timeout_seconds is not None and (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
                 raise ValueError("jobs require timeout_seconds None or a finite positive number")
-            prepared_timeout = spec.get("prepared_timeout_seconds", DEFAULT_PREPARED_TIMEOUT_SECONDS)
-            if type(prepared_timeout) not in (int, float) or not 1 <= prepared_timeout <= 86400:
-                raise ValueError("jobs require prepared_timeout_seconds a number in [1, 86400]")
+            prepared_timeout = spec.get("prepared_timeout_seconds")
+            if prepared_timeout is not None and (type(prepared_timeout) not in (int, float) or not math.isfinite(prepared_timeout) or prepared_timeout <= 0):
+                raise ValueError("jobs require prepared_timeout_seconds None or a finite positive number")
             if any(not ENV_NAME_RE.fullmatch(key) or key.startswith(JOB_ENV_PREFIX) for key in spec["env"]):
                 raise ValueError("invalid or reserved environment variable")
             for flag in ("interactive", "tty"):
@@ -538,29 +539,50 @@ def control_job(request, source, cancel_event=None):
             script.write_text(source)
             os.chmod(script, 0o600)
             marker = uuid.uuid4().hex
-            process = subprocess.Popen(
-                [sys.executable, str(script), "--worker", str(directory)],
-                env={**os.environ, JOB_TOKEN_ENV: marker},
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            identity = process_identity(process.pid)
-            if not identity or identity["pgid"] != process.pid:
-                raise RuntimeError("waiting supervisor has no verified process identity")
-            atomic_json(directory / "receipt.json", {**identity, "boot_id": boot_id(), "marker": marker,
-                                                      "diagnostics_context": {key: value for key, value in (request.get("diagnostics_context") or {}).items()
-                                                          if key in {"trace_id", "operation_id", "parent_operation_id"}
-                                                          and isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value)},
-                                                      "supervision": "subreaper", "job_id": identifier,
-                                                      "prepared_timeout_seconds": prepared_timeout,
-                                                      "prepared_at": time.time()})
-            while not (directory / "supervisor-ready.json").exists():
-                if cancel_event is not None and cancel_event.is_set():
-                    atomic_json(directory / "stop.json", {"requested_at": time.time()})
-                    raise RuntimeError("supervisor preparation cancelled; inspect the original job receipt")
-                if process.poll() is not None:
-                    raise RuntimeError("waiting supervisor did not enable descendant supervision")
-                time.sleep(0.02)
+            with (directory / "supervisor.log").open("ab") as supervisor_log:
+                process = subprocess.Popen(
+                    [sys.executable, str(script), "--worker", str(directory)],
+                    env={**os.environ, JOB_TOKEN_ENV: marker},
+                    stdin=subprocess.DEVNULL, stdout=supervisor_log, stderr=supervisor_log,
+                    start_new_session=True,
+                )
+            try:
+                identity = process_identity(process.pid)
+                if not identity or identity["pgid"] != process.pid:
+                    raise RuntimeError("waiting supervisor has no verified process identity")
+                atomic_json(directory / "receipt.json", {**identity, "boot_id": boot_id(), "marker": marker,
+                                                          "diagnostics_context": {key: value for key, value in (request.get("diagnostics_context") or {}).items()
+                                                              if key in {"trace_id", "operation_id", "parent_operation_id"}
+                                                              and isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value)},
+                                                          "supervision": "subreaper", "job_id": identifier,
+                                                          "prepared_timeout_seconds": prepared_timeout,
+                                                          "prepared_at": time.time()})
+                while not (directory / "supervisor-ready.json").exists():
+                    if cancel_event is not None and cancel_event.is_set():
+                        atomic_json(directory / "stop.json", {"requested_at": time.time()})
+                        raise RuntimeError("supervisor preparation cancelled; inspect the original job receipt")
+                    if process.poll() is not None:
+                        with (directory / "supervisor.log").open("rb") as log:
+                            log.seek(max(0, log.seek(0, 2) - 8000))
+                            detail = log.read().decode("utf-8", "replace")
+                        raise RuntimeError(f"waiting supervisor exited with {process.returncode} before readiness: {detail}")
+                    time.sleep(0.02)
+            except BaseException as error:
+                # The job mutation lock still excludes go: no command has
+                # been activated. Reclaim our exact waiting child on failure,
+                # including failure to persist its receipt, without any TTL.
+                try:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                except Exception as cleanup_error:
+                    error.cleanup_error = f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    error.add_note("Supervisor cleanup also failed: " + error.cleanup_error)
+                raise
         elif action == "go":
             status = job_status(directory)
             existing = read_json(directory / "go.json")
@@ -571,7 +593,11 @@ def control_job(request, source, cancel_event=None):
             if status["state"] != "prepared" or (directory / "stop.json").exists():
                 raise RuntimeError("job is not a verified waiting supervisor")
             opened = time.time()
-            atomic_json(directory / "go.json", {"authorization": request["authorization"], "opened_at": opened, "valid_until": opened + 30})
+            activation_timeout = request.get("activation_timeout_seconds")
+            if activation_timeout is not None and (type(activation_timeout) not in (int, float) or not math.isfinite(activation_timeout) or activation_timeout <= 0):
+                raise ValueError("jobs require activation_timeout_seconds None or a finite positive number")
+            atomic_json(directory / "go.json", {"authorization": request["authorization"], "opened_at": opened,
+                                               "valid_until": None if activation_timeout is None else opened + activation_timeout})
         elif action == "stop":
             receipt = read_json(directory / "receipt.json")
             if receipt is None:
@@ -712,9 +738,53 @@ def control_job(request, source, cancel_event=None):
         return job_status(directory)
 
 
+def run_supervisor(directory):
+    """Retain an internal failure and drain children before publishing it.
+
+    The supervisor's own evidence is separate from the command's stdout/stderr.
+    Failure to observe/reclaim descendants is uncertainty, never clean exit.
+    """
+    try:
+        worker(directory)
+    except BaseException as exc:
+        import traceback
+        detail = {"type": type(exc).__name__, "message": str(exc)[-4000:],
+                  "log": str(directory / "supervisor.log")}
+        sys.stderr.write(traceback.format_exc()[-8000:])
+        sys.stderr.flush()
+        try:
+            atomic_json(directory / "supervisor-error.json", detail)
+            receipt = read_json(directory / "receipt.json")
+            deadline = time.monotonic() + 5
+            drained = False
+            if receipt is not None:
+                while True:
+                    processes, unknown = owned_processes(receipt)
+                    children = [row for row in processes if row["pid"] != os.getpid()]
+                    if not children and not unknown:
+                        drained = True
+                        break
+                    signal_processes(children, signal.SIGKILL)
+                    with contextlib.suppress(ChildProcessError):
+                        while os.waitpid(-1, os.WNOHANG)[0]:
+                            pass
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(.02)
+            if drained:
+                atomic_json(directory / "result.json", {"state": "failed", "reason": "supervisor failed",
+                                                       "descendants_drained": True, "supervisor_error": detail})
+        except BaseException:
+            # The original exception is already durable in supervisor.log.
+            # Append cleanup/record failure without replacing the primary.
+            sys.stderr.write("Supervisor cleanup/recording also failed:\n" + traceback.format_exc()[-8000:])
+            sys.stderr.flush()
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--worker":
-        worker(Path(sys.argv[2]))
+        run_supervisor(Path(sys.argv[2]))
     else:
         worker_source = globals().get("WORKER_SOURCE")
         if worker_source is None:

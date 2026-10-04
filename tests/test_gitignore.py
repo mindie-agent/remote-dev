@@ -72,7 +72,7 @@ class RespectGitignoreTests(unittest.TestCase):
         self.assertIn("keep.py", relpaths)
         self.assertNotIn("skip.pyc", relpaths)
         self.assertFalse(any(item == "build" or item.startswith("build/") for item in relpaths))
-        self.assertEqual(data.get("warnings"), [])
+        self.assertIn("git is unavailable", " ".join(data.get("warnings", [])))
 
     def test_git_check_ignore_filters_in_a_worktree(self) -> None:
         git = shutil.which("git")

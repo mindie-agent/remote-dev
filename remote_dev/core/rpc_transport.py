@@ -22,8 +22,9 @@ from pathlib import Path
 from .cancellation import current_event
 from .errors import RemoteExecutionError, record_cleanup_failure
 from .execution import timeout_value
+from .local_process import OwnedProcess
 from mindie_diagnostics import get_recorder, current_context
-from remote_dev.observability import observed_operation
+from remote_dev.observability import observed_operation, current_tool
 from .container_endpoint import pin_container_endpoint
 
 
@@ -35,35 +36,49 @@ class RpcConnection:
         helper = (Path(__file__).parents[1] / "processes" / "mutation.py").read_text(encoding="utf-8")
         source = source.replace("# REMOTE_DEV_MUTATION_LOCK", helper)
         transport_endpoint = replace(endpoint, ssh_mux=False, keepalive=True)
-        self.proc = subprocess.Popen(
+        self.owner = OwnedProcess(
             ssh_command(transport_endpoint, "python3 -u -c " + shlex.quote(source)),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
+        self.proc = self.owner.process
         self.write_lock = threading.Lock()
         self.state_lock = threading.Lock()
         self.pending = {}
         self.sent_codes = OrderedDict()
         self.sequence = 0
         self.closed = False
+        self.close_lock = threading.Lock()
+        self.stop_lock = threading.Lock()
+        self.cleanup_error = None
         self.error_tail = bytearray()
         self.ready = threading.Event()
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.errors = threading.Thread(target=self._stderr, daemon=True)
-        self.reader.start()
         self.errors.start()
+        self.reader.start()
 
     def _stderr(self):
-        while True:
-            chunk = self.proc.stderr.read(1024)
-            if not chunk:
-                return
-            self.error_tail.extend(chunk)
-            del self.error_tail[:-4000]
+        try:
+            while True:
+                chunk = self.proc.stderr.read1(1024)
+                if not chunk:
+                    return
+                self.error_tail.extend(chunk)
+                del self.error_tail[:-4000]
+        except (OSError, ValueError):
+            return
+
+    def _stop_owner(self):
+        with self.stop_lock:
+            self.owner.stop()
 
     def _read(self):
+        failure = "SSH RPC disconnected; submitted operation outcome may be unknown"
         try:
             for line in self.proc.stdout:
                 value = json.loads(line.decode("utf-8"))
+                if not isinstance(value, dict) or not ("result" in value or "error" in value or value.get("ready")):
+                    raise ValueError("SSH RPC returned an invalid response object")
                 if value.get("id") == 0 and value.get("ready"):
                     self.ready.set()
                     continue
@@ -72,18 +87,30 @@ class RpcConnection:
                 if waiter is not None:
                     waiter.put(value)
         except (OSError, ValueError) as exc:
-            self._fail(str(exc))
+            failure = f"SSH RPC protocol failed: {exc}; submitted operation outcome may be unknown"
         finally:
-            self._fail("SSH RPC disconnected; submitted operation outcome may be unknown")
+            # EOF/protocol loss is a failed channel, not a slow operation.
+            # Reclaim its owned family so proxy children cannot retain pipes.
+            try:
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    self.proc.wait(timeout=.1)
+                self._stop_owner()
+            except Exception as exc:
+                self.cleanup_error = f"{type(exc).__name__}: {exc}"
+            self.errors.join(timeout=1)
+            self._fail(failure)
 
     def _fail(self, reason):
         with self.state_lock:
             self.closed = True
             waiters = list(self.pending.values())
         self.ready.set()
+        detail = self.error_tail.decode("utf-8", "replace")
         for waiter in waiters:
-            waiter.put({"error": {"type": "RemoteExecutionError", "message": reason,
-                                  "category": "rpc_disconnected", "submission_state": "uncertain"}})
+            waiter.put({"error": {"type": "RemoteExecutionError", "message": reason + (": " + detail if detail else ""),
+                                  "category": "rpc_disconnected", "submission_state": "uncertain",
+                                  "exit_code": self.proc.poll(), "stderr_tail": detail,
+                                  **({"cleanup_error": self.cleanup_error} if self.cleanup_error else {})}})
 
     def _send(self, value):
         data = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
@@ -159,7 +186,7 @@ class RpcConnection:
                 try:
                     value = waiter.get(timeout=min(0.05, remaining))
                 except queue.Empty:
-                    if self.proc.poll() is not None:
+                    if self.proc.poll() is not None and not self.reader.is_alive():
                         self._fail("SSH RPC process exited; submitted operation outcome may be unknown")
                     continue
                 if "error" in value:
@@ -167,10 +194,14 @@ class RpcConnection:
                     exception = {"ValueError": ValueError, "FileNotFoundError": FileNotFoundError,
                                  "NotADirectoryError": NotADirectoryError}.get(error.get("type"), RemoteExecutionError)
                     if exception is RemoteExecutionError:
-                        raise exception(error.get("message", "SSH RPC failed"),
+                        failure = exception(error.get("message", "SSH RPC failed"),
                                         category=error.get("category", "remote_execution"),
                                         submission_state=error.get("submission_state", "acknowledged"),
                                         retryable=error.get("retryable", False))
+                        for key in ("exit_code", "stderr_tail", "cleanup_error"):
+                            if error.get(key) is not None:
+                                setattr(failure, key, error[key])
+                        raise failure
                     failure = exception(error.get("message", "SSH RPC failed"))
                     failure.category = error.get("category", "remote_execution")
                     failure.submission_state = error.get("submission_state", "acknowledged")
@@ -191,18 +222,35 @@ class RpcConnection:
                 self.pending.pop(identifier, None)
 
     def close(self):
-        with contextlib.suppress(OSError, ValueError):
-            self.proc.stdin.close()
-        if self.proc.poll() is None:
-            try:
-                self.proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-        self._fail("SSH RPC connection closed")
-        for stream in (self.proc.stdout, self.proc.stderr):
+        with self.close_lock:
+            failures = []
             with contextlib.suppress(OSError, ValueError):
-                stream.close()
+                self.proc.stdin.close()
+            try:
+                if self.proc.poll() is None:
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        self.proc.wait(timeout=2)
+                self._stop_owner()
+            except Exception as exc:
+                failures.append(exc)
+            for thread, stream in ((self.reader, self.proc.stdout), (self.errors, self.proc.stderr)):
+                thread.join(timeout=1)
+                try:
+                    # BufferedReader.close must not wait behind a stuck read
+                    # when process cleanup itself has failed.
+                    if thread.is_alive():
+                        raise RuntimeError("SSH RPC pipe reader did not stop during cleanup")
+                    stream.close()
+                except Exception as exc:
+                    failures.append(exc)
+            self._fail("SSH RPC connection closed; submitted operation outcome may be unknown")
+            if self.cleanup_error:
+                failures.append(RuntimeError(self.cleanup_error))
+            if failures:
+                failure = RemoteExecutionError("SSH RPC cleanup failed", category="cleanup")
+                for exc in failures:
+                    record_cleanup_failure(failure, exc)
+                raise failure
 
 
 @dataclass
@@ -219,6 +267,7 @@ _pool_lock = threading.Condition()
 _POOL_LIMIT = 32
 _IDLE_SECONDS = 300
 _reaper_started = False
+_cleanup_failures = []
 
 
 def _idle_connections(now):
@@ -236,7 +285,11 @@ def _reap_idle():
             if connections:
                 _pool_lock.notify_all()
         for connection in connections:
-            connection.close()
+            try:
+                connection.close()
+            except Exception as exc:
+                with _pool_lock:
+                    _cleanup_failures.append(exc)
 
 
 def _acquire(endpoint, key):
@@ -316,6 +369,14 @@ def request(endpoint, kind, source, payload, *, timeout_ms=None):
         result = entry.connection.request(kind, source, payload, timeout_ms)
         if isinstance(result, dict):
             result["transport"]["pool_wait_ms"] = round((acquired-started)*1000)
+            with _pool_lock:
+                if _cleanup_failures:
+                    failures = [f"{type(exc).__name__}: {exc}"[:1000] for exc in _cleanup_failures]
+                    result["transport"]["cleanup_errors"] = failures
+                    active = current_tool()
+                    if active is not None:
+                        active.setdefault("cleanup_errors", []).extend(failures)
+                    _cleanup_failures.clear()
         return result
     finally:
         with _pool_lock:
@@ -329,9 +390,19 @@ def close_connections():
     with _pool_lock:
         connections = [entry.connection for entry in _pool.values() if entry.connection is not None]
         _pool.clear()
+        failures = list(_cleanup_failures)
+        _cleanup_failures.clear()
         _pool_lock.notify_all()
     for connection in connections:
-        connection.close()
+        try:
+            connection.close()
+        except Exception as exc:
+            failures.append(exc)
+    if failures:
+        failure = RemoteExecutionError("SSH RPC pool cleanup failed", category="cleanup")
+        for exc in failures:
+            record_cleanup_failure(failure, exc)
+        raise failure
 
 
 atexit.register(close_connections)

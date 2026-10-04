@@ -18,6 +18,7 @@ from .atomic import publish_file
 from .errors import RemoteExecutionError, record_cleanup_failure
 from .locking import path_lock
 from .execution import timeout_value
+from .local_process import OwnedProcess
 
 CHUNK_SIZE = 1024 * 1024
 
@@ -38,10 +39,13 @@ class ArtifactStream:
         source = (Path(__file__).parents[1] / "processes" / "artifact_worker.py").read_text(encoding="utf-8")
         helper = (Path(__file__).parents[1] / "processes" / "mutation.py").read_text(encoding="utf-8")
         source = source.replace("# REMOTE_DEV_MUTATION_LOCK", helper)
-        self.proc = subprocess.Popen(
+        self.owner = OwnedProcess(
             ssh_command(replace(endpoint, ssh_mux=False, keepalive=True), "python3 -u -c " + shlex.quote(source)),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
+        self.proc = self.owner.process
+        self.stop_lock = threading.Lock()
+        self.cleanup_error = None
         self.done = threading.Event()
         self.cancelled = current_event()
         self.deadline = None if timeout_ms is None else time.monotonic() + timeout_ms / 1000
@@ -73,13 +77,16 @@ class ArtifactStream:
             elif self.proc.poll() is not None:
                 return  # EOF/error is reported by the stream reader.
             if self.reason:
-                with contextlib.suppress(OSError):
-                    self.proc.kill()
+                try:
+                    with self.stop_lock:
+                        self.owner.stop()
+                except Exception as exc:
+                    self.cleanup_error = exc
                 return
 
     def _drain(self):
         while True:
-            chunk = self.proc.stderr.read(1024)
+            chunk = self.proc.stderr.read1(1024)
             if not chunk:
                 return
             self.stderr.extend(chunk)
@@ -168,18 +175,36 @@ class ArtifactStream:
         return item["sha256"]
 
     def close(self):
+        self.done.set()
+        failures = []
         with contextlib.suppress(OSError):
             self.proc.stdin.close()
         try:
-            self.proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait(timeout=5)
-        self.done.set()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self.proc.wait(timeout=2)
+            with self.stop_lock:
+                self.owner.stop()
+        except Exception as exc:
+            failures.append(exc)
         self.guard.join(timeout=1)
         self.drain.join(timeout=1)
+        for thread in (self.guard, self.drain):
+            if thread.is_alive():
+                failures.append(RuntimeError("artifact pipe cleanup did not complete"))
         for stream in (self.proc.stdout, self.proc.stderr):
-            stream.close()
+            try:
+                if stream is self.proc.stderr and self.drain.is_alive():
+                    continue  # close must not block behind an uncollected read.
+                stream.close()
+            except Exception as exc:
+                failures.append(exc)
+        if self.cleanup_error:
+            failures.append(self.cleanup_error)
+        if failures:
+            failure = ArtifactTransferError("artifact stream cleanup failed", category="cleanup")
+            for exc in failures:
+                record_cleanup_failure(failure, exc)
+            raise failure
 
     def __enter__(self):
         return self

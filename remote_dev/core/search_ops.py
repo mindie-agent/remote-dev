@@ -59,7 +59,7 @@ def parse_gitignore_file(path):
     rules = []
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    except FileNotFoundError:
         return rules
     for raw in lines:
         line = raw.strip()
@@ -79,15 +79,9 @@ def collect_gitignore_rules(base):
     rules = []
     seen = set()
     candidates = [root / ".gitignore"]
-    try:
-        candidates.extend(sorted(root.rglob(".gitignore")))
-    except OSError:
-        pass
+    candidates.extend(sorted(root.rglob(".gitignore")))
     for gi in candidates:
-        try:
-            resolved = gi.resolve()
-        except OSError:
-            continue
+        resolved = gi.resolve()
         if resolved in seen or not gi.is_file():
             continue
         seen.add(resolved)
@@ -181,9 +175,15 @@ def apply_gitignore(base, matches):
                 input="".join(rel + "\0" for rel in rels).encode("utf-8"),
                 capture_output=True,
             )
+            if chk.returncode not in (0, 1):
+                fail("failed", chk.stderr.decode("utf-8", "replace"), exit_code=chk.returncode)
             ignored = {part.decode("utf-8", "replace") for part in chk.stdout.split(b"\0") if part}
             return [item for item in matches if item["relpath"] not in ignored], warnings
+        elif git_root(base) is not None:
+            fail("failed", probe.stderr, exit_code=probe.returncode)
     root, rules = collect_gitignore_rules(base)
+    if git is None:
+        warnings.append("git is unavailable; .gitignore matching used the documented in-process rules.")
     if not rules:
         return matches, warnings
     try:
@@ -284,7 +284,7 @@ if op == "glob":
         path = base / item
         try:
             st = path.lstat()
-        except OSError:
+        except FileNotFoundError:
             continue
         row = {"path": str(path), "relpath": item, "type": "directory" if path.is_dir() else "file", "mtime_ns": st.st_mtime_ns, "size": st.st_size}
         seen += 1

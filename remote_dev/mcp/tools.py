@@ -132,6 +132,8 @@ def _job_record(endpoint_id: str, job_id: str) -> dict[str, Any]:
 def _read_job_log(record: dict[str, Any], stream: str) -> str:
     endpoint = endpoint_from_job_record(record)
     supervisor = control(endpoint, str(record["job_id"]), "tail", lines=200)
+    if stream not in supervisor:
+        raise FileNotFoundError(f"remote {stream} log is unavailable for job {record['job_id']} (state={supervisor.get('state', 'unknown')})")
     text = str(supervisor.get(stream) or "")
     encoded = text.encode("utf-8", errors="replace")
     if len(encoded) > RESOURCE_LOG_LIMIT_BYTES:
