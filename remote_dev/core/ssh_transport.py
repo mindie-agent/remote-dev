@@ -556,9 +556,11 @@ def run_stream(
             if primary_error is not None:
                 record_cleanup_failure(primary_error, cleanup_error)
             else:
+                completed_with_exit = completed is not None and completed.returncode is not None
                 failure = RemoteExecutionError("attached SSH operation ended but local cleanup failed",
-                                               category="cleanup", submission_state="acknowledged")
-                failure.operation_completed = completed is not None and completed.returncode is not None
+                                               category="cleanup",
+                                               submission_state="acknowledged" if completed_with_exit else "uncertain")
+                failure.operation_completed = completed_with_exit
                 failure.completed = completed
                 record_cleanup_failure(failure, cleanup_error)
                 raise failure from cleanup_error
@@ -799,6 +801,23 @@ def _read_attached(
         stderr = next((channel for channel in channels if channel.name == "stderr"), None)
         return "" if stderr is None else "".join(stderr.captured)
 
+    def stop_owner() -> None:
+        # Capture the observed exit before cleanup: a subsequent kill must
+        # not manufacture acknowledgement of the original remote operation.
+        returncode = proc.poll()
+        try:
+            owner.stop()
+        except Exception as cleanup_error:
+            failure = RemoteExecutionError("attached SSH cleanup failed",
+                                           category="cleanup",
+                                           submission_state="acknowledged" if returncode is not None else "uncertain")
+            failure.operation_completed = returncode is not None
+            failure.completed = RemoteCompleted(returncode,
+                                                captured_stdout() if capture else "",
+                                                captured_stderr() if capture else "")
+            record_cleanup_failure(failure, cleanup_error)
+            raise failure from cleanup_error
+
     def finalize_open_channels() -> None:
         for channel in channels:
             leftover = ""
@@ -868,13 +887,13 @@ def _read_attached(
                 failure = RemoteExecutionError("attached SSH operation cancelled; remote outcome may be unknown",
                                                category="cancelled", submission_state="uncertain")
                 try:
-                    owner.stop()
+                    stop_owner()
                 except Exception as cleanup_error:
                     record_cleanup_failure(failure, cleanup_error)
                 raise failure
             wait = remaining_wait()
             if wait is not None and wait <= 0:
-                owner.stop()
+                stop_owner()
                 return timed_out_result()
             if not open_fds:
                 # Pipes have closed. Wait until the real deadline (or forever
@@ -919,13 +938,13 @@ def _read_attached(
                         final=False,
                     )
                 if proc.poll() is not None:
-                    owner.stop()
+                    stop_owner()
                 continue
             if proc.poll() is None:
                 continue
             # Parent exit does not close descriptors inherited by a proxy child.
             # Stop the owned local group before draining or closing its pipes.
-            owner.stop()
+            stop_owner()
             pipes.finish_readers()
             drained = pipes.drain(open_fds)
             for fd, chunk in drained:
@@ -976,7 +995,7 @@ def _read_attached(
         raise
     finally:
         try:
-            owner.stop()
+            stop_owner()
         except Exception as cleanup_error:
             if primary_error is None:
                 raise

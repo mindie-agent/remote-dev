@@ -628,11 +628,12 @@ class LiveStreamTests(unittest.TestCase):
         from remote_dev.core.errors import error_details
         primary = RemoteExecutionError("cancel fixture", category="cancelled", submission_state="uncertain")
         completed = ssh_transport.RemoteCompleted(7, "recorded stdout", "recorded stderr")
+        timed_out = ssh_transport.RemoteCompleted(None, "partial output", "timeout", timed_out=True)
         stop = ssh_transport.OwnedProcess.stop
         def failed_stop(owner, **kwargs):
             stop(owner, **kwargs)
             raise OSError("cleanup fixture")
-        for result in (primary, completed):
+        for result in (primary, completed, timed_out):
             with self.subTest(primary=isinstance(result, Exception)):
                 options = {"side_effect": result} if isinstance(result, Exception) else {"return_value": result}
                 with mock.patch.object(ssh_transport, "stream_ssh_command", return_value=[sys.executable, "-c", "pass"]), mock.patch.object(
@@ -643,10 +644,14 @@ class LiveStreamTests(unittest.TestCase):
                 if result is primary:
                     self.assertIs(caught.exception, primary)
                     self.assertEqual(caught.exception.submission_state, "uncertain")
-                else:
+                elif result is completed:
                     self.assertTrue(caught.exception.operation_completed)
                     self.assertIs(caught.exception.completed, completed)
                     self.assertEqual(caught.exception.submission_state, "acknowledged")
+                else:
+                    self.assertFalse(caught.exception.operation_completed)
+                    self.assertIs(caught.exception.completed, timed_out)
+                    self.assertEqual(caught.exception.submission_state, "uncertain")
 
     def test_cancel_keeps_its_state_when_reader_cleanup_also_fails(self) -> None:
         import threading
@@ -665,6 +670,23 @@ class LiveStreamTests(unittest.TestCase):
         self.assertEqual(caught.exception.category, "cancelled")
         self.assertEqual(caught.exception.submission_state, "uncertain")
         self.assertIn("reader cleanup fixture", error_details(caught.exception)["cleanup_error"])
+
+    def test_real_exit_result_survives_reader_cleanup_failure(self) -> None:
+        from remote_dev.core.errors import error_details
+        stop = ssh_transport.OwnedProcess.stop
+        def failed_stop(owner, **kwargs):
+            stop(owner, **kwargs)
+            raise OSError("terminal cleanup fixture")
+        command = [sys.executable, "-c", "import sys;print('known output');sys.exit(7)"]
+        with mock.patch.object(ssh_transport, "stream_ssh_command", return_value=command), mock.patch.object(
+                ssh_transport.OwnedProcess, "stop", failed_stop):
+            with self.assertRaises(RemoteExecutionError) as caught:
+                ssh_transport.run_stream(self.endpoint, "", merge_stderr=False)
+        self.assertTrue(caught.exception.operation_completed)
+        self.assertEqual(caught.exception.completed.returncode, 7)
+        self.assertEqual(caught.exception.completed.stdout, "known output\n")
+        self.assertEqual(caught.exception.submission_state, "acknowledged")
+        self.assertIn("terminal cleanup fixture", error_details(caught.exception)["cleanup_error"])
 
     def test_stream_stdin_command_preserves_remote_timeout_and_independence(self) -> None:
         argv = ssh_transport.stream_ssh_command(self.endpoint, None, timeout_ms=120000)
