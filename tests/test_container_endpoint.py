@@ -323,14 +323,19 @@ def test_real_worker_and_artifact_pipes_run_through_docker_exec_adapter(tmp_path
     ep = replace(endpoint(), root=str(root), cwd=str(root))
     original = subprocess.Popen
     commands = []
-    def launch(argv, **kwargs):
+    def rewrite(argv):
+        # Keep the real caller-death supervisor; adapt only its target argv.
+        if len(argv) >= 7 and Path(argv[2]).name == '_posix_owner.py':
+            return [*argv[:6], *rewrite(argv[6:])]
         if argv[0] == 'container-test-ssh':
             command = shlex.split(argv[-1])
             assert command[:4] == ['docker', 'exec', '-i', A]
             assert command[4] == 'python3'
             commands.append(command)
             argv = [sys.executable, *command[5:]]
-        return original(argv, **kwargs)
+        return argv
+    def launch(argv, **kwargs):
+        return original(rewrite(argv), **kwargs)
     rpc.close_connections()
     try:
         with mock.patch.object(ssh, 'ssh_base_cmd', return_value=['container-test-ssh']), \
