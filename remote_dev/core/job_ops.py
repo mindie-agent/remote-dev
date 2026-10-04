@@ -283,6 +283,7 @@ def _recording_failure(endpoint, record, path, row, error, *, tool, started, sta
     payload = _session_result(endpoint, record, path, row, tool=tool, started=started, start=start, budget=budget)
     result = payload["result"]
     result["execution_outcome"] = result["outcome"]
+    result["execution_status"] = result["status"]
     result["outcome"] = "failed"
     result["status"] = "local_recording_failed"
     result["session_id"] = record["job_id"]
@@ -291,8 +292,8 @@ def _recording_failure(endpoint, record, path, row, error, *, tool, started, sta
         "error_details": error_details(error),
         "observed_cursors": {name + "_offset": row.get(name + "_offset") for name in ("stdout", "stderr")},
     }
-    result["error_details"] = {"category": "local_recording", "submission_state": "acknowledged", "retryable": False,
-                               "operation_completed": bool(row.get("quiet")) and row.get("state") in TERMINAL_JOB_STATES}
+    result.setdefault("error_details", {"category": "local_recording", "submission_state": "acknowledged", "retryable": False})
+    result["error_details"]["operation_completed"] = bool(row.get("quiet")) and row.get("state") in TERMINAL_JOB_STATES
     message = "Remote result was received, but local output/cursor recording failed. Do not relaunch the command or resend acknowledged input."
     result["summary"] += " " + message
     result["warnings"].append(message)

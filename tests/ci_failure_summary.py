@@ -1,5 +1,6 @@
 """Publish bounded JUnit failures as CI annotations, visible with check status."""
 import sys
+sys.stdout.reconfigure(encoding="utf-8")
 from pathlib import Path
 import xml.etree.ElementTree as ET
 

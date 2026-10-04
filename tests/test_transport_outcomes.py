@@ -66,7 +66,7 @@ def test_foreground_unknown_job_returns_once_with_original_identity(endpoint, st
 
 def test_rpc_disconnect_retains_exit_and_stderr_without_replaying(endpoint):
     rpc.close_connections()
-    source = "import sys; print('{\"id\":0,\"ready\":true}', flush=True); sys.stdin.readline(); sys.stderr.write('original SSH failure 中文\\n'); sys.stderr.flush(); raise SystemExit(27)"
+    source = "import sys; print('{\"id\":0,\"ready\":true}', flush=True); sys.stdin.readline(); sys.stderr.buffer.write('original SSH failure 中文\\n'.encode('utf-8')); sys.stderr.flush(); raise SystemExit(27)"
     with mock.patch.object(ssh_transport, 'ssh_command', return_value=[sys.executable, '-u', '-c', source]):
         try:
             with pytest.raises(RemoteExecutionError) as error:
@@ -134,7 +134,7 @@ def test_binary_capture_keeps_completed_result_when_cleanup_fails():
         stop(self, **kwargs)
         raise OSError('cleanup fixture')
     with mock.patch.object(OwnedProcess, 'stop', fail_cleanup):
-        result = ssh_transport._capture_command([sys.executable, '-c', "print('completed'); raise SystemExit(9)"])
+        result = ssh_transport._capture_command([sys.executable, '-c', "import sys; sys.stdout.buffer.write(b'completed\\n'); raise SystemExit(9)"])
     assert result.returncode == 9 and result.stdout == b'completed\n'
     assert 'cleanup fixture' in result.cleanup_error
 
@@ -239,3 +239,16 @@ def test_completed_manifest_survives_state_directory_failure(endpoint):
     assert result['operation_completed'] and result['status'] == 'local_recording_failed'
     assert result['manifest']['files'] == acknowledged['files']
     assert result['refs'] == {}
+
+
+
+def test_uncertain_remote_state_survives_local_receipt_failure(endpoint):
+    remote = row(state='lost_outcome', quiet=False, result=None, unknown=['supervisor lost'])
+    with mock.patch.object(job_ops, 'control', return_value=remote), mock.patch.object(
+            job_ops, '_save_output', side_effect=OSError('local receipt unavailable')):
+        result = job_ops.start_remote_job(endpoint, command='test', job_id='job-unknown-record')['result']
+    assert result['status'] == 'local_recording_failed'
+    assert result['execution_status'] == 'lost_outcome'
+    assert result['error_details']['submission_state'] == 'uncertain'
+    assert not result['error_details']['operation_completed']
+    assert result['unknown'] == ['supervisor lost']
