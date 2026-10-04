@@ -287,12 +287,28 @@ def job_record_path(endpoint: Endpoint, job_id: str) -> Path:
     return ensure_endpoint_state(endpoint) / "jobs" / f"{job_id}.json"
 
 
+def _state_entries(directory: Path):
+    # Path.glob suppresses directory-scan OSError on newer Python versions.
+    # Only an absent state directory is empty; unreadable state is a failure.
+    try:
+        entries = os.scandir(directory)
+    except FileNotFoundError:
+        return []
+    with entries:
+        return sorted(entries, key=lambda entry: entry.name)
+
+
+def _endpoint_directories():
+    return [Path(entry.path) for entry in _state_entries(state_root() / "endpoints") if entry.is_dir()]
+
+
 def find_job_record(job_id: str) -> tuple[Path, dict[str, Any]] | None:
-    root = state_root() / "endpoints"
-    if not root.exists():
-        return None
-    for path in root.glob(f"*/jobs/{job_id}.json"):
-        data = read_json(path)
+    for directory in _endpoint_directories():
+        path = directory / "jobs" / f"{job_id}.json"
+        try:
+            data = read_json(path)
+        except FileNotFoundError:
+            continue
         if not isinstance(data, dict):
             raise ValueError(f"invalid job record: {path}")
         return path, data
@@ -300,12 +316,13 @@ def find_job_record(job_id: str) -> tuple[Path, dict[str, Any]] | None:
 
 
 def list_endpoint_records() -> list[dict[str, Any]]:
-    root = state_root() / "endpoints"
-    if not root.exists():
-        return []
     records: list[dict[str, Any]] = []
-    for path in sorted(root.glob("*/endpoint.json")):
-        data = read_json(path)
+    for directory in _endpoint_directories():
+        path = directory / "endpoint.json"
+        try:
+            data = read_json(path)
+        except FileNotFoundError:
+            continue
         if not isinstance(data, dict):
             raise ValueError(f"invalid endpoint record: {path}")
         records.append({**data, "state_dir": str(path.parent)})
@@ -326,10 +343,11 @@ def artifacts_dir(endpoint_id: str) -> Path:
 
 def list_job_records(endpoint_id: str) -> list[dict[str, Any]]:
     directory = jobs_dir(endpoint_id)
-    if not directory.exists():
-        return []
     records: list[dict[str, Any]] = []
-    for path in sorted(directory.glob("*.json")):
+    for entry in _state_entries(directory):
+        if not entry.name.endswith(".json"):
+            continue
+        path = Path(entry.path)
         data = read_json(path)
         if not isinstance(data, dict):
             raise ValueError(f"invalid job record: {path}")

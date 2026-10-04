@@ -186,3 +186,45 @@ def test_bad_job_and_endpoint_records_are_not_omitted(endpoint):
     endpoint_path.write_text('{broken')
     with pytest.raises(json.JSONDecodeError):
         state_store.list_endpoint_records()
+
+
+def test_unreadable_state_scans_cannot_be_empty_or_unknown_job(endpoint):
+    from remote_dev.core import state_store
+    from remote_dev.mcp import tools
+    with mock.patch.object(state_store.os, 'scandir', side_effect=PermissionError('state scan denied')):
+        for operation in (state_store.list_endpoint_records,
+                          lambda: state_store.list_job_records(endpoint.endpoint_id),
+                          lambda: state_store.find_job_record('job-receipt-001'),
+                          lambda: tools.read_resource('remote://endpoints')):
+            with pytest.raises(PermissionError, match='state scan denied'):
+                operation()
+
+
+@pytest.mark.parametrize('record', ['endpoint.json', 'jobs/job-receipt-001.json'])
+def test_unreadable_endpoint_subdirectory_preserves_read_failure(endpoint, record):
+    from remote_dev.core import state_store
+    base = state_store.ensure_endpoint_state(endpoint)
+    read = state_store.read_json
+    def denied(path):
+        if path == base / record:
+            raise PermissionError('endpoint record denied')
+        return read(path)
+    with mock.patch.object(state_store, 'read_json', side_effect=denied):
+        operation = state_store.list_endpoint_records if record == 'endpoint.json' else lambda: state_store.find_job_record('job-receipt-001')
+        with pytest.raises(PermissionError, match='endpoint record denied'):
+            operation()
+
+
+def test_absent_state_remains_empty_and_scan_scope_stays_shallow(endpoint):
+    from remote_dev.core import state_store
+    assert state_store.list_endpoint_records() == []
+    assert state_store.list_job_records(endpoint.endpoint_id) == []
+    assert state_store.find_job_record('job-absent-001') is None
+    base = state_store.ensure_endpoint_state(endpoint)
+    (base.parent / 'unrelated.txt').write_text('ignored')
+    (base / 'nested' / 'jobs').mkdir(parents=True)
+    (base / 'nested' / 'jobs' / 'job-absent-001.json').write_text('{broken')
+    (base / 'jobs' / 'unrelated.txt').write_text('{broken')
+    assert len(state_store.list_endpoint_records()) == 1
+    assert state_store.list_job_records(endpoint.endpoint_id) == []
+    assert state_store.find_job_record('job-absent-001') is None
