@@ -19,7 +19,9 @@ from typing import Any, TextIO
 
 from .endpoint import Endpoint
 from .container_endpoint import pin_container_endpoint, pinned_endpoint
-from .errors import RemoteExecutionError
+from .errors import RemoteExecutionError, record_cleanup_failure
+from .cancellation import current_event
+from .execution import timeout_value
 from .local_process import OwnedProcess
 from remote_dev.observability import confirmed_failure, observed_operation
 
@@ -37,10 +39,6 @@ _MUX_READY: bool | None = None
 # ``ssh_mux`` field overrides this for that endpoint only. Read on each
 # invocation; never written back to os.environ or cached as a module global.
 SSH_MUX_ENV = "REMOTE_DEV_SSH_MUX"
-
-# Remote-side ``timeout(1)`` fires this many seconds before the local reader
-# deadline so the remote process can exit with a useful status first.
-REMOTE_TIMEOUT_GRACE_SECONDS = 5
 
 # Local reader slice. Small enough that a wall-clock deadline is honoured
 # promptly, large enough that a quiet-but-alive stream is not spun on.
@@ -266,8 +264,8 @@ def _ssh_cmd(endpoint: Endpoint, option_tokens: Sequence[str] = ()) -> list[str]
         "StrictHostKeyChecking=accept-new",
         "-o",
         "LogLevel=ERROR",
-        "-o",
-        f"ConnectTimeout={max(1, int(endpoint.connect_timeout_ms / 1000))}",
+        *([] if endpoint.connect_timeout_ms is None else
+          ["-o", f"ConnectTimeout={max(1, int(endpoint.connect_timeout_ms / 1000))}"]),
         *mux_options,
         *_keepalive_options(endpoint),
         *option_tokens,
@@ -312,14 +310,13 @@ def ssh_command(endpoint: Endpoint, *remote_tokens: str) -> list[str]:
 def stream_remote_payload(script: str, timeout_ms: int | None) -> str:
     """Wrap ``script`` in remote-side ``timeout --preserve-status`` when asked.
 
-    The grace margin makes the remote killer fire first so the remote can
-    report something useful before the local reader gives up.
     ``--preserve-status`` keeps a successful command's real exit code.
     """
-    if timeout_ms is None or timeout_ms <= 0:
+    timeout_value(timeout_ms)
+    if timeout_ms is None:
         return script
     timeout_s = timeout_ms / 1000
-    margin = max(int(timeout_s) - REMOTE_TIMEOUT_GRACE_SECONDS, 1)
+    margin = f"{timeout_s:g}"
     return f"timeout --preserve-status {margin}s bash -lc {shlex.quote(script)}"
 
 
@@ -347,11 +344,12 @@ def stream_ssh_command(endpoint: Endpoint, script: str | None, *, timeout_ms: in
     or pass ``ssh_mux=False``. ``script=None`` reads the script from binary
     stdin, avoiding client and remote command-line length limits.
     """
+    timeout_value(timeout_ms)
     _require_independent_stream(endpoint)
     if script is None:
         remote = "bash -s"
         if timeout_ms is not None and timeout_ms > 0:
-            margin = max(int(timeout_ms / 1000) - REMOTE_TIMEOUT_GRACE_SECONDS, 1)
+            margin = f"{timeout_ms / 1000:g}"
             remote = f"timeout --preserve-status {margin}s bash -ls"
         return ssh_command(endpoint, remote)
     return ssh_command(endpoint, "bash", "-c", shlex.quote(stream_remote_payload(script, timeout_ms)))
@@ -361,6 +359,7 @@ def stream_ssh_command(endpoint: Endpoint, script: str | None, *, timeout_ms: in
 @observed_operation("ssh.script", level="DEBUG")
 def run_script(endpoint: Endpoint, script: str, *, timeout_ms: int | None = None,
                trace_connection: bool = False) -> RemoteCompleted:
+    timeout_value(timeout_ms)
     started = time.perf_counter()
     timeout = None if timeout_ms is None else timeout_ms / 1000
     command = ssh_command(endpoint, "bash", "-s")
@@ -479,19 +478,18 @@ def run_stream(
     Not ``remote.job_*``. Jobs are detached through
     ``remote_dev.processes.control``, persist a job dir, and ``job_tail``
     snapshots supervisor logs. The supervisor owns remote-side timeout,
-    stop, and descendant drain. An attached stream is required when an
-    agent must see stage progress as it happens and must tell a hang from
-    slow progress. Detach-and-tail is not a substitute for this live
-    local wall-clock reader: a stalled pipe is still a hang until the
-    attached timeout fires.
+    stop, and descendant drain. An attached stream forwards progress as
+    it happens. Quiet output does not imply failure. Only an explicit
+    ``timeout_ms`` limits execution, and cancellation stops the owned
+    local process family.
 
-    Silent-hang handling: ``timeout_ms`` is enforced two ways at once.
+    When supplied, ``timeout_ms`` is enforced two ways at once.
 
     1. Remote-side kill. The command is wrapped in
        ``timeout --preserve-status <s>s bash -ls`` so an unresponsive
        remote process is killed at the source even when it has stopped
-       producing output. A five-second grace margin lets the remote timeout
-       fire first. ``--preserve-status`` keeps a successful command's real
+       producing output. The explicit limit is preserved without an early
+       cutoff. ``--preserve-status`` keeps a successful command's real
        exit code.
     2. Local-side kill. The local reader waits with a small slice so a
        wall-clock timeout is honoured immediately even when output is
@@ -535,9 +533,11 @@ def run_stream(
             _close_pipe(proc.stdin)
 
     writer = threading.Thread(target=upload, daemon=True, name="remote-dev-stream-upload")
+    primary_error = None
+    completed = None
     try:
         writer.start()
-        return _read_attached(
+        completed = _read_attached(
             owner,
             timeout_ms=timeout_ms,
             forward_prefix=forward_prefix,
@@ -545,10 +545,26 @@ def run_stream(
             on_output=on_output,
             capture=not merge_stderr,
         )
+        return completed
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        owner.stop()
-        if writer.ident is not None:
-            writer.join(timeout=1)
+        try:
+            owner.stop()
+        except Exception as cleanup_error:
+            if primary_error is not None:
+                record_cleanup_failure(primary_error, cleanup_error)
+            else:
+                failure = RemoteExecutionError("attached SSH operation ended but local cleanup failed",
+                                               category="cleanup", submission_state="acknowledged")
+                failure.operation_completed = completed is not None and completed.returncode is not None
+                failure.completed = completed
+                record_cleanup_failure(failure, cleanup_error)
+                raise failure from cleanup_error
+        finally:
+            if writer.ident is not None:
+                writer.join(timeout=1)
 
 
 _STREAM_READ_BYTES = 4096
@@ -769,7 +785,8 @@ def _read_attached(
     open_fds = set(by_fd)
     pipes = _AttachedPipes(channels)
     started = time.monotonic()
-    deadline = None if timeout_ms is None or timeout_ms <= 0 else started + (timeout_ms / 1000)
+    deadline = None if timeout_ms is None else started + (timeout_ms / 1000)
+    cancelled = current_event()
     timeout_message = (
         f"remote command exceeded {timeout_ms} ms wall-clock limit" if timeout_ms is not None else ""
     )
@@ -844,8 +861,17 @@ def _read_attached(
             return 0.0
         return min(remaining, STREAM_SELECT_SLICE_SECONDS)
 
+    primary_error = None
     try:
         while True:
+            if cancelled is not None and cancelled.is_set():
+                failure = RemoteExecutionError("attached SSH operation cancelled; remote outcome may be unknown",
+                                               category="cancelled", submission_state="uncertain")
+                try:
+                    owner.stop()
+                except Exception as cleanup_error:
+                    record_cleanup_failure(failure, cleanup_error)
+                raise failure
             wait = remaining_wait()
             if wait is not None and wait <= 0:
                 owner.stop()
@@ -862,27 +888,8 @@ def _read_attached(
                         captured_stdout() if capture else "",
                         captured_stderr() if capture else "",
                     )
-                if deadline is None:
-                    returncode = proc.wait()
-                    return RemoteCompleted(
-                        returncode,
-                        captured_stdout() if capture else "",
-                        captured_stderr() if capture else "",
-                    )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    owner.stop()
-                    return timed_out_result()
-                try:
-                    returncode = proc.wait(timeout=remaining)
-                except subprocess.TimeoutExpired:
-                    owner.stop()
-                    return timed_out_result()
-                return RemoteCompleted(
-                    returncode,
-                    captured_stdout() if capture else "",
-                    captured_stderr() if capture else "",
-                )
+                time.sleep(wait)
+                continue
             ready = pipes.wait(open_fds, wait)
             if ready:
                 for fd, chunk in ready:
@@ -964,10 +971,19 @@ def _read_attached(
                 captured_stdout() if capture else "",
                 captured_stderr() if capture else "",
             )
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        owner.stop()
-        pipes.finish_readers()
-        close_pipes()
+        try:
+            owner.stop()
+        except Exception as cleanup_error:
+            if primary_error is None:
+                raise
+            record_cleanup_failure(primary_error, cleanup_error)
+        finally:
+            pipes.finish_readers()
+            close_pipes()
 
 
 @pinned_endpoint
@@ -1202,17 +1218,21 @@ class LocalForward:
             return None
         return _rewrite_forward_exit(rc)
 
-    def wait_ready(self, timeout_s: float = 15.0) -> None:
+    def wait_ready(self, timeout_s: float | None = None) -> None:
         """Block until ``local_port`` accepts connections.
 
         Raises :class:`RemoteExecutionError` if the process dies or the
         timeout expires. A process that exits 0 is reported as
         :data:`FORWARD_DEAD_EXIT_CODE`.
         """
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        deadline = None if timeout_s is None else time.monotonic() + max(0.0, float(timeout_s))
         last_error = ""
         family = socket.AF_INET6 if ":" in self.local_host else socket.AF_INET
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
+            from .cancellation import current_event
+            cancelled = current_event()
+            if cancelled is not None and cancelled.is_set():
+                raise RemoteExecutionError("ssh local forward cancelled")
             rc = self._proc.poll()
             if rc is not None:
                 self._owner.stop()
@@ -1260,16 +1280,15 @@ def open_local_forward(
     remote_host: str = "127.0.0.1",
     local_host: str = "127.0.0.1",
     local_port: int | None = None,
-    ready_timeout_s: float | None = 15.0,
+    ready_timeout_s: float | None = None,
 ) -> LocalForward:
     """Open a local→remote forward and return a :class:`LocalForward` handle.
 
     Built on :meth:`Endpoint.for_long_stream`: independent connection,
     keepalives, ``ExitOnForwardFailure=yes``, ``-N``. Refuses a multiplexed
     endpoint the same way :func:`run_stream` does. When ``local_port`` is
-    omitted an ephemeral loopback port is chosen. When ``ready_timeout_s``
-    is not ``None``, the local port must accept connections before this
-    returns.
+    omitted an ephemeral loopback port is chosen. The local port must accept connections before this returns. There is
+    no readiness deadline unless ``ready_timeout_s`` is explicitly supplied.
     """
     if endpoint.container:
         raise RemoteExecutionError("container endpoints do not support SSH port forwarding; use an explicit host endpoint and a reachable published port")
@@ -1306,12 +1325,14 @@ def open_local_forward(
         remote_host=remote_host,
         remote_port=remote_port,
     )
-    if ready_timeout_s is not None:
+    try:
+        handle.wait_ready(ready_timeout_s)
+    except Exception as error:
         try:
-            handle.wait_ready(ready_timeout_s)
-        except Exception:
             handle.close()
-            raise
+        except Exception as cleanup_error:
+            record_cleanup_failure(error, cleanup_error)
+        raise
     return handle
 
 
@@ -1329,7 +1350,6 @@ def interactive_ssh_command(
         raise RemoteExecutionError("interactive bootstrap does not support container endpoints; use remote_bash with tty=True for a container PTY")
     if _uses_shared_mux(endpoint):
         raise RemoteExecutionError(INTERACTIVE_MUX_REFUSAL)
-    timeout_s = max(1, int(endpoint.connect_timeout_ms / 1000))
     cmd = [
         "ssh",
         "-o",
@@ -1338,8 +1358,8 @@ def interactive_ssh_command(
         "StrictHostKeyChecking=accept-new",
         "-o",
         "LogLevel=ERROR",
-        "-o",
-        f"ConnectTimeout={timeout_s}",
+        *([] if endpoint.connect_timeout_ms is None else
+          ["-o", f"ConnectTimeout={max(1, int(endpoint.connect_timeout_ms / 1000))}"]),
         *_independent_ssh_connection_options(),
         "-o",
         "PreferredAuthentications=password,keyboard-interactive",

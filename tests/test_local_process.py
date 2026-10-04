@@ -144,9 +144,9 @@ def test_attached_stream_stops_tree_on_timeout_or_parent_exit(tmp_path, parent_e
 
 def test_forward_close_after_parent_exit_drains_child_pipe(tmp_path):
     with mock.patch.object(ssh_transport, 'local_forward_ssh_command',
-                           return_value=tree_command(tmp_path, True)):
+                           return_value=tree_command(tmp_path, True)), mock.patch.object(ssh_transport.LocalForward, 'wait_ready'):
         forward = ssh_transport.open_local_forward(Endpoint.for_long_stream('192.0.2.1', 22),
-                                                  8000, ready_timeout_s=None)
+                                                  8000, ready_timeout_s=3)
     try:
         wait_ready(tmp_path)
         assert forward._proc.wait(timeout=3) == 0

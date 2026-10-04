@@ -61,14 +61,20 @@ def transfer(source, destination, size):
 
 def main():
     request = receive()
-    # Bound waits for bytes and the shared commit lock even after SSH loss.
+    # SSH owns connection liveness (ServerAlive/SIGHUP/EOF). A healthy long
+    # transfer has no deadline. Only an explicitly supplied execution limit
+    # arms the worker's timer.
     if os.name == "posix":
         import signal
         def interrupted(signum, _frame):
             raise TimeoutError("artifact transfer interrupted or timed out")
         signal.signal(signal.SIGALRM, interrupted)
         signal.signal(signal.SIGHUP, interrupted)
-        signal.setitimer(signal.ITIMER_REAL, max(0.001, int(request.get("timeout_ms", 30000)) / 1000))
+        timeout = request.get("timeout_ms")
+        if timeout is not None:
+            if type(timeout) is not int or timeout <= 0:
+                raise ValueError("timeout_ms must be a positive integer")
+            signal.setitimer(signal.ITIMER_REAL, timeout / 1000)
     root = Path(request["root"]).resolve(strict=True)
     operation = request["operation"]
     if operation not in {"pull", "push"}:

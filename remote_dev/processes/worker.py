@@ -12,6 +12,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import pty
 import re
@@ -429,7 +430,7 @@ def control_job(request, source, cancel_event=None):
     action = request["action"]
     if action == "launch":
         started = time.monotonic()
-        prepared = control_job({**request, "action": "prepare"}, source)
+        prepared = control_job({**request, "action": "prepare"}, source, cancel_event)
         prepared_at = time.monotonic()
         if cancel_event is not None and cancel_event.is_set():
             return cancel_and_drain(request, source)
@@ -487,7 +488,14 @@ def control_job(request, source, cancel_event=None):
         return {"state": "absent", "quiet": True}
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (directory / "lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("process control cancelled before lock acquisition")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(0.02)
         if action == "prepare":
             spec = request["spec"]
             cwd = Path(spec["cwd"]).resolve(strict=True)
@@ -496,8 +504,8 @@ def control_job(request, source, cancel_event=None):
             if not cwd.is_dir():
                 raise NotADirectoryError("command cwd is not a directory")
             timeout_seconds = spec.get("timeout_seconds")
-            if timeout_seconds is not None and (type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 86400):
-                raise ValueError("jobs require timeout_seconds None or a number in (0, 86400]")
+            if timeout_seconds is not None and (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+                raise ValueError("jobs require timeout_seconds None or a finite positive number")
             prepared_timeout = spec.get("prepared_timeout_seconds", DEFAULT_PREPARED_TIMEOUT_SECONDS)
             if type(prepared_timeout) not in (int, float) or not 1 <= prepared_timeout <= 86400:
                 raise ValueError("jobs require prepared_timeout_seconds a number in [1, 86400]")
@@ -542,9 +550,11 @@ def control_job(request, source, cancel_event=None):
                                                       "supervision": "subreaper", "job_id": identifier,
                                                       "prepared_timeout_seconds": prepared_timeout,
                                                       "prepared_at": time.time()})
-            deadline = time.monotonic() + 5
             while not (directory / "supervisor-ready.json").exists():
-                if process.poll() is not None or time.monotonic() >= deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    atomic_json(directory / "stop.json", {"requested_at": time.time()})
+                    raise RuntimeError("supervisor preparation cancelled; inspect the original job receipt")
+                if process.poll() is not None:
                     raise RuntimeError("waiting supervisor did not enable descendant supervision")
                 time.sleep(0.02)
         elif action == "go":

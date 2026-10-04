@@ -19,7 +19,6 @@ from remote_dev.core.errors import RemoteExecutionError
 from remote_dev.core.rpc_transport import request as rpc_request
 
 ACTIONS = frozenset({"prepare", "go", "status", "tail", "stop", "stdin", "launch", "exchange"})
-CONTROL_TIMEOUT_MS = 45000
 WORKER_RELATIVE = Path(__file__).with_name("worker.py")
 
 @lru_cache(maxsize=1)
@@ -64,9 +63,8 @@ def control(endpoint: Endpoint | Mapping[str, Any], job_id: str, action: str, **
     target = _as_endpoint(endpoint)
     request = {"root": target.root, "job_id": job_id, "action": action, **parameters,
                "diagnostics_context": current_context()}
-    wait_ms = max(0, int(parameters.get("yield_time_ms") or 0))
     data = rpc_request(target, "control", worker_source(), request,
-                       timeout_ms=max(CONTROL_TIMEOUT_MS, wait_ms + 15000))
+                       timeout_ms=None)
     if not isinstance(data, dict):
         raise RemoteExecutionError("process control returned a non-object")
     if "state" not in data:

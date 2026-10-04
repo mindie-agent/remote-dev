@@ -483,7 +483,7 @@ def remote_glob(
     path: str | None = None,
     limit: int = 100,
     respect_gitignore: bool = False,
-    timeout_ms: int = 120000,
+    timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
     start = time.monotonic()
@@ -545,7 +545,7 @@ def remote_grep(
     include_ignored: bool = False,
     offset: int = 0,
     limit: int = 100,
-    timeout_ms: int = 120000,
+    timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
     start = time.monotonic()

@@ -60,9 +60,11 @@ def remote_job_dir(endpoint: Endpoint, job_id: str) -> str:
 
 
 def _timeout_seconds(timeout_ms: int | None) -> float | None:
-    if timeout_ms is None or timeout_ms <= 0:
+    from .execution import timeout_value
+    timeout_value(timeout_ms)
+    if timeout_ms is None:
         return None
-    return min(timeout_ms / 1000, 86400)
+    return timeout_ms / 1000
 
 
 def _job_command(endpoint: Endpoint, command: str, runtime_enabled: bool) -> str:

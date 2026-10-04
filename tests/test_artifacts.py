@@ -79,7 +79,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(path, local.resolve())
             self.assertEqual(item["sha256"], expected)
             self.assertEqual(item["path"], "/srv/artifact.txt")
-            factory.assert_called_once_with(endpoint, "push", 1, 120000)
+            factory.assert_called_once_with(endpoint, "push", 1, None)
 
     def test_artifact_pull_blocks_malicious_relpath(self) -> None:
         endpoint = Endpoint(host="1.2.3.4", port=46000)

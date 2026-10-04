@@ -185,8 +185,9 @@ by both the MCP dispatcher and the CLI `--input-json` path):
   `yield_time_ms` (default 10000) for output or completion. A live process or
   unread output returns `session_id`; completion reports `exit_code` and
   `quiet`. The wait excludes SSH connection and process preparation. Omitted
-  `timeout_ms` (or zero) means no command deadline; an explicit value limits
-  remote execution. `run_in_background`, `interactive`, and the separate
+  `timeout_ms` means no command deadline; an explicit positive integer limits
+  remote execution in milliseconds. Zero, negative values and non-integers are
+  rejected before dispatch. `run_in_background`, `interactive`, and the separate
   monitor tool have been removed.
 - `remote.job_stdin session_id=... chars=...` writes input; empty `chars`
   polls any session, including completed sessions with unread output. Per-stream
@@ -208,7 +209,9 @@ by both the MCP dispatcher and the CLI `--input-json` path):
   endpoint share startup; different endpoints do not hold a global startup lock.
   The 32-connection pool evicts idle LRU entries automatically and expires idle
   connections after five minutes (reaped within another minute). Busy connections
-  are never evicted; capacity waits respect cancellation and the request deadline.
+  are never evicted. A full pool with every connection busy reports a retryable
+  capacity failure before submission; callers sharing a starting connection can
+  cancel their wait.
   Both MCP and remote RPC reserve two workers/eight slots for status, stop, tail
   and short stdin exchanges, alongside eight ordinary workers/32 slots. Long
   waits cannot consume that control capacity. A lost reply remains an unknown
@@ -254,7 +257,7 @@ remote-dev resolves endpoints from explicit fields and nothing else:
 | `runtime_env`        | `true`               | Source `runtime_env_file` before commands            |
 | `runtime_env_file`   | unset                | Remote profile script (`REMOTE_DEV_RUNTIME_ENV_FILE`)|
 | `identity_file`      | unset                | SSH private key                                      |
-| `connect_timeout_ms` | `10000`              | SSH connect timeout                                  |
+| `connect_timeout_ms` | unset                | Optional positive SSH connect limit in milliseconds   |
 | `alias`              | unset                | Name from the endpoint alias files                   |
 
 The Python `Endpoint` API additionally accepts `ssh_mux` and `keepalive`
@@ -451,14 +454,16 @@ ControlMaster — the silent failure this project recorded is rc=0 with the
 tunnel gone, so a docstring is not a control.
 
 Live streaming is the library function `remote_dev.core.ssh_transport.run_stream`.
-It stays attached, forwards output as it arrives, and enforces a timeout on
-both sides (remote `timeout --preserve-status` plus a local deadline-bounded
+It stays attached and forwards output as it arrives. An explicitly supplied
+timeout is enforced on both sides (remote `timeout --preserve-status` plus a local
 reader: `select` on POSIX, reader threads on native Windows). It returns
 `RemoteCompleted` (`returncode`, not `exit_code`) and does not emit
 `remote-dev.result.v1`. It is not `remote.job_*`.
 Scripts travel through binary stdin instead of command-line arguments, so
 large generated scripts work on native Windows. Upload and output draining
-run concurrently under the same local timeout.
+run concurrently under the same optional local timeout. Without a caller limit,
+execution continues until completion, failure or cancellation; quiet output is
+not evidence of failure.
 
 Detached background work uses one process implementation:
 `remote_dev.processes.control(endpoint, job_id, action, **parameters)`.

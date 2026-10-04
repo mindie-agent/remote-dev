@@ -60,7 +60,7 @@ def well_formed_payload(gen: Gen) -> dict[str, Any]:
     if gen.boolean():
         payload["identity_file"] = gen.choice(("~/.ssh/id_example", None, ""))
     if gen.boolean():
-        payload["connect_timeout_ms"] = gen.choice((1000, 10000, "2500", None, 0))
+        payload["connect_timeout_ms"] = gen.choice((1, 1000, 10000, 2500, None, 7200000))
     if gen.boolean():
         payload["ssh_mux"] = gen.choice((True, False, None))
     if gen.boolean():
@@ -109,7 +109,9 @@ def assert_well_formed(test: unittest.TestCase, endpoint: Endpoint) -> None:
     test.assertIsInstance(endpoint.root, str)
     test.assertTrue(endpoint.root.startswith("/"), f"root must be absolute: {endpoint.root!r}")
     test.assertTrue(endpoint.effective_cwd.startswith("/"), f"cwd must be absolute: {endpoint.effective_cwd!r}")
-    test.assertIsInstance(endpoint.connect_timeout_ms, int)
+    if endpoint.connect_timeout_ms is not None:
+        test.assertIs(type(endpoint.connect_timeout_ms), int)
+        test.assertGreater(endpoint.connect_timeout_ms, 0)
     test.assertIsInstance(endpoint.runtime_env, bool)
     test.assertIn(endpoint.ssh_mux, (True, False, None))
     test.assertIsInstance(endpoint.keepalive, bool)
@@ -228,8 +230,9 @@ class DirectEndpointProperties(ResolverIsolation):
     def test_connect_timeout_garbage_is_an_endpoint_error(self) -> None:
         """A non-numeric ``connect_timeout_ms`` must raise ``EndpointError``,
         not leak ``ValueError`` to the MCP caller."""
-        with self.assertRaises(EndpointError):
-            resolve_endpoint({"host": "203.0.113.5", "port": 22, "connect_timeout_ms": "abc"})
+        for value in ("abc", "2500", 0, -1, True, False, 1.5, float("inf"), float("nan"), [], {}):
+            with self.subTest(value=value), self.assertRaises(EndpointError):
+                resolve_endpoint({"host": "203.0.113.5", "port": 22, "connect_timeout_ms": value})
 
     def test_relative_root_or_cwd_is_rejected_at_resolution(self) -> None:
         """A relative ``root`` (or ``cwd``) must fail at resolution. Accepting
@@ -264,8 +267,7 @@ class DirectEndpointProperties(ResolverIsolation):
             self.assertEqual(argv[argv.index("-p") + 1], str(endpoint.port))
             self.assertEqual(argv[argv.index("--") + 1], endpoint.host)
             timeout_options = [item for item in argv if item.startswith("ConnectTimeout=")]
-            self.assertEqual(len(timeout_options), 1)
-            self.assertGreaterEqual(int(timeout_options[0].split("=")[1]), 1)
+            self.assertEqual(timeout_options, [])
 
         run_cases(100, body, label="ssh argv shape")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -11,6 +12,7 @@ from dataclasses import replace
 
 from remote_dev.core.ssh_transport import _uses_shared_mux, run_script
 from remote_dev.core.container_endpoint import pinned_endpoint
+from remote_dev.core.execution import timeout_value
 
 # One fixed read-only request gathers related facts without model imports.
 # This protocol is not a wrapper around an arbitrary caller command.
@@ -37,18 +39,22 @@ def _probe_payload(stdout):
 
 def ssh_details(endpoint, timeout_ms=None) -> dict:
     return {"kind": "ssh", "mode": "multiplexed" if _uses_shared_mux(endpoint) else "independent",
-            "connect_timeout_ms": max(1, endpoint.connect_timeout_ms // 1000) * 1000,
+            "connect_timeout_ms": (None if endpoint.connect_timeout_ms is None else
+                                   max(1, endpoint.connect_timeout_ms // 1000) * 1000),
             "timeout_ms": timeout_ms}
 
 
 @pinned_endpoint
-def diagnose_ssh(endpoint, *, timeout_ms=10000) -> dict:
-    if timeout_ms <= 0:
-        raise ValueError("diagnostic timeout_ms must be positive")
-    budget = min(5000, max(1, timeout_ms // 2))
+def diagnose_ssh(endpoint, *, timeout_ms=None) -> dict:
+    timeout_value(timeout_ms)
+    deadline = None if timeout_ms is None else time.monotonic() + timeout_ms / 1000
     probes = []
     for target in (endpoint, replace(endpoint, ssh_mux=False)):
         if probes and (probes[0]["ok"] or not _uses_shared_mux(endpoint)):
+            break
+        budget = (timeout_ms if not probes or deadline is None else
+                  math.ceil((deadline - time.monotonic()) * 1000))
+        if budget is not None and budget <= 0:
             break
         result = run_script(target, CONNECTION_PROBE_SCRIPT, timeout_ms=budget, trace_connection=True)
         payload = _probe_payload(result.stdout)

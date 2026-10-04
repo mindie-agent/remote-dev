@@ -17,6 +17,8 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .errors import record_cleanup_failure
+
 
 class OwnedProcess:
     """A local subprocess whose inherited child group ends with its owner.
@@ -135,8 +137,13 @@ class OwnedProcess:
     def __enter__(self) -> OwnedProcess:
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.stop()
+    def __exit__(self, _type, error, _traceback) -> None:
+        try:
+            self.stop()
+        except Exception as cleanup_error:
+            if error is None:
+                raise
+            record_cleanup_failure(error, cleanup_error)
 
 
 class _WindowsJob:

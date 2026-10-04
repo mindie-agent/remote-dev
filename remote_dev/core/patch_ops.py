@@ -399,7 +399,7 @@ def remote_apply_patch(
     patch: str | None = None,
     command: str | None = None,
     cwd: str | None = None,
-    timeout_ms: int = 120000,
+    timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     payload = patch if patch is not None else command
     if not payload:

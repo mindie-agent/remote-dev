@@ -37,6 +37,7 @@ class ProcessControlClientTests(unittest.TestCase):
             payload = control(self.endpoint, "job-abc123", "prepare",
                               spec={"command": "true", "cwd": "/srv/app", "env": {}, "timeout_seconds": 10})
         self.assertEqual(payload, response)
+        self.assertIsNone(execute.call_args.kwargs["timeout_ms"])
         endpoint, kind, source, body = execute.call_args.args
         self.assertIs(endpoint, self.endpoint)
         self.assertEqual(kind, "control")

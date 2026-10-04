@@ -336,7 +336,7 @@ def remote_read(
     allow_symlink: bool = False,
     verify_content: bool = True,
     client_context_id: str | None = None,
-    timeout_ms: int = 120000,
+    timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
     start = time.monotonic()
@@ -399,7 +399,7 @@ def remote_ls(
     path: str | None = None,
     limit: int = 200,
     all: bool = False,
-    timeout_ms: int = 120000,
+    timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
     start = time.monotonic()
@@ -441,7 +441,7 @@ def remote_write(
     append: bool = False,
     create_dirs: bool = False,
     client_context_id: str | None = None,
-    timeout_ms: int = 120000,
+    timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
     start = time.monotonic()
@@ -483,7 +483,7 @@ def remote_edit(
     new_string: str,
     replace_all: bool = False,
     client_context_id: str | None = None,
-    timeout_ms: int = 120000,
+    timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
     start = time.monotonic()
@@ -522,7 +522,7 @@ def remote_multi_edit(
     file_path: str,
     edits: list[dict[str, Any]],
     client_context_id: str | None = None,
-    timeout_ms: int = 120000,
+    timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
     start = time.monotonic()
