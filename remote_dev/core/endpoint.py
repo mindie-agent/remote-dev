@@ -47,7 +47,7 @@ class Endpoint:
     runtime_env: bool = True
     runtime_env_file: str | None = DEFAULT_RUNTIME_ENV_FILE
     identity_file: str | None = None
-    connect_timeout_ms: int = 10000
+    connect_timeout_ms: int | None = None
     ssh_mux: bool | None = None
     keepalive: bool = False
     kind: str = "direct-endpoint"
@@ -190,15 +190,11 @@ def _read_endpoint_aliases() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _connect_timeout_ms(payload: dict[str, Any]) -> int:
+def _connect_timeout_ms(payload: dict[str, Any]) -> int | None:
     raw = payload.get("connect_timeout_ms")
-    try:
-        timeout = int(raw or 10000)
-    except (TypeError, ValueError) as exc:
-        raise EndpointError("endpoint connect_timeout_ms must be an integer") from exc
-    if isinstance(raw, bool):
-        raise EndpointError("endpoint connect_timeout_ms must be an integer")
-    return timeout
+    if raw is not None and (type(raw) is not int or raw <= 0):
+        raise EndpointError("endpoint connect_timeout_ms must be a positive integer when supplied")
+    return raw
 
 
 def _optional_bool(payload: dict[str, Any], key: str) -> bool | None:

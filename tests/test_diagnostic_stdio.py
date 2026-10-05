@@ -19,7 +19,7 @@ def fake(name, arguments, **kwargs):
     return {'text': 'ok', 'result': make_result(tool=name, target={}, outcome='success', status='ok', summary='ok')}
 if OWNER == 'coordinator':
     import mindie_coordinator.task_server as server
-    server.vaws_call = fake
+    server.mindie_call = fake
 else:
     import remote_dev.mcp.server as server
     server.call_tool = observed_tool(lambda name, arguments: name)(fake)
@@ -48,7 +48,7 @@ def test_official_sdk_stdio_and_trace_isolation(tmp_path, owner):
                 async with stdio_client(parameters, errlog=errors) as (read, write):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
-                        name = 'vaws_session' if owner == 'coordinator' else 'remote.read'
+                        name = 'mindie_session' if owner == 'coordinator' else 'remote.read'
                         summaries = []
                         for identity in ['a', 'b']:
                             context = {'trace_id': identity * 32, 'operation_id': identity * 32}

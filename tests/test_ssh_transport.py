@@ -107,7 +107,7 @@ class SshTransportTests(unittest.TestCase):
             observed["kwargs"] = kwargs
             return subprocess.CompletedProcess(args=args, returncode=0, stdout=b"", stderr=b"")
 
-        with mock.patch.object(ssh_transport.subprocess, "run", fake_run):
+        with mock.patch.object(ssh_transport, "_capture_command", fake_run):
             ssh_transport.run_bytes(endpoint, "cat '/tmp/path with spaces'")
 
         args = observed["args"]
@@ -255,7 +255,7 @@ class SshMuxIsolationTests(unittest.TestCase):
             return subprocess.CompletedProcess(args=args, returncode=0, stdout=b"bytes-out", stderr=b"")
 
         with mock.patch.dict(os.environ, {SSH_MUX_ENV: "0"}):
-            with mock.patch.object(ssh_transport.subprocess, "run", fake_run):
+            with mock.patch.object(ssh_transport, "_capture_command", fake_run):
                 script_result = ssh_transport.run_script(self.endpoint, "echo hi")
                 script_args = list(observed["args"])
                 bytes_result = ssh_transport.run_bytes(self.endpoint, "cat '/tmp/path with spaces'", stdin=b"abc")
@@ -602,9 +602,95 @@ class LiveStreamTests(unittest.TestCase):
         self.assertTrue(result.timed_out)
         self.assertLess(time.monotonic() - started, 2)
 
+    def test_cancel_stops_live_child_even_after_pipe_eof(self) -> None:
+        import threading
+        from remote_dev.core.cancellation import request_context
+        for close_pipes in (False, True):
+            for timeout in (None, 10000):
+                with self.subTest(close_pipes=close_pipes, timeout=timeout):
+                    cancelled = threading.Event()
+                    code = "import os,time;" + ("os.close(1);os.close(2);" if close_pipes else "") + "time.sleep(3)"
+                    timer = threading.Timer(0.15, cancelled.set)
+                    with mock.patch.object(ssh_transport, "stream_ssh_command", return_value=[sys.executable, "-c", code]):
+                        started = time.monotonic()
+                        timer.start()
+                        try:
+                            with request_context(cancelled), self.assertRaises(RemoteExecutionError) as failure:
+                                ssh_transport.run_stream(self.endpoint, "", timeout_ms=timeout, merge_stderr=False)
+                        finally:
+                            timer.cancel()
+                            timer.join()
+                    self.assertLess(time.monotonic() - started, 2)
+                    self.assertEqual(failure.exception.category, "cancelled")
+                    self.assertEqual(failure.exception.submission_state, "uncertain")
+
+    def test_stream_cleanup_preserves_primary_failure_and_completed_result(self) -> None:
+        from remote_dev.core.errors import error_details
+        primary = RemoteExecutionError("cancel fixture", category="cancelled", submission_state="uncertain")
+        completed = ssh_transport.RemoteCompleted(7, "recorded stdout", "recorded stderr")
+        timed_out = ssh_transport.RemoteCompleted(None, "partial output", "timeout", timed_out=True)
+        stop = ssh_transport.OwnedProcess.stop
+        def failed_stop(owner, **kwargs):
+            stop(owner, **kwargs)
+            raise OSError("cleanup fixture")
+        for result in (primary, completed, timed_out):
+            with self.subTest(primary=isinstance(result, Exception)):
+                options = {"side_effect": result} if isinstance(result, Exception) else {"return_value": result}
+                with mock.patch.object(ssh_transport, "stream_ssh_command", return_value=[sys.executable, "-c", "pass"]), mock.patch.object(
+                        ssh_transport, "_read_attached", **options), mock.patch.object(ssh_transport.OwnedProcess, "stop", failed_stop):
+                    with self.assertRaises(RemoteExecutionError) as caught:
+                        ssh_transport.run_stream(self.endpoint, "", merge_stderr=False)
+                self.assertIn("cleanup fixture", error_details(caught.exception)["cleanup_error"])
+                if result is primary:
+                    self.assertIs(caught.exception, primary)
+                    self.assertEqual(caught.exception.submission_state, "uncertain")
+                elif result is completed:
+                    self.assertTrue(caught.exception.operation_completed)
+                    self.assertIs(caught.exception.completed, completed)
+                    self.assertEqual(caught.exception.submission_state, "acknowledged")
+                else:
+                    self.assertFalse(caught.exception.operation_completed)
+                    self.assertIs(caught.exception.completed, timed_out)
+                    self.assertEqual(caught.exception.submission_state, "uncertain")
+
+    def test_cancel_keeps_its_state_when_reader_cleanup_also_fails(self) -> None:
+        import threading
+        from remote_dev.core.cancellation import request_context
+        from remote_dev.core.errors import error_details
+        cancelled = threading.Event()
+        cancelled.set()
+        stop = ssh_transport.OwnedProcess.stop
+        def failed_stop(owner, **kwargs):
+            stop(owner, **kwargs)
+            raise OSError("reader cleanup fixture")
+        with request_context(cancelled), mock.patch.object(ssh_transport, "stream_ssh_command", return_value=[sys.executable, "-c", "import time;time.sleep(3)"]), mock.patch.object(
+                ssh_transport.OwnedProcess, "stop", failed_stop):
+            with self.assertRaises(RemoteExecutionError) as caught:
+                ssh_transport.run_stream(self.endpoint, "", merge_stderr=False)
+        self.assertEqual(caught.exception.category, "cancelled")
+        self.assertEqual(caught.exception.submission_state, "uncertain")
+        self.assertIn("reader cleanup fixture", error_details(caught.exception)["cleanup_error"])
+
+    def test_real_exit_result_survives_reader_cleanup_failure(self) -> None:
+        from remote_dev.core.errors import error_details
+        stop = ssh_transport.OwnedProcess.stop
+        def failed_stop(owner, **kwargs):
+            stop(owner, **kwargs)
+            raise OSError("terminal cleanup fixture")
+        command = [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'known output\\n');sys.exit(7)"]
+        with mock.patch.object(ssh_transport, "stream_ssh_command", return_value=command), mock.patch.object(
+                ssh_transport.OwnedProcess, "stop", failed_stop):
+            with self.assertRaises(RemoteExecutionError) as caught:
+                ssh_transport.run_stream(self.endpoint, "", merge_stderr=False)
+        self.assertTrue(caught.exception.operation_completed)
+        self.assertEqual(caught.exception.completed.returncode, 7)
+        self.assertEqual(caught.exception.completed.stdout, "known output\n")
+        self.assertEqual(caught.exception.submission_state, "acknowledged")
+        self.assertIn("terminal cleanup fixture", error_details(caught.exception)["cleanup_error"])
+
     def test_stream_stdin_command_preserves_remote_timeout_and_independence(self) -> None:
         argv = ssh_transport.stream_ssh_command(self.endpoint, None, timeout_ms=120000)
-        self.assertEqual(argv[-1], "timeout --preserve-status 115s bash -ls")
+        self.assertEqual(argv[-1], "timeout --preserve-status 120s bash -ls")
         self.assertEqual(_option_map(argv)["ControlMaster"], "no")
         self.assertEqual(_option_map(argv)["ControlPath"], "none")
         self.assertEqual(_option_map(argv)["ServerAliveInterval"], "30")
@@ -624,7 +710,7 @@ class LiveStreamTests(unittest.TestCase):
         remote = argv[-1]
         self.assertEqual(argv[-3:-1], ["bash", "-c"])
         self.assertIn("timeout --preserve-status", remote)
-        self.assertIn("115s", remote)
+        self.assertIn("120s", remote)
         self.assertIn("--preserve-status", remote)
         self.assertIn("bash -lc", remote)
 
@@ -760,12 +846,13 @@ class LiveStreamTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertLess(elapsed, 2.0)
 
-    def test_stream_remote_payload_subtracts_grace_and_skips_non_positive_timeout(self) -> None:
+    def test_stream_remote_payload_preserves_explicit_limit(self) -> None:
         wrapped = ssh_transport.stream_remote_payload("do-work", 30_000)
-        self.assertTrue(wrapped.startswith("timeout --preserve-status 25s bash -lc "))
+        self.assertTrue(wrapped.startswith("timeout --preserve-status 30s bash -lc "))
         self.assertIn("do-work", wrapped)
         self.assertEqual(ssh_transport.stream_remote_payload("do-work", None), "do-work")
-        self.assertEqual(ssh_transport.stream_remote_payload("do-work", 0), "do-work")
+        with self.assertRaises(ValueError):
+            ssh_transport.stream_remote_payload("do-work", 0)
         one_second = ssh_transport.stream_remote_payload("do-work", 1_000)
         self.assertIn("timeout --preserve-status 1s ", one_second)
 
@@ -804,7 +891,7 @@ class LiveStreamTests(unittest.TestCase):
         self.assertEqual(options["ServerAliveInterval"], "30")
         self.assertEqual(options["ServerAliveCountMax"], "10")
         self.assertEqual(_option_map(argv)["ControlMaster"], "no")
-        self.assertIn("timeout --preserve-status 115s", argv[-1])
+        self.assertIn("timeout --preserve-status 120s", argv[-1])
 
     @unittest.skipIf(os.name == "nt", "native Windows default is already independent; see NativeWindowsMuxTests")
     def test_stream_refuses_a_muxed_endpoint(self) -> None:
@@ -909,6 +996,8 @@ def _rewrite_ssh_argv(args: object, fake_script: Path) -> object:
     if not isinstance(args, (list, tuple)) or not args:
         return args
     argv = [str(item) for item in args]
+    if len(argv) >= 7 and Path(argv[2]).name == "_posix_owner.py":
+        return [*argv[:6], *_rewrite_ssh_argv(argv[6:], fake_script)]
     if Path(argv[0]).name.lower() not in {"ssh", "ssh.exe"}:
         return args
     return [sys.executable, str(fake_script), *argv[1:]]
@@ -1012,6 +1101,21 @@ class LocalForwardTests(unittest.TestCase):
     def _env_with(self, **extra: str) -> dict[str, str]:
         env = {**os.environ, **self._env, **extra}
         return env
+
+    def test_readiness_failure_preserved_when_close_also_fails(self) -> None:
+        from remote_dev.core.errors import error_details
+        primary = RemoteExecutionError("readiness failed")
+        close = ssh_transport.LocalForward.close
+        def failed_close(handle):
+            close(handle)
+            raise OSError("cleanup fixture")
+        with mock.patch.object(ssh_transport, "local_forward_ssh_command", return_value=[sys.executable, "-c", "import time;time.sleep(30)"]), mock.patch.object(
+                ssh_transport.LocalForward, "wait_ready", side_effect=primary), mock.patch.object(
+                ssh_transport.LocalForward, "close", failed_close):
+            with self.assertRaises(RemoteExecutionError) as caught:
+                ssh_transport.open_local_forward(self.endpoint, 8123)
+        self.assertIs(caught.exception, primary)
+        self.assertIn("cleanup fixture", error_details(primary)["cleanup_error"])
 
     def test_forward_argv_is_long_stream_plus_exit_on_forward_failure(self) -> None:
         with mock.patch.object(ssh_transport, "_MUX_READY", True):
@@ -1176,7 +1280,7 @@ class InteractiveBootstrapTests(unittest.TestCase):
         self.assertEqual(options["BatchMode"], "no")
         self.assertEqual(options["StrictHostKeyChecking"], "accept-new")
         self.assertEqual(options["LogLevel"], "ERROR")
-        self.assertEqual(options["ConnectTimeout"], "10")
+        self.assertNotIn("ConnectTimeout", options)
         self.assertEqual(options["ControlMaster"], "no")
         self.assertEqual(options["ControlPath"], "none")
         self.assertEqual(options["ControlPersist"], "no")

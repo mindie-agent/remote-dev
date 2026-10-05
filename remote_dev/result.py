@@ -87,6 +87,20 @@ def dumps(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
 
 
+def recording_failure(payload, error, *, stage, operation_completed):
+    """Preserve an observed result while exposing a later local record failure."""
+    from remote_dev.core.errors import error_details
+    result = payload["result"]
+    result.update(execution_outcome=result["outcome"], execution_status=result["status"],
+                  outcome="failed", status="local_recording_failed", operation_completed=operation_completed)
+    result["local_recording"] = {"status": "failed", "stage": stage,
+                                 "error": f"{type(error).__name__}: {error}", "error_details": error_details(error)}
+    message = "The remote result was received, but local recording failed; inspect the observed result before any further write."
+    result["summary"] += " " + message
+    payload["text"] += "\n" + message + "\n" + result["local_recording"]["error"] + "\n"
+    return payload
+
+
 def _bound_text(value: object, limit: int) -> str:
     text = str(value)
     if len(text) <= limit:
@@ -168,6 +182,9 @@ def format_failure_text(payload: dict[str, Any]) -> str:
     if stage_bits:
         add(" ".join(stage_bits))
     add(details.get("error") or job.get("error"))
+    if error_info.get("exit_code") is not None:
+        add(f"exit_code: {error_info['exit_code']}")
+    add(error_info.get("stderr_tail"))
     if location:
         add(location)
     if text.strip():

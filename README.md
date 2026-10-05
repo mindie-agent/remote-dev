@@ -185,8 +185,9 @@ by both the MCP dispatcher and the CLI `--input-json` path):
   `yield_time_ms` (default 10000) for output or completion. A live process or
   unread output returns `session_id`; completion reports `exit_code` and
   `quiet`. The wait excludes SSH connection and process preparation. Omitted
-  `timeout_ms` (or zero) means no command deadline; an explicit value limits
-  remote execution. `run_in_background`, `interactive`, and the separate
+  `timeout_ms` means no command deadline; an explicit positive integer limits
+  remote execution in milliseconds. Zero, negative values and non-integers are
+  rejected before dispatch. `run_in_background`, `interactive`, and the separate
   monitor tool have been removed.
 - `remote.job_stdin session_id=... chars=...` writes input; empty `chars`
   polls any session, including completed sessions with unread output. Per-stream
@@ -208,7 +209,9 @@ by both the MCP dispatcher and the CLI `--input-json` path):
   endpoint share startup; different endpoints do not hold a global startup lock.
   The 32-connection pool evicts idle LRU entries automatically and expires idle
   connections after five minutes (reaped within another minute). Busy connections
-  are never evicted; capacity waits respect cancellation and the request deadline.
+  are never evicted. A full pool with every connection busy reports a retryable
+  capacity failure before submission; callers sharing a starting connection can
+  cancel their wait.
   Both MCP and remote RPC reserve two workers/eight slots for status, stop, tail
   and short stdin exchanges, alongside eight ordinary workers/32 slots. Long
   waits cannot consume that control capacity. A lost reply remains an unknown
@@ -219,10 +222,12 @@ by both the MCP dispatcher and the CLI `--input-json` path):
   Normal Bash startup (including BASH_ENV and SSH .bashrc behavior) is retained;
   arbitrary dynamic initialization is never cached.
 - Managed callers using `processes.control(..., "prepare", spec=...)` can set
-  `prepared_timeout_seconds` (default 120, between 1 and 86400 seconds) for their
-  bounded queue/activation wait. Expiration cancels the unopened gate without
-  running user code. Command `timeout_seconds` starts after activation; a lease
-  heartbeat does not implicitly extend the remote prepared deadline.
+  `prepared_timeout_seconds` for their own queue wait. `go` separately accepts
+  `activation_timeout_seconds` for a caller-defined activation delivery window.
+  Both default to None and accept finite positive numbers when explicitly set.
+  Expiration cancels the unopened gate without running user code. Command
+  `timeout_seconds` starts after activation; a lease heartbeat does not
+  implicitly extend a caller-supplied prepared deadline.
 - Tool arguments outside the published schema, native aliases and registered
   endpoint selectors are rejected before execution. MCP `remote.bash` uses
   `yield_time_ms` and continuation through `session_id`; `wait=True` is an SDK
@@ -254,7 +259,7 @@ remote-dev resolves endpoints from explicit fields and nothing else:
 | `runtime_env`        | `true`               | Source `runtime_env_file` before commands            |
 | `runtime_env_file`   | unset                | Remote profile script (`REMOTE_DEV_RUNTIME_ENV_FILE`)|
 | `identity_file`      | unset                | SSH private key                                      |
-| `connect_timeout_ms` | `10000`              | SSH connect timeout                                  |
+| `connect_timeout_ms` | unset                | Optional positive SSH connect limit in milliseconds   |
 | `alias`              | unset                | Name from the endpoint alias files                   |
 
 The Python `Endpoint` API additionally accepts `ssh_mux` and `keepalive`
@@ -451,14 +456,16 @@ ControlMaster — the silent failure this project recorded is rc=0 with the
 tunnel gone, so a docstring is not a control.
 
 Live streaming is the library function `remote_dev.core.ssh_transport.run_stream`.
-It stays attached, forwards output as it arrives, and enforces a timeout on
-both sides (remote `timeout --preserve-status` plus a local deadline-bounded
+It stays attached and forwards output as it arrives. An explicitly supplied
+timeout is enforced on both sides (remote `timeout --preserve-status` plus a local
 reader: `select` on POSIX, reader threads on native Windows). It returns
 `RemoteCompleted` (`returncode`, not `exit_code`) and does not emit
 `remote-dev.result.v1`. It is not `remote.job_*`.
 Scripts travel through binary stdin instead of command-line arguments, so
 large generated scripts work on native Windows. Upload and output draining
-run concurrently under the same local timeout.
+run concurrently under the same optional local timeout. Without a caller limit,
+execution continues until completion, failure or cancellation; quiet output is
+not evidence of failure.
 
 Detached background work uses one process implementation:
 `remote_dev.processes.control(endpoint, job_id, action, **parameters)`.
@@ -620,3 +627,18 @@ operation ID. It excludes raw commands, paths, endpoints and business logs, and
 reports missing or truncated evidence. It never replays work or uploads an issue
 by itself. Monotonic clocks are process-local: do not subtract remote/local UTC
 stamps or sum overlapping RPC, command and parallel-role phase durations.
+
+Observed execution and local recording are separate results. If a command,
+stdin write, file edit or patch is acknowledged and its local receipt cannot be
+saved, the response keeps the actual output, exit/input acknowledgement, file
+hashes or changed paths and reports `local_recording_failed`. Continue observing
+the original job or reading the changed file; do not replay the acknowledged
+write. Unknown supervisor states are failures with an explicit uncertain outcome.
+The supervisor's own failure evidence is kept in its owned `supervisor.log` and
+is separate from user command stdout/stderr.
+
+Direct SDK `run_script` and `run_bytes` use the same owned local process groups as
+attached streams. `run_bytes` returns `RemoteBytesCompleted` with binary output,
+observed return code, `timed_out`, `cancelled` and a separate `cleanup_error`;
+`RemoteCompleted` exposes the same cleanup fact for text capture. Neither has a
+default execution deadline. Local cleanup does not prove a remote write failed.

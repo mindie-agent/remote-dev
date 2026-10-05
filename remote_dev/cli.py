@@ -117,7 +117,7 @@ def build_parser(tool: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"remote-dev {tool.replace('_', '-')}")
     add_endpoint_args(parser)
     parser.add_argument("--input-json", help="Read complete tool arguments from a JSON file, or '-' for stdin.")
-    parser.add_argument("--timeout-ms", type=int, default=None if tool == "bash" else 120000)
+    parser.add_argument("--timeout-ms", type=int, default=None)
     parser.add_argument("--client-context-id")
     if tool == "bash":
         parser.add_argument("--command", "--cmd", dest="command", required=False, help="Shell command (--cmd is the Codex exec_command habit).")

@@ -90,7 +90,7 @@ def test_idle_lru_is_evicted_without_interrupting_active_requests(pool):
         active.result(timeout=2)
 
 
-def test_full_busy_pool_waits_and_respects_deadline_and_cancellation(pool):
+def test_known_full_pool_fails_before_send_and_preserves_existing_work(pool):
     endpoint = Endpoint(host="busy.example", port=22)
     other = replace(endpoint, host="next.example")
     entered, release = threading.Event(), threading.Event()
@@ -98,19 +98,17 @@ def test_full_busy_pool_waits_and_respects_deadline_and_cancellation(pool):
         busy = executor.submit(invoke, endpoint, {"entered": entered, "release": release})
         assert entered.wait(2)
         try:
-            with pytest.raises(RemoteExecutionError, match="capacity wait timed out.*not sent"):
+            with pytest.raises(RemoteExecutionError, match="capacity is in use.*not sent"):
                 invoke(other, timeout_ms=30)
             event = threading.Event()
             event.set()
             with request_context(event), pytest.raises(RemoteExecutionError, match="cancelled.*not sent"):
                 invoke(other)
-            waiting = executor.submit(invoke, other, timeout_ms=2000)
-            time.sleep(0.05)
-            assert not waiting.done()
+            assert not busy.done()
         finally:
             release.set()
         busy.result(timeout=2)
-        assert waiting.result(timeout=2)["host"] == other.host
+        assert invoke(other)["host"] == other.host
 
 
 def test_slow_close_does_not_block_unrelated_connection(pool):

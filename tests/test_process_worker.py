@@ -147,10 +147,10 @@ class ProcessWorkerTests(unittest.TestCase):
 
     def test_prepared_deadline_default_long_override_and_invalid_values(self):
         _, default = self.prepare("r", "true")
-        self.assertEqual(default["receipt"]["prepared_timeout_seconds"], 120)
+        self.assertIsNone(default["receipt"]["prepared_timeout_seconds"])
         _, queued = self.prepare("s", "true", prepared_timeout_seconds=7200)
         self.assertEqual(queued["receipt"]["prepared_timeout_seconds"], 7200)
-        for value in (None, 0, 0.5, -1, True, 86401, float("inf"), float("nan"), "120"):
+        for value in (0, -1, True, float("inf"), float("nan"), "120"):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "prepared_timeout_seconds"):
                 self.call("job-invalid-timeout", "prepare", spec={"cwd":str(self.root), "command":"true",
                           "env":{}, "timeout_seconds":10, "prepared_timeout_seconds":value})
@@ -391,6 +391,21 @@ class ProcessWorkerTests(unittest.TestCase):
 
 @unittest.skipIf(sys.platform == "win32", "Linux worker is not a native Windows module")
 class ProcessWorkerEntrypointTests(unittest.TestCase):
+    def test_precancelled_launch_does_not_prepare_or_spawn(self):
+        import threading
+        from unittest import mock
+        worker = load_worker()
+        event = threading.Event()
+        event.set()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+                worker.subprocess, "Popen", side_effect=AssertionError("cancelled launch must not spawn")):
+            request = {"root": directory, "job_id": "job-never-run", "action": "launch",
+                       "spec": {"cwd": directory, "command": "touch forbidden", "env": {},
+                                "timeout_seconds": None}, "authorization": {"token": "test"}}
+            result = worker.control_job(request, worker_source(), event)
+            self.assertEqual(result, {"state": "absent", "quiet": True, "cancellation_requested": True})
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
     def test_main_without_control_bootstrap_fails_with_clear_message(self):
         script = Path(__file__).resolve().parents[1] / "remote_dev" / "processes" / "worker.py"
         request = {"root": "/tmp", "job_id": "job-eeeeeeee", "action": "status"}

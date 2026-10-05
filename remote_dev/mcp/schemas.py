@@ -12,7 +12,7 @@ ENDPOINT_PROPS: dict[str, Any] = {
     "cwd": {"type": "string"},
     "runtime_env": {"type": "boolean", "default": True},
     "identity_file": {"type": "string"},
-    "connect_timeout_ms": {"type": "integer", "default": 10000},
+    "connect_timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional caller connection limit in milliseconds; omitted by default."},
     "runtime_env_file": {"type": "string", "description": "Remote profile script sourced before commands when runtime_env is true."},
     "alias": {"type": "string", "description": "Name from the endpoint alias files."},
 }
@@ -120,8 +120,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "cmd": {"type": "string", "description": "Alias of command (Codex exec_command habit)."},
             "workdir": {"type": "string", "description": "Alias of cwd (Codex exec_command habit)."},
             "description": {"type": "string"},
-            "timeout_ms": {"type": "integer"},
-            "timeout": {"type": "integer"},
+            "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional explicit execution limit in milliseconds. Omit to wait for completion, failure or cancellation."},
+            "timeout": {"type": "integer", "minimum": 1, "description": "Alias of timeout_ms; values must agree if both are supplied."},
             "tty": {"type": "boolean", "default": False, "description": "Allocate a remote PTY (24x80). Ctrl-C signals its foreground process group; stderr is merged into stdout."},
             "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 300000, "default": 10000, "description": "Remote wait for output/completion after connection and preparation. Returns session_id when running or unread output remains."},
             "max_output_tokens": {"type": "integer", "minimum": 1, "description": "Approximate output budget at four UTF-8 bytes/token across text plus structured previews, shared by stdout/stderr. Status/refs metadata is separate. Unreturned bytes remain available through the session cursor."},
@@ -168,7 +168,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         {
             "patch": {"type": "string", "description": "Codex apply_patch payload or unified diff. Prefer this field."},
             "command": {"type": "string", "description": "Legacy alias for the patch payload, not a shell command."},
-            "timeout_ms": {"type": "integer"},
+            "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional explicit execution limit in milliseconds. Omit to wait for completion, failure or cancellation."},
         },
         description="Provide a non-empty patch or command. If both are provided, patch takes precedence. Missing patch content is rejected by the server.",
     ),

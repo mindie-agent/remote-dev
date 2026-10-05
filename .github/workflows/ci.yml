@@ -105,3 +105,30 @@ jobs:
           "$clean/venv/bin/python" -c "import remote_dev; print(remote_dev.__version__)"
           "$clean/venv/bin/python" -c "from remote_dev.processes import control, worker_source; src=worker_source(); assert callable(control); assert 'PR_SET_CHILD_SUBREAPER' in src; assert 'REMOTE_DEV_JOB_TOKEN' in src; assert 'MINDIE_REMOTE_JOB' not in src"
           "$clean/venv/bin/remote-dev" --help
+
+
+  real-ssh:
+    name: OpenSSH loopback and durable jobs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install package and OpenSSH
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y openssh-server
+          python -m pip install -e ".[test]"
+      - name: Real SSH receipts, binary transfer, and process lifetime
+        env:
+          REMOTE_DEV_REAL_SSH: '1'
+        run: python -m pytest -q tests/test_real_ssh.py --junitxml=real-ssh.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: real-ssh-results
+          path: real-ssh.xml

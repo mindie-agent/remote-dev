@@ -19,7 +19,6 @@ from remote_dev.core.errors import RemoteExecutionError
 from remote_dev.core.rpc_transport import request as rpc_request
 
 ACTIONS = frozenset({"prepare", "go", "status", "tail", "stop", "stdin", "launch", "exchange"})
-CONTROL_TIMEOUT_MS = 45000
 WORKER_RELATIVE = Path(__file__).with_name("worker.py")
 
 @lru_cache(maxsize=1)
@@ -53,20 +52,20 @@ def control(endpoint: Endpoint | Mapping[str, Any], job_id: str, action: str, **
     or fence semantics. Return value is the structured supervisor dict
     (``state``, ``quiet``, ``receipt``, ...).
 
-    ``spec.prepared_timeout_seconds`` bounds waiting for ``go`` independently
-    of command execution, defaulting to 120 seconds. It must be a number in
-    ``[1, 86400]``. A coordinator that queues prepared jobs must explicitly set
-    this to its bounded queue/activation window; local lease heartbeats do not
-    extend it. ``timeout_seconds`` starts when the gated command is launched.
+    ``spec.prepared_timeout_seconds`` explicitly bounds waiting for ``go``;
+    ``go.activation_timeout_seconds`` explicitly bounds delivery of activation
+    to the waiting supervisor. Both default to None (no elapsed-time deadline)
+    and accept only finite positive numbers when supplied. A coordinator owns
+    its queue/lease limits and passes them explicitly. ``timeout_seconds``
+    starts when the gated command is launched.
     """
     if action not in ACTIONS:
         raise ValueError(f"unsupported job action: {action}")
     target = _as_endpoint(endpoint)
     request = {"root": target.root, "job_id": job_id, "action": action, **parameters,
                "diagnostics_context": current_context()}
-    wait_ms = max(0, int(parameters.get("yield_time_ms") or 0))
     data = rpc_request(target, "control", worker_source(), request,
-                       timeout_ms=max(CONTROL_TIMEOUT_MS, wait_ms + 15000))
+                       timeout_ms=None)
     if not isinstance(data, dict):
         raise RemoteExecutionError("process control returned a non-object")
     if "state" not in data:

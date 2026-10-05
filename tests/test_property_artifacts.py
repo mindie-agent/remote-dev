@@ -322,6 +322,7 @@ class TransferHarness:
     def _stream(self, endpoint, operation, count, timeout_ms):
         harness = self
         class Stream:
+            commit_possible = False
             def __enter__(self): return self
             def __exit__(self, *args): pass
             def pull(self, item, destination, *, overwrite=False):
