@@ -18,7 +18,6 @@ import pytest
 
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core import rpc_transport, ssh_transport, artifact_ops, job_ops
-from remote_dev.core.errors import RemoteExecutionError, error_details
 
 pytestmark = pytest.mark.skipif(
     os.environ.get('REMOTE_DEV_REAL_SSH') != '1', reason='explicit isolated OpenSSH acceptance only')
@@ -123,7 +122,7 @@ def test_lost_ssh_after_write_is_unknown_and_never_replayed(endpoint):
     observed = []
     def invoke():
         try:
-            ssh_transport.run_remote_python(endpoint, source, {'_mutation': True})
+            observed.append(ssh_transport.run_remote_python(endpoint, source, {'_mutation': True}))
         except Exception as exc:
             observed.append(exc)
     thread = threading.Thread(target=invoke)
@@ -139,8 +138,12 @@ def test_lost_ssh_after_write_is_unknown_and_never_replayed(endpoint):
         connections[0].proc.kill()
         thread.join(10)
         assert not thread.is_alive(), 'known channel loss remained an unbounded wait'
-        assert len(observed) == 1 and isinstance(observed[0], RemoteExecutionError)
-        assert error_details(observed[0])['submission_state'] == 'uncertain'
+        assert len(observed) == 1 and isinstance(observed[0], dict), observed
+        result = observed[0]
+        assert result['status'] == 'failed', result
+        assert result['remote_outcome'] == 'unknown', result
+        assert result['error_details']['submission_state'] == 'uncertain', result
+        assert result['error_details']['retryable'] is False, result
         assert marker.read_text() == 'once\n'
     finally:
         rpc_transport.close_connections()
