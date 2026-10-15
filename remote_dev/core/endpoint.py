@@ -190,47 +190,57 @@ def _read_endpoint_aliases() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _connect_timeout_ms(payload: dict[str, Any]) -> int | None:
+def _field_error(message: str, key: str, caller_fields: set[str]) -> EndpointError:
+    return caller_error(message, EndpointError) if key in caller_fields else EndpointError(message)
+
+
+def _connect_timeout_ms(payload: dict[str, Any], caller_fields: set[str]) -> int | None:
     raw = payload.get("connect_timeout_ms")
     if raw is not None and (type(raw) is not int or raw <= 0):
-        raise EndpointError("endpoint connect_timeout_ms must be a positive integer when supplied")
+        raise _field_error("endpoint connect_timeout_ms must be a positive integer when supplied",
+                           "connect_timeout_ms", caller_fields)
     return raw
 
 
-def _optional_bool(payload: dict[str, Any], key: str) -> bool | None:
+def _optional_bool(payload: dict[str, Any], key: str, caller_fields: set[str]) -> bool | None:
     if key not in payload or payload[key] is None:
         return None
     raw = payload[key]
     if isinstance(raw, bool):
         return raw
-    raise EndpointError(f"endpoint {key} must be a boolean")
+    raise _field_error(f"endpoint {key} must be a boolean", key, caller_fields)
 
 
-def _bool_field(payload: dict[str, Any], key: str, default: bool = False) -> bool:
+def _bool_field(payload: dict[str, Any], key: str, caller_fields: set[str], default: bool = False) -> bool:
     if key not in payload or payload[key] is None:
         return default
     raw = payload[key]
     if isinstance(raw, bool):
         return raw
-    raise EndpointError(f"endpoint {key} must be a boolean")
+    raise _field_error(f"endpoint {key} must be a boolean", key, caller_fields)
 
 
-def _direct_endpoint(payload: dict[str, Any]) -> Endpoint:
+def _direct_endpoint(payload: dict[str, Any], *, caller_fields: set[str]) -> Endpoint:
+    # Empty path fields use process defaults, not caller-provided coordinates.
+    caller_fields = caller_fields - {key for key in ("root", "cwd") if not payload.get(key)}
     if "host" not in payload or "port" not in payload:
         raise EndpointError("direct endpoint requires host and port")
     try:
         port = int(payload["port"])
     except (TypeError, ValueError) as exc:
-        raise EndpointError("endpoint port must be an integer") from exc
+        raise _field_error("endpoint port must be an integer", "port", caller_fields) from exc
     if isinstance(payload.get("port"), bool) or not (1 <= port <= 65535):
-        raise EndpointError(f"endpoint port must be in 1..65535, got {payload['port']!r}")
+        raise _field_error(f"endpoint port must be in 1..65535, got {payload['port']!r}",
+                           "port", caller_fields)
     root = str(payload.get("root") or DEFAULT_ROOT)
     cwd = str(payload["cwd"]) if payload.get("cwd") else None
     if not root.startswith("/"):
-        raise EndpointError(f"endpoint root must be an absolute path, got {root!r}")
+        raise _field_error(f"endpoint root must be an absolute path, got {root!r}",
+                           "root", caller_fields)
     effective_cwd = cwd or DEFAULT_CWD or root
     if not str(effective_cwd).startswith("/"):
-        raise EndpointError(f"endpoint cwd must be an absolute path, got {effective_cwd!r}")
+        raise _field_error(f"endpoint cwd must be an absolute path, got {effective_cwd!r}",
+                           "cwd", caller_fields)
     runtime_env_file = payload.get("runtime_env_file", DEFAULT_RUNTIME_ENV_FILE)
     return Endpoint(
         host=str(payload["host"]),
@@ -241,9 +251,9 @@ def _direct_endpoint(payload: dict[str, Any]) -> Endpoint:
         runtime_env=bool(payload.get("runtime_env", True)),
         runtime_env_file=str(runtime_env_file) if runtime_env_file else None,
         identity_file=str(payload["identity_file"]) if payload.get("identity_file") else None,
-        connect_timeout_ms=_connect_timeout_ms(payload),
-        ssh_mux=_optional_bool(payload, "ssh_mux"),
-        keepalive=_bool_field(payload, "keepalive", False),
+        connect_timeout_ms=_connect_timeout_ms(payload, caller_fields),
+        ssh_mux=_optional_bool(payload, "ssh_mux", caller_fields),
+        keepalive=_bool_field(payload, "keepalive", caller_fields, False),
         kind=str(payload.get("kind") or "direct-endpoint"),
         alias=str(payload["alias"]) if payload.get("alias") else None,
         source=payload.get("source") if isinstance(payload.get("source"), dict) else None,
@@ -466,7 +476,7 @@ def _endpoint_from_resolver(entry: RegisteredResolver, payload: dict[str, Any]) 
     merged.setdefault("kind", f"resolver:{entry.name}")
     source = merged.get("source")
     merged["source"] = {**(source if isinstance(source, dict) else {}), "resolver": entry.name}
-    return _direct_endpoint(merged)
+    return _direct_endpoint(merged, caller_fields=set(overrides))
 
 
 def resolve_endpoint(payload: dict[str, Any]) -> Endpoint:
@@ -478,15 +488,16 @@ def resolve_endpoint(payload: dict[str, Any]) -> Endpoint:
     and never guesses a target from the working directory.
     """
     if payload.get("host") and payload.get("port"):
-        return _direct_endpoint(payload)
+        return _direct_endpoint(payload, caller_fields=set(payload))
     if payload.get("alias"):
         aliases = _read_endpoint_aliases()
         alias = str(payload["alias"])
         if alias not in aliases:
             raise EndpointError(f"endpoint alias {alias!r} is not configured")
-        merged = {**aliases[alias], **{k: v for k, v in payload.items() if v is not None}}
+        overrides = {k: v for k, v in payload.items() if v is not None}
+        merged = {**aliases[alias], **overrides}
         merged["alias"] = alias
-        return _direct_endpoint(merged)
+        return _direct_endpoint(merged, caller_fields=set(overrides))
     for entry in registered_resolvers():
         endpoint = _endpoint_from_resolver(entry, payload)
         if endpoint is not None:
