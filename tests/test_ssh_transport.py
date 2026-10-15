@@ -72,8 +72,15 @@ def _openssh_G(
     env = dict(os.environ)
     if home is not None:
         env["HOME"] = home
-    eval_cmd = [binary, "-G", "-F", config_file or os.devnull, *argv[1:]]
-    proc = subprocess.run(eval_cmd, capture_output=True, text=True, check=False, env=env)
+    with ExitStack() as files:
+        if config_file is None:
+            # Git SSH does not interpret the Windows device name "nul".
+            directory = Path(files.enter_context(tempfile.TemporaryDirectory()))
+            empty_config = directory / "ssh_config"
+            empty_config.write_text("", encoding="utf-8")
+            config_file = str(empty_config)
+        eval_cmd = [binary, "-G", "-F", config_file, *argv[1:]]
+        proc = subprocess.run(eval_cmd, capture_output=True, text=True, check=False, env=env)
     if proc.returncode != 0:
         raise AssertionError(
             f"ssh -G failed (rc={proc.returncode}): {(proc.stderr or proc.stdout or '')[:2000]}\n"
