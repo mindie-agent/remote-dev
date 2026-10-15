@@ -7,6 +7,7 @@ import os
 import queue
 import select
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -71,12 +72,9 @@ INTERACTIVE_MUX_REFUSAL = (
     "master)."
 )
 
-# Win32-OpenSSH documents Client ControlMaster as out of project scope.
-# https://github.com/PowerShell/Win32-OpenSSH/wiki/Project-Scope
-# https://github.com/PowerShell/Win32-OpenSSH/issues/1328
+# Native Windows supports independent connections only.
 WINDOWS_MUX_UNSUPPORTED = (
-    "OpenSSH ControlMaster is not supported on native Windows "
-    "(Win32-OpenSSH Client ControlMaster is out of project scope). "
+    "OpenSSH ControlMaster is not supported by remote-dev on native Windows. "
     "Ordinary Windows connections already use an independent SSH connection "
     "(ControlMaster=no, ControlPath=none, ControlPersist=no); no extra "
     "flag is required. Do not set ssh_mux=True or REMOTE_DEV_SSH_MUX=1."
@@ -245,8 +243,38 @@ def _shared_mux_requested() -> bool:
 
 
 def _native_windows_ssh_client() -> bool:
-    """True when this process is a native Win32 SSH client, not POSIX OpenSSH."""
+    """True when the local Python process runs on native Windows."""
     return os.name == "nt"
+
+
+def _windows_ssh_executable() -> str:
+    """Resolve Git for Windows SSH without probing or retrying a connection."""
+    git = shutil.which("git")
+    if git:
+        try:
+            executable = Path(git).resolve(strict=True)
+            parent = executable.parent
+            if parent.name.casefold() in {"cmd", "bin"}:
+                root = parent.parent
+                if parent.name.casefold() == "bin" and root.name.casefold() in {"mingw64", "mingw32"}:
+                    root = root.parent
+                ssh = root / "usr" / "bin" / "ssh.exe"
+                if ssh.is_file():
+                    return str(ssh)
+        except (OSError, RuntimeError) as exc:
+            raise RemoteExecutionError(
+                "Git for Windows SSH could not be resolved",
+                category="configuration", submission_state="not_sent",
+            ) from exc
+    raise RemoteExecutionError(
+        "Native Windows SSH requires Git for Windows with its bundled usr/bin/ssh.exe; "
+        "make the installed Git executable available to this process",
+        category="configuration", submission_state="not_sent",
+    )
+
+
+def _ssh_executable() -> str:
+    return _windows_ssh_executable() if _native_windows_ssh_client() else "ssh"
 
 
 def _uses_shared_mux(endpoint: Endpoint) -> bool:
@@ -258,8 +286,8 @@ def _uses_shared_mux(endpoint: Endpoint) -> bool:
     first-option-wins semantics make a trailing ``ControlMaster=no``
     override ineffective.
 
-    Native Windows is different: Win32-OpenSSH does not support Client
-    ControlMaster. Ordinary Windows connections (``ssh_mux`` omitted,
+    Native Windows supports independent connections only.
+    Ordinary Windows connections (``ssh_mux`` omitted,
     ``REMOTE_DEV_SSH_MUX`` unset or ``0``) therefore take the independent
     triple automatically — agents do not need a Windows-only flag.
     ``ssh_mux=True`` or ``REMOTE_DEV_SSH_MUX=1`` is an explicit unsupported
@@ -336,7 +364,7 @@ def _ssh_cmd(endpoint: Endpoint, option_tokens: Sequence[str] = ()) -> list[str]
     else:
         mux_options = _independent_ssh_connection_options()
     cmd = [
-        "ssh",
+        _ssh_executable(),
         "-o",
         "BatchMode=yes",
         "-o",
@@ -1453,7 +1481,7 @@ def interactive_ssh_command(
     if _uses_shared_mux(endpoint):
         raise RemoteExecutionError(INTERACTIVE_MUX_REFUSAL)
     cmd = [
-        "ssh",
+        _ssh_executable(),
         "-o",
         "BatchMode=no",
         "-o",

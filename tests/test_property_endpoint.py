@@ -38,7 +38,7 @@ from remote_dev.core.endpoint import (  # noqa: E402
     resolve_endpoint,
     unregister_resolver,
 )
-from remote_dev.core.ssh_transport import ssh_base_cmd  # noqa: E402
+from remote_dev.core.ssh_transport import _ssh_executable, ssh_base_cmd  # noqa: E402
 from test_property_support import DOC_HOSTS, Gen, run_cases  # noqa: E402
 
 GARBAGE_VALUES: tuple[Any, ...] = (None, "", 0, -1, 1.5, True, False, [], {}, "0", "x", " ", "1e3", b"bytes", ["a"], {"k": "v"})
@@ -262,7 +262,7 @@ class DirectEndpointProperties(ResolverIsolation):
             user = gen.choice(("root", "dev", "agent01")) + gen.text("abc0123", 0, 3)
             endpoint = resolve_endpoint({"host": gen.choice(DOC_HOSTS), "port": gen.integer(1, 65535), "user": user})
             argv = ssh_base_cmd(endpoint)
-            self.assertEqual(argv[0], "ssh")
+            self.assertEqual(argv[0], _ssh_executable())
             self.assertEqual(argv[argv.index("-l") + 1], user)
             self.assertEqual(argv[argv.index("-p") + 1], str(endpoint.port))
             self.assertEqual(argv[argv.index("--") + 1], endpoint.host)

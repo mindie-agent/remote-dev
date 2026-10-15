@@ -45,7 +45,8 @@ def _option_map(cmd: list[str]) -> dict[str, str]:
 
 
 def _require_openssh() -> str:
-    path = shutil.which("ssh")
+    path = (ssh_transport._ssh_executable() if os.name == "nt"
+            else shutil.which("ssh"))
     if path is None:
         raise AssertionError(
             "OpenSSH ssh is required to parse composed argv with ssh -G; "
@@ -266,7 +267,7 @@ class SshMuxIsolationTests(unittest.TestCase):
             self.assertEqual(options["ControlMaster"], "no")
             self.assertEqual(options["ControlPath"], "none")
             self.assertEqual(options["ControlPersist"], "no")
-            self.assertEqual(args[0], "ssh")
+            self.assertEqual(args[0], ssh_transport._ssh_executable())
             self.assertEqual(args[args.index("-l") + 1], self.endpoint.user)
             self.assertEqual(args[args.index("--") + 1], self.endpoint.host)
 
@@ -407,13 +408,17 @@ class SshMuxIsolationTests(unittest.TestCase):
 
 
 class NativeWindowsMuxTests(unittest.TestCase):
-    """Win32-OpenSSH has no Client ControlMaster. Ordinary argv must not ask for it."""
+    """Windows transport supports independent connections without an extra flag."""
 
     def setUp(self) -> None:
         self.endpoint = Endpoint(host="192.0.2.10", port=46000, identity_file="/keys/a")
+        selected = mock.patch.object(ssh_transport, "_windows_ssh_executable",
+                                     return_value="C:/Git/usr/bin/ssh.exe")
+        selected.start()
+        self.addCleanup(selected.stop)
 
     def _windows_cmd(self, endpoint: Endpoint, env_value: str | None = None) -> list[str]:
-        with mock.patch.object(ssh_transport.os, "name", "nt"):
+        with mock.patch.object(ssh_transport, "_native_windows_ssh_client", return_value=True):
             with mock.patch.object(ssh_transport, "_MUX_READY", True):
                 with mock.patch.dict(os.environ):
                     if env_value is None:
@@ -437,7 +442,7 @@ class NativeWindowsMuxTests(unittest.TestCase):
         with self.assertRaises(RemoteExecutionError) as raised_endpoint:
             self._windows_cmd(Endpoint(host="192.0.2.10", port=46000, ssh_mux=True))
         self.assertIn("ControlMaster is not supported", str(raised_endpoint.exception))
-        self.assertIn("Win32-OpenSSH", str(raised_endpoint.exception))
+        self.assertIn("native Windows", str(raised_endpoint.exception))
         with self.assertRaises(RemoteExecutionError) as raised_env:
             self._windows_cmd(self.endpoint, "1")
         self.assertIn("ControlMaster is not supported", str(raised_env.exception))
@@ -445,7 +450,7 @@ class NativeWindowsMuxTests(unittest.TestCase):
 
     def test_windows_default_stream_and_interactive_stay_independent(self) -> None:
         default = Endpoint(host="192.0.2.10", port=46000)
-        with mock.patch.object(ssh_transport.os, "name", "nt"):
+        with mock.patch.object(ssh_transport, "_native_windows_ssh_client", return_value=True):
             with mock.patch.dict(os.environ):
                 os.environ.pop(SSH_MUX_ENV, None)
                 stream = ssh_transport.stream_ssh_command(default, "analyze")
@@ -989,9 +994,8 @@ def _write_fake_ssh(bindir: Path) -> Path:
 def _rewrite_ssh_argv(args: object, fake_script: Path) -> object:
     """Keep composed ssh argv; run it through the fake as a Python process.
 
-    Production still launches ``ssh``. Tests replace only argv[0] so Windows
-    does not have to find ``ssh.exe`` or a ``.cmd`` wrapper, while ``ssh -G``
-    parser tests keep using a real OpenSSH binary.
+    Production still selects its supported SSH executable. Tests replace only
+    argv[0] while ``ssh -G`` parser tests keep using that real OpenSSH binary.
     """
     if not isinstance(args, (list, tuple)) or not args:
         return args
@@ -1129,7 +1133,7 @@ class LocalForwardTests(unittest.TestCase):
                     remote_port=8000,
                 )
         options = _option_map(argv)
-        self.assertEqual(argv[0], "ssh")
+        self.assertEqual(argv[0], ssh_transport._ssh_executable())
         self.assertEqual(options["BatchMode"], "yes")
         self.assertEqual(options["ControlMaster"], "no")
         self.assertEqual(options["ControlPath"], "none")
@@ -1207,7 +1211,7 @@ class LocalForwardTests(unittest.TestCase):
                 remote_host="127.0.0.1",
                 remote_port=8123,
             )
-            self.assertEqual(composed[0], "ssh")
+            self.assertEqual(composed[0], ssh_transport._ssh_executable())
             self.assertEqual(Path(recorded[0]).name, "ssh.py")
             self.assertEqual(recorded[1:], composed[1:])
             self.assertIn("-N", recorded)
@@ -1276,7 +1280,7 @@ class InteractiveBootstrapTests(unittest.TestCase):
             ["sh", "-c", "umask 077; mkdir -p ~/.ssh"],
         )
         options = _option_map(argv)
-        self.assertEqual(argv[0], "ssh")
+        self.assertEqual(argv[0], ssh_transport._ssh_executable())
         self.assertEqual(options["BatchMode"], "no")
         self.assertEqual(options["StrictHostKeyChecking"], "accept-new")
         self.assertEqual(options["LogLevel"], "ERROR")
@@ -1328,7 +1332,7 @@ class InteractiveBootstrapTests(unittest.TestCase):
         self.assertEqual(rc, 7)
         recorded = argv_path.read_text(encoding="utf-8").split("\0")
         composed = ssh_transport.interactive_ssh_command(self.endpoint, ["sh", "-c", "printf ok"])
-        self.assertEqual(composed[0], "ssh")
+        self.assertEqual(composed[0], ssh_transport._ssh_executable())
         self.assertEqual(Path(recorded[0]).name, "ssh.py")
         self.assertEqual(recorded[1:], composed[1:])
         self.assertEqual(recorded[-3:], ["sh", "-c", "printf ok"])

@@ -109,6 +109,15 @@ on its Linux endpoint. Local SSH cleanup does not prove remote process quiet;
 managed remote jobs use their supervisor's stop and quiet receipt. A POSIX
 child that deliberately creates a separate session is outside the local group.
 
+Native Windows requires Git for Windows with `git` available to the process.
+remote-dev resolves the installation from that Git executable (`cmd`, `bin`,
+or `mingw64/bin` / `mingw32/bin`) and uses its `usr/bin/ssh.exe`. This avoids
+the Windows system OpenSSH pipe handling that can leave finite requests
+unfinished. A missing bundled SSH is a configuration error before any request
+is sent; there is no connection retry with another executable. Existing SSH
+credentials and configuration remain in use. macOS and Linux continue to use
+`ssh` from the process PATH.
+
 ## Install and start the MCP server
 
 From a git ref (no local checkout required):
@@ -410,7 +419,7 @@ remote-dev bash --selector lab=gpu-1 --command 'nproc'
 | `REMOTE_DEV_ENDPOINTS_FILE`     | Alias file(s), `os.pathsep` separated, read first         |
 | `REMOTE_DEV_STATE_DIR`          | Local state directory (default `<cwd>/state`)             |
 | `REMOTE_DEV_SSH_MUX_DIR`        | OpenSSH ControlMaster dir (default `~/.ssh/remote-dev-mux`)|
-| `REMOTE_DEV_SSH_MUX`            | Process-wide SSH multiplexing *default* on POSIX: unset or `1` uses the shared ControlMaster; `0` forces independent connections; other values error. Native Windows has no Client ControlMaster (Win32-OpenSSH); ordinary connections already use the independent triple and do not need this flag. `ssh_mux=True` / `REMOTE_DEV_SSH_MUX=1` on native Windows is a capability error. An endpoint's `ssh_mux` overrides the process default on POSIX. |
+| `REMOTE_DEV_SSH_MUX`            | Process-wide SSH multiplexing *default* on POSIX: unset or `1` uses the shared ControlMaster; `0` forces independent connections; other values error. Native Windows supports independent connections only and does not need this flag. `ssh_mux=True` / `REMOTE_DEV_SSH_MUX=1` on native Windows is a capability error. An endpoint's `ssh_mux` overrides the process default on POSIX. |
 | `REMOTE_DEV_SESSION_ID`         | Read-ledger scope when no client id is given              |
 
 For low-level Python SSH calls, `REMOTE_DEV_SSH_MUX` is the process-wide
@@ -426,9 +435,8 @@ connections with keepalives, regardless of this low-level default.
 Native Windows CLI and MCP pipes use UTF-8. Shell script uploads preserve LF
 bytes, and nested artifact paths use POSIX separators on the Linux peer.
 
-On native Windows the transport chooses independent connections by itself
-because Win32-OpenSSH does not implement Client ControlMaster; do not set
-`ssh_mux=true` or `REMOTE_DEV_SSH_MUX=1` there.
+On native Windows the transport chooses the supported independent connection
+mode by itself; do not set `ssh_mux=true` or `REMOTE_DEV_SSH_MUX=1` there.
 
 A single Python process may do both at once. Set `ssh_mux=false`
 on the endpoints that must stay off the shared master, and leave the rest on
