@@ -6,6 +6,7 @@ call can reconnect; persistent jobs remain discoverable by their job id.
 from __future__ import annotations
 
 import atexit
+import base64
 from collections import OrderedDict
 import contextlib
 import itertools
@@ -16,6 +17,7 @@ import shlex
 import subprocess
 import threading
 import time
+import zlib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -28,6 +30,24 @@ from remote_dev.observability import observed_operation, current_tool
 from .container_endpoint import pin_container_endpoint
 
 
+def _worker_command(source):
+    from .ssh_transport import _native_windows_ssh_client
+
+    if not _native_windows_ssh_client():
+        return "python3 -u -c " + shlex.quote(source)
+    # Git for Windows SSH can truncate a long remote command at 8191 bytes.
+    # Carry the unchanged worker in a shorter ASCII command, not a new protocol.
+    encoded = base64.b64encode(zlib.compress(source.encode("utf-8"))).decode("ascii")
+    bootstrap = "import base64,zlib;exec(zlib.decompress(base64.b64decode(" + repr(encoded) + ")))"
+    command = "python3 -u -c " + shlex.quote(bootstrap)
+    if len(command) > 8191:
+        raise RemoteExecutionError(
+            "Windows SSH RPC bootstrap exceeds the supported command length",
+            category="configuration", submission_state="not_sent",
+        )
+    return command
+
+
 class RpcConnection:
     def __init__(self, endpoint):
         from .ssh_transport import ssh_command
@@ -37,7 +57,7 @@ class RpcConnection:
         source = source.replace("# REMOTE_DEV_MUTATION_LOCK", helper)
         transport_endpoint = replace(endpoint, ssh_mux=False, keepalive=True)
         self.owner = OwnedProcess(
-            ssh_command(transport_endpoint, "python3 -u -c " + shlex.quote(source)),
+            ssh_command(transport_endpoint, _worker_command(source)),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.proc = self.owner.process
