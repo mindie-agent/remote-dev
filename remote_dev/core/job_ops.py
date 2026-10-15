@@ -15,7 +15,7 @@ from typing import Any
 
 from remote_dev.core.endpoint import DEFAULT_CWD, DEFAULT_ROOT, Endpoint
 from remote_dev.core.container_endpoint import FULL_CONTAINER_ID, pinned_endpoint
-from remote_dev.core.errors import RemoteExecutionError
+from remote_dev.core.errors import RemoteExecutionError, caller_error
 from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS, compact_text
 from remote_dev.core.locking import record_lock
 from remote_dev.core.runtime_env import runtime_env_lines
@@ -142,15 +142,19 @@ def _load_record(endpoint: Endpoint | None, job_id: str) -> tuple[Endpoint, dict
     job_id = require_job_id(job_id)
     if endpoint is not None:
         path = job_record_path(endpoint, job_id)
-        if not path.exists():
-            raise FileNotFoundError(f"unknown remote job id for endpoint: {job_id}")
         import json
 
-        data = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            content = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise caller_error(
+                f"unknown remote job id for endpoint: {job_id}", FileNotFoundError
+            ) from None
+        data = json.loads(content)
         return endpoint, data, path
     found = find_job_record(job_id)
     if not found:
-        raise FileNotFoundError(f"unknown remote job id: {job_id}")
+        raise caller_error(f"unknown remote job id: {job_id}", FileNotFoundError)
     path, data = found
     return _endpoint_from_record(data), data, path
 

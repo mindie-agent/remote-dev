@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ from unittest import mock
 import remote_dev.core.job_ops as job_ops
 import remote_dev.core.state_store as state_store
 from remote_dev.core.endpoint import Endpoint
-from remote_dev.core.errors import RemoteExecutionError
+from remote_dev.core.errors import RemoteExecutionError, error_details
 from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS
 
 
@@ -127,6 +128,66 @@ class RemoteJobControlTests(unittest.TestCase):
                 result = job_ops.remote_job_stop(self.endpoint, job_id=self.job_id, force=True)["result"]
         self.assertEqual(result["outcome"], "failed")
         self.assertEqual(result["status"], "running")
+
+    def test_other_task_job_is_rejected_before_remote_control(self) -> None:
+        original = self.record_path.read_bytes()
+        child_root = Path(self.temp.name) / "separate-task"
+        calls = (job_ops.remote_job_status, job_ops.remote_job_tail,
+                 job_ops.remote_job_stdin, job_ops.remote_job_stop)
+        with mock.patch.dict(os.environ, {"REMOTE_DEV_STATE_DIR": str(child_root)}), \
+                mock.patch.object(job_ops, "control") as control, \
+                mock.patch("remote_dev.observability.confirmed_failure") as report:
+            for function in calls:
+                for endpoint in (self.endpoint, None):
+                    with self.subTest(function=function.__name__, explicit_endpoint=endpoint is not None):
+                        with self.assertRaises(FileNotFoundError) as caught:
+                            function(endpoint, job_id=self.job_id)
+                        details = error_details(caught.exception)
+                        self.assertEqual(details["category"], "caller")
+                        self.assertEqual(details["submission_state"], "not_sent")
+                        self.assertFalse(details["retryable"])
+                        self.assertNotIn(str(self.record_path), str(caught.exception))
+                        self.assertNotIn("secret-start-gate-token", str(caught.exception))
+            control.assert_not_called()
+            report.assert_not_called()
+        self.assertEqual(self.record_path.read_bytes(), original)
+        child_record = child_root / "endpoints" / self.endpoint.endpoint_id / "jobs" / f"{self.job_id}.json"
+        self.assertFalse(child_record.exists())
+
+    def test_missing_job_does_not_disclose_other_task_existence(self) -> None:
+        child_root = Path(self.temp.name) / "separate-task"
+        original = self.record_path.read_bytes()
+        messages = []
+        with mock.patch.dict(os.environ, {"REMOTE_DEV_STATE_DIR": str(child_root)}):
+            for parent_exists in (True, False):
+                if not parent_exists:
+                    self.record_path.unlink()
+                with self.assertRaises(FileNotFoundError) as caught:
+                    job_ops._load_record(self.endpoint, self.job_id)
+                messages.append((str(caught.exception), error_details(caught.exception)))
+        self.assertEqual(messages[0], messages[1])
+        self.record_path.write_bytes(original)
+
+    def test_unreadable_or_corrupt_record_is_not_missing_job(self) -> None:
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError("unreadable")):
+            with self.assertRaises(PermissionError) as caught:
+                job_ops._load_record(self.endpoint, self.job_id)
+        self.assertNotEqual(error_details(caught.exception)["category"], "caller")
+        self.record_path.write_text("{bad", encoding="utf-8")
+        with self.assertRaises(json.JSONDecodeError) as caught:
+            job_ops._load_record(self.endpoint, self.job_id)
+        self.assertNotEqual(error_details(caught.exception)["category"], "caller")
+        self.assertEqual(self.record_path.read_text(encoding="utf-8"), "{bad")
+
+    def test_stop_transport_uncertainty_is_not_changed_to_not_sent(self) -> None:
+        error = RemoteExecutionError("response lost", category="rpc_disconnected",
+                                     submission_state="uncertain")
+        with mock.patch.object(job_ops, "control", side_effect=error) as control:
+            result = job_ops.remote_job_stop(self.endpoint, job_id=self.job_id)["result"]
+        control.assert_called_once()
+        self.assertEqual(result["error_details"]["category"], "rpc_disconnected")
+        self.assertEqual(result["error_details"]["submission_state"], "uncertain")
+        self.assertEqual(result["outcome"], "failed")
 
 
 class StartRemoteJobTests(unittest.TestCase):
