@@ -1,28 +1,30 @@
-# Transport, Containers & Diagnostics Reference
+# Containers, SSH Transport & Diagnostics Reference
 
 [中文](./transport-and-diagnostics.md) · **English** · [Back to Documentation Index](./README.en.md)
 
-This reference covers existing-container execution, the resolver plugin contract, path permissions and read ledgers, low-level SSH transport and process supervision, and structured diagnostics in `remote-dev`.
+This guide covers five practical topics in `remote-dev`: **working inside running Docker containers, writing custom endpoint resolver plugins, preventing concurrent file overwrites, understanding the SSH connection pool, and diagnosing slow or broken connections.**
 
 ---
 
 ## 1. Working Inside an Existing Docker Container
 
-Add `container` to an ordinary SSH host endpoint (or pass `--container <name-or-id>` on the CLI) so that file reads, edits, searches, patches, commands, background jobs, and artifact transfers run directly inside that existing container:
+On shared GPU/NPU servers, your development environment often lives inside a running Docker container that does not run its own `sshd` or expose a separate SSH port.
+
+With `remote-dev`, simply add `container` to any SSH host endpoint (or pass `--container <name-or-id>` on the CLI). All file reads, edits, searches, patches, commands, background jobs, and file transfers will execute directly inside that container:
 
 ```json
 {"host": "lab-host", "port": 22, "container": "repro-case", "cwd": "/work/vllm", "command": "bash /work/start-case.sh"}
 ```
 
-- **Zero-Install Prerequisites**: The target container must be running with `python3` and `bash` (plus `git` for unified diff patches). `user` remains the SSH host user while `docker exec` preserves the container's configured user and environment. `remote-dev` never installs packages, starts/restarts containers, or falls back implicitly to the host.
-- **Full Container ID Pinning**: Each new name- or short-ID-based operation performs one read-only `docker inspect` to resolve the full Docker ID (`target.container`, while `target.container_selector` preserves the caller's selector). Every stage of the operation, job receipt, read ledger, and pooled RPC connection uses that fixed full ID. There is no mutable name cache or automatic replay after an uncertain submission.
-- **Container PTYs & Boundaries**: Use `remote.bash` with `tty=true` for a container PTY. Low-level interactive bootstrap (`run_interactive`) and SSH local port forwarding (`open_local_forward`) explicitly reject container endpoints; forward reachable published ports through an explicit host endpoint instead.
+- **Zero Container Setup**: The container just needs to be running with `python3` and `bash` installed (plus `git` if you apply unified diff patches). `remote-dev` never installs packages inside your container, never starts/stops containers, and never silently falls back to running on the host.
+- **Full Container ID Pinning**: When you specify a container name (like `repro-case`) or short ID, `remote-dev` runs a single read-only `docker inspect` on the host to resolve the **full 64-character container ID** (`target.container`, keeping your original name in `target.container_selector`). All job records, read ledgers, and pooled connections lock onto that full ID — so even if a container is recreated under the same name, operations never hit the wrong container.
+- **Container PTYs & Host-Only Operations**: Need a terminal inside the container? Pass `tty=true` to `remote.bash`. Low-level interactive password bootstrap (`run_interactive`) and SSH local port forwarding (`open_local_forward`) are host-level operations and reject container endpoints (forward published ports through the host endpoint instead).
 
 ---
 
-## 2. Resolver Plugin Interface
+## 2. Writing Custom Endpoint Resolver Plugins
 
-Anything beyond `host` / `port` / `alias`—such as lab inventories, session registries, worktree bindings, or coordinator leases—is resolved through consumer-registered plugins:
+If your team maintains a lab machine inventory or cluster lease table, you can register a custom Python resolver plugin so callers can pass semantic selectors like `--selector lab=gpu-1` instead of raw IP addresses:
 
 ```python
 from remote_dev.core.endpoint import EndpointError, register_resolver, resolver_setup
@@ -48,7 +50,7 @@ def setup():
     register_resolver(by_lab, name="labs", fields=("lab",))
 ```
 
-Load resolver plugins into the MCP server or CLI via `REMOTE_DEV_RESOLVERS`:
+Load your plugin into the MCP server or CLI using `REMOTE_DEV_RESOLVERS`:
 
 ```bash
 export REMOTE_DEV_RESOLVERS="/abs/path/consumer/remote_dev_plugin.py:setup"
@@ -57,27 +59,38 @@ remote-dev bash --selector lab=gpu-1 --command "nproc"
 
 ---
 
-## 3. Permission Model & Read Ledgers
+## 3. Directory Boundaries & Read-Before-Write Protection
 
-- **Path Policy**: Direct endpoints default to `root=/` and `cwd=/` while still enforcing path containment and symlink escape checks. Pass `--root /srv/app --cwd /srv/app` when a task requires strict directory containment.
-- **Optimistic-Concurrency Read Ledgers**: Scoped by `client_context_id` (falling back to `CLAUDE_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_RUN_ID`, `REMOTE_DEV_SESSION_ID`) under `id-<sha256>` directories using schema `remote-dev.read_ledger.v2`. Files not yet read in the current context can be written directly; once read, subsequent edits or writes verify the recorded SHA-256 before modifying the remote file.
+- **Directory Boundaries (`root` & `cwd`)**: Direct endpoints default to `root=/` and `cwd=/` while still blocking symlink escapes. When you want to restrict an agent to a specific workspace directory, pass `--root /srv/app --cwd /srv/app` — any read or write outside `/srv/app` will be rejected.
+- **Read-Before-Write Conflict Ledger**:
+  - Ledgers are isolated per client session (`client_context_id`, `CLAUDE_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_RUN_ID`, or `REMOTE_DEV_SESSION_ID`) under `state/id-<sha256>`.
+  - Brand-new or unread files can be written directly. Once a file has been read in the current session, any subsequent `edit` or `write` checks that the remote file's SHA-256 still matches what was read, preventing accidental overwrites if another process modified the file in the meantime.
 
 ---
 
-## 4. SSH Transport, Streaming Primitives & Process Supervision
+## 4. SSH Connection Pool, Streaming Tunnels & Process Supervision
 
-- **Developer Tool RPC Pool**: MCP and CLI operations reuse a 32-connection binary SSH stdio RPC pool (evicting idle entries after 5 minutes) with 8 ordinary workers (32 slots) and 2 reserved control workers (8 slots) for `status`, `stop`, `tail`, and `stdin`.
-- **Low-Level Python Transport Primitives**:
-  - `Endpoint.for_long_stream(host, port, ...)`: Enforces `ssh_mux=False` and `keepalive=True` (`ServerAliveInterval=30`, `ServerAliveCountMax=10`) for multi-hour streams and `ssh -N -L` tunnels so OpenSSH `ControlMaster` cannot absorb `-N` forwards and exit `rc=0` prematurely.
-  - `remote_dev.core.ssh_transport.run_stream`: Stays attached and streams output live, sending scripts over binary stdin and enforcing optional timeouts on both local and remote sides.
-  - `open_local_forward(endpoint, remote_port)`: Opens an `ssh -N -L` tunnel on the `for_long_stream` configuration and exposes `local_port`, `wait_ready(timeout_s)`, and `close()`.
-  - `run_interactive(endpoint, remote_command)`: One-off TTY-inherited bootstrap (`BatchMode=no`), mutually exclusive with SSH multiplexing.
-- **Managed Process Supervision (`remote_dev.processes.control`)**: Supports `prepare`, `go`, `status`, `tail`, `stop`, `stdin`, `launch`, and `exchange`. The Linux worker acts as a child subreaper with identity/marker verification, start gates, descendant draining, and process-family termination.
+- **Pooled Binary SSH RPC with Reserved Control Lanes**:
+  - Maintains up to 32 persistent binary SSH stdio RPC connections (closing idle connections after 5 minutes).
+  - Splits capacity into **8 regular workers (32 slots)** and **2 reserved control workers (8 slots)** so `status`, `tail`, `stop`, and `stdin` calls never get stuck behind heavy commands.
+- **Low-Level Python Streaming & Tunneling Helpers**:
+  - `Endpoint.for_long_stream(host, port, ...)`: Built for multi-hour log streams and `ssh -N -L` port forwards. It disables `ssh_mux` and enables SSH keepalives (`ServerAliveInterval=30`, `ServerAliveCountMax=10`) so OpenSSH `ControlMaster` cannot swallow `-N` tunnels and exit early.
+  - `remote_dev.core.ssh_transport.run_stream`: Streams remote output live while enforcing optional local and remote timeouts.
+  - `open_local_forward(endpoint, remote_port)`: Opens an `ssh -N -L` local port forward and exposes `.local_port`, `.wait_ready(timeout_s)`, and `.close()`.
+- **Clean Process-Tree Supervision (`remote_dev.processes.control`)**:
+  - Supports `prepare`, `go`, `status`, `tail`, `stop`, `stdin`, `launch`, and `exchange`.
+  - On Linux, the remote worker runs as a child subreaper so `stop` reliably terminates all spawned child and grandchild processes.
 
 ---
 
 ## 5. Connection Probing & Structured Diagnostics
 
-- **Connection Diagnostics**: `remote-dev probe --host <host> --port <port> --diagnose-connection` runs a fixed read-only probe reporting local preparation, SSH duration, TCP/auth milestones, remote probe execution, and stream drain timing. If a multiplexed probe fails, it compares an independent connection without ever replaying a business command.
-- **Structured Diagnostic Envelopes**: Tool responses include `diagnostics` (`operation_id`, `trace_id`, UTC start/end, monotonic duration, bounded phase summaries, and local `record_ref`) and `error_details` (preserving category, retryability, and submission certainty: `not_sent` / `not_executed`, `uncertain`, or `acknowledged`).
-- **Redaction & Offline Bundles**: `MINDIE_LOG_LEVEL=INFO` is the default and `MINDIE_DIAGNOSTICS_ROOT` configures the local log directory. Raw commands, file contents, environment values, and credentials are never passed as diagnostic logging arguments. Use `mindie-diagnostics bundle` with an `operation_id` to produce a redacted offline issue attachment.
+- **Pinpoint Slow or Broken SSH Connections**:
+  ```bash
+  remote-dev probe --host <host> --port <port> --diagnose-connection
+  ```
+  Runs a safe, read-only probe that breaks down timing across **local setup, SSH process launch, TCP/auth handshake milestones, remote execution, and stream cleanup**. If a multiplexed (`ControlMaster`) connection fails, it automatically compares a fresh non-multiplexed connection and suggests `ssh_mux=false` — without ever re-running a business command.
+- **Actionable Error Details & Certainty States**:
+  Every tool response includes `diagnostics` (`operation_id`, `trace_id`, start/end timestamps, phase timings, and local `record_ref`) plus `error_details` that clearly state whether a failed request was **never executed (`not_sent` / `not_executed`)**, **confirmed (`acknowledged`)**, or **interrupted mid-flight (`uncertain`)**.
+- **Privacy by Default**:
+  Logs default to `MINDIE_LOG_LEVEL=INFO` under `MINDIE_DIAGNOSTICS_ROOT`. Raw shell commands, file contents, environment variable values, and credentials are never written into diagnostic log fields. You can safely generate a redacted offline diagnostic bundle using `mindie-diagnostics bundle`.
