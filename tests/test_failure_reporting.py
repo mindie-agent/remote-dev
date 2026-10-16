@@ -127,3 +127,59 @@ def test_missing_schema_required_fields_are_caller_not_internal(reports, monkeyp
         tools.call_tool(tool, args)
     assert caught.value.category == 'caller'
     assert reports == [] and not hasattr(caught.value, 'mindie_diagnostic')
+
+
+@pytest.mark.parametrize('source,category', [
+    ('direct', 'caller'), ('alias_override', 'caller'), ('resolver_override', 'caller'),
+    ('alias_config', 'internal'), ('resolver_config', 'internal'),
+])
+def test_endpoint_rejection_reaches_mcp_before_transport_without_issue(reports, monkeypatch, source, category):
+    from remote_dev.core import endpoint
+    from remote_dev.mcp import server, tools
+    configured = {'host': 'example.invalid', 'port': 22, 'root': '/fixture'}
+    args = {'file_path': '/fixture/marker'}
+    monkeypatch.setattr(endpoint, '_RESOLVERS', [])
+    monkeypatch.setattr(endpoint, '_load_env_resolvers', lambda: None)
+    if source == 'direct':
+        args.update(configured, root=r'C:\local')
+    elif source.startswith('alias'):
+        args['alias'] = 'fixture'
+        if source.endswith('_config'):
+            configured['root'] = r'C:\configured'
+        else:
+            args['root'] = r'C:\local'
+        monkeypatch.setattr(endpoint, '_read_endpoint_aliases', lambda: {'fixture': configured})
+    else:
+        if source.endswith('_config'):
+            configured['root'] = r'C:\configured'
+        else:
+            args['root'] = r'C:\local'
+        endpoint.register_resolver(lambda _: configured, name='fixture')
+    monkeypatch.setattr(tools, 'remote_read', lambda *a, **k: pytest.fail('no transport may start'))
+    messages = []
+    monkeypatch.setattr(server, 'send', lambda value, **kw: messages.append(value))
+    server.handle({'jsonrpc': '2.0', 'id': 17, 'method': 'tools/call',
+                   'params': {'name': 'remote_read', 'arguments': args}})
+    assert len(messages) == 1 and messages[0]['id'] == 17
+    details = messages[0]['error']['data']
+    assert details['type'] == 'EndpointError' and details['category'] == category
+    assert details.get('submission_state') == ('not_sent' if category == 'caller' else None)
+    assert reports == [] and 'diagnostic' not in details
+
+
+def test_actual_transport_uncertainty_is_not_reclassified_as_caller(reports, monkeypatch):
+    from remote_dev.mcp import server, tools
+    failure = RemoteExecutionError('private transport failure', category='rpc_timeout',
+                                   submission_state='uncertain')
+    def fail(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(tools, 'remote_read', fail)
+    messages = []
+    monkeypatch.setattr(server, 'send', lambda value, **kw: messages.append(value))
+    server.handle({'jsonrpc': '2.0', 'id': 18, 'method': 'tools/call', 'params': {
+        'name': 'remote_read', 'arguments': {
+            'host': 'example.invalid', 'port': 22, 'root': '/fixture',
+            'file_path': '/fixture/marker'}}})
+    assert messages[0]['error']['data']['category'] == 'rpc_timeout'
+    assert messages[0]['error']['data']['submission_state'] == 'uncertain'
+    assert reports == []

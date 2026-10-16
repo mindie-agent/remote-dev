@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import remote_dev.core.endpoint as endpoint_module  # noqa: E402
+from remote_dev.core.errors import error_details
 from remote_dev.core.endpoint import (  # noqa: E402
     BUILTIN_SELECTOR_FIELDS,
     Endpoint,
@@ -239,6 +240,96 @@ class ResolverPluginTests(unittest.TestCase):
         self.assertTrue(unregister_resolver("dup"))
         self.assertFalse(unregister_resolver("dup"))
         self.assertEqual(registered_resolvers(), ())
+
+
+class EndpointErrorProvenanceTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(endpoint_module, "_RESOLVERS", [])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(endpoint_module, "_load_env_resolvers")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def resolve(self, source, configured, overrides):
+        if source == "direct":
+            return resolve_endpoint({**configured, **overrides})
+        if source == "alias":
+            with mock.patch.object(endpoint_module, "_read_endpoint_aliases",
+                                   return_value={"fixture": configured}):
+                return resolve_endpoint({"alias": "fixture", **overrides})
+        with mock.patch.object(endpoint_module, "_RESOLVERS", []):
+            register_resolver(lambda _: configured, name="fixture")
+            return resolve_endpoint(overrides)
+
+    def test_explicit_invalid_values_are_caller_not_sent(self):
+        invalid = {"root": r"C:\local", "cwd": "relative",
+                   "connect_timeout_ms": 0, "ssh_mux": "false", "keepalive": 1}
+        for source in ("direct", "alias", "resolver"):
+            for key, value in invalid.items():
+                with self.subTest(source=source, key=key), self.assertRaises(EndpointError) as caught:
+                    self.resolve(source, {"host": "example.invalid", "port": 22}, {key: value})
+                self.assertEqual(error_details(caught.exception), {
+                    "type": "EndpointError", "category": "caller",
+                    "submission_state": "not_sent", "retryable": False,
+                })
+        for source in ("direct", "alias"):
+            for value in ("bad", -1, True):
+                with self.subTest(source=source, port=value), self.assertRaises(EndpointError) as caught:
+                    self.resolve(source, {"host": "example.invalid", "port": 22}, {"port": value})
+                self.assertEqual(error_details(caught.exception)["category"], "caller")
+                self.assertEqual(error_details(caught.exception)["submission_state"], "not_sent")
+
+    def test_invalid_configured_values_are_not_blame_on_caller(self):
+        for source in ("alias", "resolver"):
+            for key, value in (("root", r"C:\local"), ("cwd", "relative"),
+                               ("connect_timeout_ms", 0), ("ssh_mux", "false"),
+                               ("keepalive", 1), ("port", -1)):
+                with self.subTest(source=source, key=key), self.assertRaises(EndpointError) as caught:
+                    self.resolve(source, {"host": "example.invalid", "port": 22, key: value},
+                                 {"user": "fixture"})
+                self.assertEqual(error_details(caught.exception)["category"], "internal")
+                self.assertNotIn("submission_state", error_details(caught.exception))
+
+    def test_empty_paths_retain_default_source_even_when_explicit(self):
+        for source in ("direct", "alias", "resolver"):
+            for key, default in (("root", "DEFAULT_ROOT"), ("cwd", "DEFAULT_CWD")):
+                for value in (None, "", False, 0):
+                    with self.subTest(source=source, key=key, value=value):
+                        with mock.patch.object(endpoint_module, default, "bad-default"):
+                            with self.assertRaises(EndpointError) as caught:
+                                self.resolve(source, {"host": "example.invalid", "port": 22},
+                                             {key: value})
+                        self.assertEqual(error_details(caught.exception)["category"], "internal")
+                        self.assertNotIn("submission_state", error_details(caught.exception))
+
+    def test_resolver_endpoint_is_not_reinterpreted_or_overridden(self):
+        configured = Endpoint(host="example.invalid", port=22, root="/configured")
+        actual = self.resolve("resolver", configured, {
+            "root": r"C:\ignored", "cwd": "ignored", "keepalive": "ignored"})
+        self.assertIs(actual, configured)
+
+    def test_resolver_port_does_not_gain_caller_override_semantics(self):
+        actual = self.resolve("resolver", {"host": "example.invalid", "port": 22}, {"port": -1})
+        self.assertEqual(actual.port, 22)
+        with self.assertRaises(EndpointError) as caught:
+            self.resolve("resolver", {"host": "example.invalid", "port": -1}, {"port": 22})
+        self.assertEqual(error_details(caught.exception)["category"], "internal")
+
+    def test_invalid_alias_json_and_resolver_failure_keep_original_semantics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "endpoints.json"
+            path.write_text("{invalid", encoding="utf-8")
+            with mock.patch.object(endpoint_module, "alias_files", return_value=[path]):
+                with self.assertRaises(EndpointError) as caught:
+                    resolve_endpoint({"alias": "fixture", "root": r"C:\caller"})
+            self.assertNotEqual(error_details(caught.exception)["category"], "caller")
+        def failed(_):
+            raise RuntimeError("resolver configuration unreadable")
+        register_resolver(failed, name="failed")
+        with self.assertRaises(EndpointError) as caught:
+            resolve_endpoint({"root": r"C:\caller"})
+        self.assertEqual(error_details(caught.exception)["category"], "internal")
 
 
 class EnvResolverLoadingTests(unittest.TestCase):
