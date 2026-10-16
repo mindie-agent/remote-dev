@@ -2,12 +2,12 @@
 
 **中文** · [English](./README.en.md) · [返回项目主页](../README.md)
 
-本目录收录 `remote-dev` 的架构设计、多客户端兼容性契约以及底层传输与诊断技术参考。
+这里汇总了 `remote-dev` 的架构原理、各大 AI 客户端的接入指南，以及容器直通、SSH 连接池和故障诊断的详细说明。
 
-## 文档列表
+## 文档导航
 
-| 文档 | 中文 | English | 内容概述 |
+| 文档主题 | 中文 | English | 你能在这里查到什么 |
 | --- | --- | --- | --- |
-| 架构与分层设计 | [design.zh.md](./design.zh.md) | [../DESIGN.md](../DESIGN.md) | 三层边界（工具面、共享底座、消费方）、依赖方向、容器端点与 MCP 资源模型 |
-| 客户端兼容性与参数层 | [client-compatibility.zh.md](./client-compatibility.zh.md) | [../CLIENT_COMPATIBILITY.md](../CLIENT_COMPATIBILITY.md) | Claude Code、Codex、Kimi Code、Cursor、Grok Build 的 MCP 配置与参数别名归一化规则 |
-| 传输层、容器与诊断参考 | [transport-and-diagnostics.md](./transport-and-diagnostics.md) | [transport-and-diagnostics.en.md](./transport-and-diagnostics.en.md) | 容器执行语义、Resolver 插件接口、SSH 连接池与流原语、受管进程监督及结构化诊断 |
+| 整体架构与分层设计 | [design.zh.md](./design.zh.md) | [../DESIGN.md](../DESIGN.md) | 为什么分成工具层、底座层和上层业务？容器直通和并发通道是怎么工作的？ |
+| 各大客户端接入与参数兼容 | [client-compatibility.zh.md](./client-compatibility.zh.md) | [../CLIENT_COMPATIBILITY.md](../CLIENT_COMPATIBILITY.md) | Claude Code、Codex、Kimi Code、Cursor、Grok Build 的配置方法，以及不同客户端的参数名自动转换规则 |
+| 容器直通、SSH 连接池与诊断参考 | [transport-and-diagnostics.md](./transport-and-diagnostics.md) | [transport-and-diagnostics.en.md](./transport-and-diagnostics.en.md) | 怎么免装 SSH 直接操作远端 Docker 容器、怎么写自定义查机器插件、长连接隧道怎么防断连、遇到网络慢怎么测速排障 |

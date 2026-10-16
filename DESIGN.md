@@ -1,96 +1,79 @@
-# Remote Developer Substrate Design
+# `remote-dev` Architecture & Layered Design
 
 [中文](./docs/design.zh.md) · **English** · [Documentation Index](./docs/README.en.md)
 
-`remote-dev` makes remote development feel like local development for Codex,
-Claude Code, Cursor, Kimi Code, Grok Build, and other MCP-capable coding agents.
-Local work keeps using the client's native `Read` / `Edit` / `Write` / `Bash` /
-`Glob` / `Grep` / `apply_patch` tools; remote work uses the matching `remote.*`
-tool and only adds explicit endpoint fields.
+The goal of `remote-dev` is straightforward: **make working on a remote Linux server or inside a remote Docker container feel just like working in a local directory** for AI coding agents such as Codex, Claude Code, Cursor, Kimi Code, and Grok Build.
 
-## Three-Layer Architecture
+For local files, the agent uses the client's built-in `Read` / `Edit` / `Write` / `Bash` / `Glob` / `Grep` / `apply_patch` tools. For remote work, the agent calls the matching `remote.*` tool and simply adds the target endpoint (`host` / `port` / `container` / `alias`).
 
-### Layer A: Remote-Native Developer Tool Surface
+```mermaid
+flowchart TB
+    subgraph LayerC["Layer C: Upper-Layer Consumers (External Repositories)"]
+        Coord["mindie-coordinator / Domain Workflow Skills"]
+    end
 
-- `remote.read` (`RemoteRead`)
-- `remote.write` (`RemoteWrite`)
-- `remote.edit` (`RemoteEdit`)
-- `remote.multi_edit` (`RemoteMultiEdit`)
-- `remote.bash` (`RemoteBash`)
-- `remote.glob` (`RemoteGlob`)
-- `remote.grep` (`RemoteGrep`)
-- `remote.ls` (`RemoteLS`)
-- `remote.apply_patch` (`RemoteApplyPatch`)
+    subgraph LayerA["Layer A: Remote Developer Tool Surface (19 Symmetric Tools)"]
+        FileTools["Files & Patches: read / write / edit / multi_edit / apply_patch"]
+        SearchTools["Search & Listing: glob / grep / ls"]
+        JobTools["Commands & Jobs: bash / job_status / job_tail / job_stop / job_stdin"]
+        SyncTools["Artifact Sync & Probing: artifact_pull / artifact_push / probe / context_snapshot"]
+    end
 
-Plus background job control (`remote.job_status` / `job_tail` / `job_stop` /
-`job_stdin`), artifact sync (`remote.artifact_manifest` / `artifact_pull` /
-`artifact_push`), and endpoint facts (`remote.probe`, `remote.context_snapshot`).
+    subgraph LayerB["Layer B: Shared Substrate (remote_dev.core & processes)"]
+        Endpoint["Explicit Endpoint Resolution & Resolver Plugins"]
+        Container["Direct Docker Container Execution (Pins Full Container ID)"]
+        RPCPool["Cross-Platform Binary SSH RPC Pool (8 Worker + 2 Control Lanes)"]
+        Safety["Read-Before-Write Conflict Ledger & Cross-Process Locks"]
+        Supervisor["Remote Process-Tree Supervisor (Subreaper) & Durable Byte Cursors"]
+    end
 
-### Layer B: Shared Substrate
+    Coord -->|"Tool calls / Env vars / Resolver plugins"| LayerA
+    LayerA --> LayerB
+```
 
-- **Endpoint identity and explicit resolution** (`remote_dev.core.endpoint`).
-- **Existing Docker container coordinates** (`remote_dev.core.container_endpoint`):
-  resolve a container name or short ID to a running full container ID through the
-  host's existing RPC, then freeze that full ID before operation records or
-  concurrency checks; full IDs require no lookup.
-- **Resolver plugin interface** for consumer-owned selectors (`remote_dev.core.endpoint`).
-- **Binary SSH stdio RPC pooling** on Windows and POSIX (`remote_dev.core.rpc_transport`),
-  with request IDs, bounded code caches, scoped cancellation, concurrent requests,
-  and no replay after unknown outcomes.
-- **Low-level SSH options, attached streams, port forwards, and first-contact
-  bootstrap** (`remote_dev.core.ssh_transport`), retaining explicit ControlMaster policy.
-- **Full-permission default root with optional explicit root/cwd path policy**
-  (`remote_dev.core.path_policy`, `remote_dev.core.permissions`).
-- **Optional read-ledger optimistic concurrency checks** (`remote_dev.core.read_ledger`,
-  `remote_dev.core.state_store`).
-- **Compact previews plus full local refs** (`remote_dev.core.preview`, `remote_dev.result`).
-- **Generic remote process supervision** (`remote_dev.processes.control`) and
-  execute/yield/poll sessions with durable byte cursors (`remote_dev.core.job_ops`),
-  supporting pipe stdin, real PTYs, and synchronous library waits.
-- **Artifact manifests and bounded binary batch streams** (`remote_dev.core.artifact_ops`,
-  `remote_dev.core.artifact_transport`) with atomic replacement after SHA-256 verification.
-- **Local record locks and shared remote mutation locks** across file tools,
-  patches, and artifact commits while keeping concurrent reads independent.
-- **Hook guards** (`remote_dev.hooks`).
-- **Concurrent MCP server and resources** with eight ordinary workers (32 slots)
-  and two reserved control workers (8 slots) (`remote_dev.mcp`).
+---
 
-`ssh_command` is the shared complete-command constructor. Container operations
-invoke `docker exec -i <full-id>` for the existing Python RPC worker, binary
-artifact worker, Bash scripts, and streams. No container daemon, SSH server,
-separate supervisor, dependency installer, or managed resource authority is added.
-Host-only prefixes, interactive bootstrap, and port forwarding reject container
-endpoints before launching a process. Container IDs partition local state,
-mutation locks, and connection pools; retained job records never re-resolve a
-mutable container name.
+## How the Three Layers Work Together
 
-### Layer C: Consumer Layer
+### 1. Layer A: Remote Developer Tool Surface
 
-Workflow skills, session managers, and coordinators live in their own consumer
-repositories and interact with `remote-dev` strictly through tool calls,
-environment variables, and registered resolver plugins. `remote-dev` never
-imports Layer C.
+Exposes 19 tools over both the stdio MCP server (`remote-dev server`) and the CLI (`remote-dev <subcommand>`):
+- **Read, Write & Patch**: `remote.read`, `remote.write`, `remote.edit`, `remote.multi_edit`, `remote.apply_patch`
+- **Search & Browse**: `remote.glob`, `remote.grep`, `remote.ls`
+- **Run & Control Processes**: `remote.bash`, `remote.job_status`, `remote.job_tail`, `remote.job_stop`, `remote.job_stdin`
+- **Sync Files & Inspect Hosts**: `remote.artifact_manifest`, `remote.artifact_pull`, `remote.artifact_push`, `remote.probe`, `remote.context_snapshot`
 
-## Dependency Direction
+### 2. Layer B: Shared Substrate
 
-The substrate depends only on the Python standard library, `mindie-diagnostics`,
-and an `ssh` client binary. Consumers depend on the substrate:
+Handles connection management, container routing, and safety guarantees under the hood:
+- **Explicit Target Resolution** (`remote_dev.core.endpoint`): Resolves targets strictly from explicit arguments (`host` / `port` / `alias` or registered plugin selectors) — never guessing from your local working directory.
+- **Zero-Daemon Docker Container Execution** (`remote_dev.core.container_endpoint`): When you pass a container name or short ID, `remote-dev` resolves it to the running **full 64-character container ID** via the host's RPC channel and pins that full ID for all job records, read ledgers, and pooled connections. Even if someone recreates a container with the same name later, existing records never get mixed up.
+- **Pooled Binary SSH RPC with Dedicated Control Lanes** (`remote_dev.core.rpc_transport`): Reuses persistent SSH connections on macOS, Linux, and native Windows. Both the MCP server and the remote RPC pool allocate **8 regular workers (32 slots)** and **2 reserved control workers (8 slots)** so `job_status`, `job_tail`, `job_stop`, and `job_stdin` always respond immediately even when regular workers are saturated.
+- **No Blind Retries on Uncertain Outcomes**: If a connection drops mid-flight and `remote-dev` cannot confirm whether the remote operation ran, it reports `uncertain` instead of automatically replaying a potentially mutating command.
+- **Read-Before-Write Conflict Protection** (`remote_dev.core.read_ledger`): Once a file has been read in the current session, subsequent edits or writes verify its SHA-256 hash so your agent never silently overwrites concurrent changes on the server.
+- **Clean Process-Tree Termination & UTF-8 Safe Log Cursors** (`remote_dev.processes.control`, `remote_dev.core.job_ops`): On Linux, the remote worker runs as a child subreaper so `job_stop` cleanly terminates the entire process family (including grandchild processes). Output cursors advance under a lock and never split multi-byte UTF-8 characters across reads.
+- **Chunked File Sync with SHA-256 Verification** (`remote_dev.core.artifact_ops`): Streams files in bounded 1 MiB chunks and performs atomic replacement only after verifying SHA-256 digests.
 
-- **Explicit endpoint resolution**: accepts `host` / `port` / `user` / `root` /
-  `cwd` / `container` and `alias`. Every other selector is resolved by a plugin
-  registered via `remote_dev.core.endpoint.register_resolver` or `REMOTE_DEV_RESOLVERS`.
-- **Generic process control**: `remote_dev.processes.control` serves both ordinary
-  background jobs and coordinator-managed executions without requiring a
-  coordinator installation on the remote host.
-- **Environment-driven configuration**: `REMOTE_DEV_RUNTIME_ENV_FILE`,
-  `REMOTE_DEV_SSH_MUX_DIR`, `REMOTE_DEV_STATE_DIR`, and `REMOTE_DEV_ENDPOINTS_FILE`.
+`ssh_command` is the single command constructor. For container endpoints, it invokes `docker exec -i <full-container-id>` over the host SSH connection — no SSH server, background daemon, or extra package installation is needed inside the container.
 
-## MCP Transport & Resources
+### 3. Layer C: Upper-Layer Consumers
 
-The MCP server supports standard stdio `Content-Length` JSON-RPC framing (with
-newline-delimited JSON-RPC retained as a local test fallback).
+Coordinators (like `mindie-coordinator`) and workflow skills live in their own repositories and interact with `remote-dev` strictly through tool calls, environment variables, and registered resolver plugins. `remote-dev` never imports Layer C.
 
-Exposed MCP resources:
+---
+
+## Minimal Dependencies
+
+`remote-dev` depends only on:
+1. **Python standard library** (`>= 3.11`)
+2. **`mindie-diagnostics`** (for bounded local structured logging)
+3. **An `ssh` client binary**
+
+---
+
+## MCP Transport & Resource URIs
+
+The MCP server supports standard stdio `Content-Length` JSON-RPC framing as well as newline-delimited JSON-RPC. In addition to the 19 tools, it exposes read-only MCP resources:
 
 - `remote://endpoints`
 - `remote://endpoint/<endpoint-id>/context/latest`
@@ -101,7 +84,11 @@ Exposed MCP resources:
 - `remote://endpoint/<endpoint-id>/artifacts`
 - `remote://endpoint/<endpoint-id>/artifacts/<artifact-id>/manifest`
 
-## Validation
+---
+
+## Local & Live Validation
+
+Run the unit test suite and offline validator locally (no SSH server needed):
 
 ```bash
 uv pip install -e ".[test]"
@@ -109,10 +96,10 @@ python -m pytest
 remote-dev validate --local-only
 ```
 
-For live endpoint verification against a reachable SSH host:
+To run end-to-end validation against a live SSH server:
 
 ```bash
 remote-dev validate --host <host> --port <port> --root /srv/app --cwd /srv/app
 ```
 
-See [Transport, Containers & Diagnostics](./docs/transport-and-diagnostics.en.md) for detailed transport and observability specifications.
+See [Transport, Containers & Diagnostics](./docs/transport-and-diagnostics.en.md) for more details on container execution boundaries, resolver plugins, and connection diagnostics.
