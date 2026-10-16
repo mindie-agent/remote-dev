@@ -58,7 +58,7 @@ Copy and paste this sentence to Claude Code, Codex, Kimi Code, or Cursor and let
 Please install and configure https://github.com/mindie-agent/remote-dev for me
 ```
 
-<details open>
+<details>
 <summary>🤖 <b>Instructions for AI Agents (Auto-Install Protocol)</b></summary>
 
 If you are an AI Agent receiving the prompt above, follow these exact steps to set up `remote-dev` for the user:
