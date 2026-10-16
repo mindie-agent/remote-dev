@@ -178,7 +178,7 @@ def test_host_only_entries_reject_containers_before_any_process_or_lookup(call):
 
 
 def test_script_and_binary_primitives_use_the_fixed_container():
-    with mock.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'out', b'err')) as run:
+    with mock.patch.object(ssh, '_capture_command', return_value=subprocess.CompletedProcess([], 0, b'out', b'err')) as run:
         assert ssh.run_script(endpoint(), 'printf out').stdout == 'out'
         assert shlex.split(run.call_args.args[0][-1]) == ['docker', 'exec', '-i', A, 'bash', '-s']
         assert run.call_args.kwargs['input'] == b'printf out'
@@ -189,7 +189,7 @@ def test_script_and_binary_primitives_use_the_fixed_container():
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='Remote scripts target Linux Bash')
 def test_binary_and_stdin_scripts_keep_actual_bash_pipe_redirect_and_env_semantics(tmp_path):
-    original = subprocess.run
+    original = ssh._capture_command
     def launch(argv, **kwargs):
         command = shlex.split(argv[-1])
         assert command[:4] == ['docker', 'exec', '-i', A]
@@ -197,7 +197,7 @@ def test_binary_and_stdin_scripts_keep_actual_bash_pipe_redirect_and_env_semanti
         return original(command[4:], **kwargs)
     output = tmp_path / 'output file'
     script = "value='original environment'; printf '%s\\n' \"$value\" | cat > " + shlex.quote(str(output)) + "; cat " + shlex.quote(str(output))
-    with mock.patch.object(subprocess, 'run', side_effect=launch):
+    with mock.patch.object(ssh, '_capture_command', side_effect=launch):
         result = ssh.run_bytes(endpoint(), script)
         assert result.returncode == 0 and result.stdout == b'original environment\n'
         assert output.read_text() == 'original environment\n'
@@ -323,14 +323,19 @@ def test_real_worker_and_artifact_pipes_run_through_docker_exec_adapter(tmp_path
     ep = replace(endpoint(), root=str(root), cwd=str(root))
     original = subprocess.Popen
     commands = []
-    def launch(argv, **kwargs):
+    def rewrite(argv):
+        # Keep the real caller-death supervisor; adapt only its target argv.
+        if len(argv) >= 7 and Path(argv[2]).name == '_posix_owner.py':
+            return [*argv[:6], *rewrite(argv[6:])]
         if argv[0] == 'container-test-ssh':
             command = shlex.split(argv[-1])
             assert command[:4] == ['docker', 'exec', '-i', A]
             assert command[4] == 'python3'
             commands.append(command)
             argv = [sys.executable, *command[5:]]
-        return original(argv, **kwargs)
+        return argv
+    def launch(argv, **kwargs):
+        return original(rewrite(argv), **kwargs)
     rpc.close_connections()
     try:
         with mock.patch.object(ssh, 'ssh_base_cmd', return_value=['container-test-ssh']), \

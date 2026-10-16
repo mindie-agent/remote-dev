@@ -24,7 +24,7 @@ import sys
 payload = json.loads(sys.stdin.read())
 root = pathlib.Path(payload["root"])
 
-def run(cmd, timeout=8):
+def run(cmd, timeout=None):
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
         return {"returncode": proc.returncode, "stdout_tail": (proc.stdout or "")[-2000:], "stderr_tail": (proc.stderr or "")[-2000:]}
@@ -44,8 +44,8 @@ summary = {
     "python_executable": sys.executable,
     "cwd": os.getcwd(),
     "root_exists": root.exists(),
-    "git_root": run(["git", "-C", str(root), "rev-parse", "--show-toplevel"], timeout=5),
-    "root_head": run(["git", "-C", str(root), "rev-parse", "HEAD"], timeout=5),
+    "git_root": run(["git", "-C", str(root), "rev-parse", "--show-toplevel"]),
+    "root_head": run(["git", "-C", str(root), "rev-parse", "HEAD"]),
     "modules": {name: module_info(name) for name in payload.get("modules", [])},
 }
 print(json.dumps({"status": "ok", "summary": summary}, sort_keys=True))
@@ -92,7 +92,7 @@ def _duration_ms(start: float) -> int:
 
 @observed_tool("remote.probe")
 @pinned_endpoint
-def remote_probe(endpoint: Endpoint, *, timeout_ms: int = 120000, diagnose_connection: bool = False, modules: list[str] | None = None) -> dict[str, Any]:
+def remote_probe(endpoint: Endpoint, *, timeout_ms: int | None = None, diagnose_connection: bool = False, modules: list[str] | None = None) -> dict[str, Any]:
     if diagnose_connection:
         from remote_dev.diagnostics import diagnose_ssh
         diagnosis = diagnose_ssh(endpoint, timeout_ms=timeout_ms)
@@ -107,7 +107,12 @@ def remote_probe(endpoint: Endpoint, *, timeout_ms: int = 120000, diagnose_conne
     data = run_remote_python(endpoint, REMOTE_PROBE_PY, {"root": endpoint.root, "modules": modules or []}, timeout_ms=timeout_ms)
     status = str(data.get("status", "failed"))
     summary = data.get("summary", {}) if isinstance(data.get("summary"), dict) else {}
-    snapshot = write_context_snapshot(endpoint, summary, data) if status == "ok" else None
+    recording_error = None
+    try:
+        snapshot = write_context_snapshot(endpoint, summary, data) if status == "ok" else None
+    except (OSError, ValueError, RuntimeError) as exc:
+        snapshot = None
+        recording_error = f"{type(exc).__name__}: {exc}"
     result = make_result(
         tool="remote.probe",
         target=endpoint.to_result_target(),
@@ -131,12 +136,17 @@ def remote_probe(endpoint: Endpoint, *, timeout_ms: int = 120000, diagnose_conne
             hostname=summary.get("hostname", ""),
             python=summary.get("python", ""),
         )
+    if recording_error:
+        result.update(outcome="failed", status="local_recording_failed", operation_completed=True,
+                      recording_error=recording_error,
+                      summary="Remote probe completed, but the local context snapshot could not be recorded.")
+        text += result["summary"] + "\n" + recording_error + "\n"
     return {"text": text, "result": result}
 
 
 @observed_tool("remote.context_snapshot")
 @pinned_endpoint
-def remote_context_snapshot(endpoint: Endpoint, *, timeout_ms: int = 120000, live_probe: bool = True) -> dict[str, Any]:
+def remote_context_snapshot(endpoint: Endpoint, *, timeout_ms: int | None = None, live_probe: bool = True) -> dict[str, Any]:
     if live_probe:
         payload = remote_probe(endpoint, timeout_ms=timeout_ms)
         payload["result"]["tool"] = "remote.context_snapshot"

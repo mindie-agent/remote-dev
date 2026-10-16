@@ -9,13 +9,17 @@ that local group: remote quiet still requires a remote supervisor receipt.
 from __future__ import annotations
 
 import errno
+import json
 import os
+from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from .errors import RemoteExecutionError, record_cleanup_failure
 
 
 class OwnedProcess:
@@ -34,6 +38,7 @@ class OwnedProcess:
         if forbidden:
             raise ValueError("process ownership controls " + ", ".join(sorted(forbidden)))
         self._closed = False
+        self._owner_fd = None
         self._job = _WindowsJob() if os.name == "nt" else None
         options = dict(stdio, cwd=cwd, env=None if env is None else {**os.environ, **env})
         if self._job is None:
@@ -41,17 +46,80 @@ class OwnedProcess:
         else:
             options["creationflags"] = subprocess.CREATE_NO_WINDOW | 0x00000004  # CREATE_SUSPENDED
         try:
-            self.process = subprocess.Popen(list(argv), **options)
-            if self._job is not None:
+            if self._job is None:
+                self._spawn_posix(list(argv), options)
+            else:
+                self.process = subprocess.Popen(list(argv), **options)
                 self._job.assign_and_resume(self.process)
-        except BaseException:
-            if self._job is not None:
-                self._job.close()
+        except BaseException as primary:
             process = getattr(self, "process", None)
-            if process is not None:
-                process.kill()  # Assignment may fail while the child is suspended.
-                process.wait(timeout=5)
+            try:
+                if self._job is not None:
+                    self._job.close()
+                    if process is not None:
+                        process.kill()  # Assignment may fail before job ownership.
+                        process.wait(timeout=5)
+                elif process is not None:
+                    self.stop()
+            except Exception as cleanup_error:
+                record_cleanup_failure(primary, cleanup_error)
+            finally:
+                try:
+                    self._close_owner_pipe()
+                except Exception as cleanup_error:
+                    record_cleanup_failure(primary, cleanup_error)
+                if process is not None:
+                    for name in ("stdin", "stdout", "stderr"):
+                        stream = getattr(process, name, None)
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except Exception as cleanup_error:
+                                record_cleanup_failure(primary, cleanup_error)
             raise
+
+    def _spawn_posix(self, argv, options):
+        """Do not release target code until its caller-death guardian exists."""
+        owner_read, owner_write = os.pipe()
+        self._owner_fd = owner_write
+        try:
+            started, notify = os.pipe()
+        except BaseException:
+            os.close(owner_read)
+            raise
+        try:
+            inherited = options.pop("pass_fds", ())
+            self.process = subprocess.Popen(
+                [sys.executable, "-I", str(Path(__file__).with_name("_posix_owner.py")),
+                 str(owner_read), str(notify), json.dumps(list(inherited)), *argv],
+                pass_fds=(*inherited, owner_read, notify), **options)
+        finally:
+            os.close(owner_read)
+            os.close(notify)
+            if not hasattr(self, "process"):
+                os.close(started)
+        with os.fdopen(started, "rb") as stream:
+            raw = stream.read(1025)
+        if len(raw) > 1024:
+            raise RemoteExecutionError("owned process startup receipt exceeds its bound",
+                                       category="process_start", submission_state="uncertain")
+        try:
+            receipt = json.loads(raw)
+        except (ValueError, UnicodeError) as exc:
+            raise RemoteExecutionError("owned process could not confirm target startup",
+                                       category="process_start", submission_state="uncertain") from exc
+        if receipt != {"started": True}:
+            number = receipt.get("errno") if isinstance(receipt, dict) else None
+            if isinstance(receipt, dict) and receipt.get("started") is False and type(number) is int:
+                raise OSError(number, os.strerror(number), os.fspath(argv[0]))
+            raise RemoteExecutionError("owned process has no valid startup receipt",
+                                       category="process_start", submission_state="uncertain")
+
+    def _close_owner_pipe(self):
+        descriptor = getattr(self, "_owner_fd", None)
+        if descriptor is not None:
+            self._owner_fd = None
+            os.close(descriptor)
 
     def _signal_group(self, sig: int) -> None:
         if self.process.returncode is not None:
@@ -120,23 +188,37 @@ class OwnedProcess:
         else:
             # Never use parent liveness as proof that its group is empty.
             # A proxy child can outlive SSH while still holding an output pipe.
-            self._signal_group(signal.SIGKILL if force else signal.SIGTERM)
-            if not force:
+            try:
+                self._signal_group(signal.SIGKILL if force else signal.SIGTERM)
+                if not force:
+                    try:
+                        self.process.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    # The parent may already have exited while a child ignores TERM.
+                    self._signal_group(signal.SIGKILL)
+                result = self.process.wait(timeout=timeout)
+            finally:
+                primary = sys.exc_info()[1]
                 try:
-                    self.process.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    pass
-                # The parent may already have exited while a child ignores TERM.
-                self._signal_group(signal.SIGKILL)
-            result = self.process.wait(timeout=timeout)
+                    self._close_owner_pipe()
+                except Exception as cleanup_error:
+                    if primary is None:
+                        raise
+                    record_cleanup_failure(primary, cleanup_error)
         self._closed = True
         return result
 
     def __enter__(self) -> OwnedProcess:
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.stop()
+    def __exit__(self, _type, error, _traceback) -> None:
+        try:
+            self.stop()
+        except Exception as cleanup_error:
+            if error is None:
+                raise
+            record_cleanup_failure(error, cleanup_error)
 
 
 class _WindowsJob:

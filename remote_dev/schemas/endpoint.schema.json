@@ -13,7 +13,7 @@
     "cwd": {"type": "string"},
     "runtime_env": {"type": "boolean", "default": true},
     "identity_file": {"type": "string"},
-    "connect_timeout_ms": {"type": "integer", "default": 10000},
+    "connect_timeout_ms": {"type": "integer", "minimum": 1},
     "ssh_mux": {
       "type": "boolean",
       "description": "Per-endpoint OpenSSH multiplexing. true uses the shared ControlMaster; false forces an independent connection. When omitted, REMOTE_DEV_SSH_MUX is the process default. Hour-scale streams use Endpoint.for_long_stream, which sets ssh_mux=false."

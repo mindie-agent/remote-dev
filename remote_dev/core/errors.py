@@ -23,12 +23,27 @@ class RemoteExecutionError(RemoteDevError):
         self.retryable = bool(retryable)
 
 
+def record_cleanup_failure(error, cleanup_error):
+    """Keep the primary failure and expose cleanup separately to callers."""
+    detail = f"{type(cleanup_error).__name__}: {cleanup_error}"[:1000]
+    previous = getattr(error, "cleanup_error", None)
+    error.cleanup_error = (previous + "; " + detail)[:4000] if previous else detail
+    error.add_note("Cleanup also failed: " + detail)
+
+
 def error_details(exc):
     """Keep transport certainty through exception wrappers without parsing prose."""
     result = {"type": type(exc).__name__, "category": "internal", "retryable": False}
     current, seen = exc, set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
+        if getattr(current, "cleanup_error", None) is not None:
+            result["cleanup_error"] = current.cleanup_error
+        if getattr(current, "operation_completed", None) is not None:
+            result["operation_completed"] = current.operation_completed
+        for key in ("exit_code", "stderr_tail"):
+            if getattr(current, key, None) is not None:
+                result[key] = getattr(current, key)
         if getattr(current, "category", None) == "caller":
             result.update(category="caller", submission_state="not_sent", retryable=False)
             break

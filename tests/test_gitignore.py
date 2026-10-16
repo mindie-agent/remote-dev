@@ -72,7 +72,7 @@ class RespectGitignoreTests(unittest.TestCase):
         self.assertIn("keep.py", relpaths)
         self.assertNotIn("skip.pyc", relpaths)
         self.assertFalse(any(item == "build" or item.startswith("build/") for item in relpaths))
-        self.assertEqual(data.get("warnings"), [])
+        self.assertIn("git is unavailable", " ".join(data.get("warnings", [])))
 
     def test_git_check_ignore_filters_in_a_worktree(self) -> None:
         git = shutil.which("git")
@@ -125,3 +125,23 @@ class RespectGitignoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_unreadable_gitignore_subtree_is_not_empty_success(tmp_path):
+    import pytest
+    if os.name == 'nt':
+        pytest.skip('POSIX directory mode fixture')
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    (tree / 'keep.py').write_text('keep')
+    blocked = tree / 'blocked'
+    blocked.mkdir()
+    (blocked / '.gitignore').write_text('secret')
+    bindir = tmp_path / 'empty-bin'
+    bindir.mkdir()
+    blocked.chmod(0)
+    try:
+        with pytest.raises(AssertionError, match='PermissionError'):
+            run_glob(tree, respect_gitignore=True, extra_env={'PATH': str(bindir)})
+    finally:
+        blocked.chmod(0o700)

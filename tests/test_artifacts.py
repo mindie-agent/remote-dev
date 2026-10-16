@@ -79,7 +79,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(path, local.resolve())
             self.assertEqual(item["sha256"], expected)
             self.assertEqual(item["path"], "/srv/artifact.txt")
-            factory.assert_called_once_with(endpoint, "push", 1, 120000)
+            factory.assert_called_once_with(endpoint, "push", 1, None)
 
     def test_artifact_pull_blocks_malicious_relpath(self) -> None:
         endpoint = Endpoint(host="1.2.3.4", port=46000)
@@ -88,6 +88,7 @@ class ArtifactTests(unittest.TestCase):
             artifact_ops.remote_artifact_manifest = lambda *_args, **_kwargs: {  # type: ignore[assignment]
                 "text": "",
                 "result": {
+                    "outcome": "success",
                     "manifest": {
                         "status": "ok",
                         "files": [{
@@ -122,7 +123,7 @@ class ArtifactTests(unittest.TestCase):
             destination = Path(tmp) / "download"
             destination.mkdir()
             (destination / "artifact").write_bytes(b"existing content")
-            receipt = {"result": {"manifest": manifest, "refs": {"local_manifest": str(Path(tmp) / "receipt.json")}}}
+            receipt = {"result": {"outcome": "success", "manifest": manifest, "refs": {"local_manifest": str(Path(tmp) / "receipt.json")}}}
             with mock.patch.object(artifact_ops, "remote_artifact_manifest", return_value=receipt), \
                  mock.patch.object(artifact_ops, "ArtifactStream") as stream:
                 result = artifact_ops.remote_artifact_pull(endpoint, remote_path="/remote/new.txt", local_dir=str(destination))["result"]

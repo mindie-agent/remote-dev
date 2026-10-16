@@ -11,6 +11,7 @@ import json
 import re
 
 from .errors import EndpointError
+from .execution import timeout_value
 
 FULL_CONTAINER_ID = re.compile(r"[0-9a-f]{64}\Z")
 CONTAINER_SELECTOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
@@ -42,6 +43,7 @@ def pin_container_endpoint(endpoint, *, timeout_ms=None):
     creating local ledgers/job records, and retain this returned endpoint for
     all stages of one operation. A missing old ID must never fall back to a name.
     """
+    timeout_value(timeout_ms)
     if endpoint is None or endpoint.container is None:
         return endpoint
     validate_container(endpoint.container)
@@ -51,7 +53,7 @@ def pin_container_endpoint(endpoint, *, timeout_ms=None):
     host = replace(endpoint, container=None, container_selector=None, root="/", cwd="/",
                    runtime_env=False, runtime_env_file=None)
     row = request(host, "python", _INSPECT, {"container": endpoint.container},
-                  timeout_ms=45000 if timeout_ms is None else timeout_ms)
+                  timeout_ms=timeout_ms)
     if row.get("returncode") != 0 or row.get("timed_out") or row.get("cancelled"):
         detail = str(row.get("stderr") or row.get("stdout") or "Docker inspect did not complete")[-4000:]
         raise EndpointError("Cannot resolve existing container " + repr(endpoint.container) + ": " + detail)
@@ -68,6 +70,7 @@ def pinned_endpoint(function):
     """Use identical container pinning at native Python and MCP operation entry."""
     @wraps(function)
     def invoke(endpoint, *args, **kwargs):
-        endpoint = pin_container_endpoint(endpoint, timeout_ms=kwargs.get("timeout_ms"))
+        timeout_ms = timeout_value(kwargs.get("timeout_ms"))
+        endpoint = pin_container_endpoint(endpoint, timeout_ms=timeout_ms)
         return function(endpoint, *args, **kwargs)
     return invoke

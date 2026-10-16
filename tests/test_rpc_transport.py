@@ -155,6 +155,24 @@ print(json.dumps({'status':'ok'}))
             self.request({})
         self.assertEqual(self.request({})["calls"], 2)
 
+    def test_send_failure_keeps_uncertain_state_when_close_also_fails(self):
+        from remote_dev.core.errors import error_details
+        self.request({})
+        connection = next(iter(rpc_transport._pool.values())).connection
+        primary = BrokenPipeError("send fixture")
+        close = connection.close
+        def failed_close():
+            close()
+            raise OSError("cleanup fixture")
+        with mock.patch.object(connection, "_send", side_effect=primary) as send, mock.patch.object(connection, "close", side_effect=failed_close):
+            with self.assertRaises(RemoteExecutionError) as caught:
+                self.request({"value": "never replay"})
+        self.assertIs(caught.exception.__cause__, primary)
+        self.assertEqual(caught.exception.submission_state, "uncertain")
+        self.assertEqual(caught.exception.category, "rpc_send")
+        self.assertIn("cleanup fixture", error_details(caught.exception)["cleanup_error"])
+        self.assertEqual(send.call_count, 1)
+
     def test_non_json_and_failed_python_are_structured_errors(self):
         failed = ssh_transport.run_remote_python(self.endpoint, "raise SystemExit(7)", {})
         self.assertEqual(failed["exit_code"], 7)

@@ -132,6 +132,8 @@ def _job_record(endpoint_id: str, job_id: str) -> dict[str, Any]:
 def _read_job_log(record: dict[str, Any], stream: str) -> str:
     endpoint = endpoint_from_job_record(record)
     supervisor = control(endpoint, str(record["job_id"]), "tail", lines=200)
+    if stream not in supervisor:
+        raise FileNotFoundError(f"remote {stream} log is unavailable for job {record['job_id']} (state={supervisor.get('state', 'unknown')})")
     text = str(supervisor.get(stream) or "")
     encoded = text.encode("utf-8", errors="replace")
     if len(encoded) > RESOURCE_LOG_LIMIT_BYTES:
@@ -230,23 +232,25 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     missing = [key for key in TOOL_SCHEMAS[name].get("required", ()) if key not in args]
     if missing:
         raise caller_error(f"{name} requires {', '.join(missing)}", KeyError)
+    # Validate before endpoint resolution or any external effect. A normal
+    # operation has no total execution limit; timeout aliases are opt-in.
+    from remote_dev.core.execution import execution_timeout
+    timeout_ms = execution_timeout(args)
     endpoint = None
     # Job tools can locate their endpoint from the local job record, so they
     # only resolve when the caller supplied an explicit selector.
     if name not in {"remote.job_status", "remote.job_tail", "remote.job_stop", "remote.job_stdin"} or has_selector(args):
         endpoint = resolve_endpoint(args)
-    timeout_ms = int(args.get("timeout_ms") or args.get("timeout") or 120000)
     if name.startswith("remote.job_"):
         _require(args, "job_id", name, "session_id")
     if name == "remote.bash":
         assert endpoint is not None
-        command_timeout = args.get("timeout_ms", args.get("timeout"))
         return remote_bash(
             endpoint,
             command=str(_require(args, "command", name, "cmd")),
             cwd=args.get("cwd"),
             description=args.get("description"),
-            timeout_ms=int(command_timeout) if command_timeout is not None else None,
+            timeout_ms=timeout_ms,
             runtime_env=args.get("runtime_env"),
             env=args.get("env") if isinstance(args.get("env"), dict) else {},
             yield_time_ms=int(args["yield_time_ms"]) if args.get("yield_time_ms") is not None else None,

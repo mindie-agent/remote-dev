@@ -103,7 +103,8 @@ def main():
                                   "context": message.get("diagnostics_context") or {}}})
         except BaseException as exc:
             send({"id": identifier, "error": {"type": type(exc).__name__, "message": str(exc)[:4000],
-                  "category": "remote_worker", "submission_state": submission_state}})
+                  "category": "remote_worker", "submission_state": submission_state,
+                  **({"cleanup_error": exc.cleanup_error} if getattr(exc, "cleanup_error", None) else {})}})
         finally:
             with pending_lock:
                 pending.pop(identifier, None)

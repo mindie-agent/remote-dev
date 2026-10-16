@@ -19,8 +19,8 @@
         },
         "timeout_ms": {
           "type": "integer",
-          "minimum": 0,
-          "description": "Whole command deadline; omitted or zero means no deadline."
+          "minimum": 1,
+          "description": "Optional caller execution limit in milliseconds; omitted means no deadline."
         },
         "env": {
           "type": "object",

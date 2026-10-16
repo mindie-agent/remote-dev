@@ -332,6 +332,28 @@ class McpSchemaTests(unittest.TestCase):
             resolve.assert_not_called()
             run.assert_not_called()
 
+    def test_execution_limits_reject_invalid_aliases_before_endpoint_resolution(self) -> None:
+        values = (None, False, True, 0, -1, 1.5, "120000", float("inf"), float("nan"))
+        limits = [{key: value} for key in ("timeout_ms", "timeout") for value in values]
+        limits.append({"timeout_ms": 1000, "timeout": 2000})
+        with patch.object(mcp_tools, "resolve_endpoint") as resolve, patch.object(mcp_tools, "remote_bash") as run:
+            for limit in limits:
+                with self.subTest(limit=limit), self.assertRaises(ValueError) as caught:
+                    mcp_tools.call_tool("remote.bash", {"command": "touch unwanted", **limit})
+                self.assertEqual(caught.exception.category, "caller")
+            resolve.assert_not_called()
+            run.assert_not_called()
+
+    def test_execution_limit_omission_and_long_explicit_aliases_reach_executor(self) -> None:
+        endpoint = Endpoint(host="192.0.2.1", port=22)
+        with patch.object(mcp_tools, "resolve_endpoint", return_value=endpoint), patch.object(mcp_tools, "remote_bash", return_value={}) as run:
+            for limit, expected in (({}, None), ({"timeout_ms": 7200000}, 7200000),
+                                    ({"timeout": 7200000}, 7200000),
+                                    ({"timeout_ms": 7200000, "timeout": 7200000}, 7200000)):
+                with self.subTest(limit=limit):
+                    mcp_tools.call_tool("remote.bash", {"command": "true", **limit})
+                    self.assertEqual(run.call_args.kwargs["timeout_ms"], expected)
+
     def test_server_json_lines_lists_the_same_portable_schemas(self) -> None:
         request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
         proc = subprocess.run(

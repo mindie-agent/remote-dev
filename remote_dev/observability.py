@@ -223,6 +223,12 @@ def observed_tool(name, *, component="remote-dev"):
                 finally:
                     _tool.reset(token)
             if isinstance(result, dict):
+                if operation.get("cleanup_errors"):
+                    result["cleanup_errors"] = operation["cleanup_errors"]
+                    warning = "Prior idle connection cleanup failed: " + "; ".join(operation["cleanup_errors"])
+                    result.setdefault("warnings", []).append(warning)
+                    if isinstance(value, dict) and "text" in value:
+                        value["text"] = str(value["text"]) + "\n" + warning + "\n"
                 anchor = operation.get("_failure_anchor")
                 diagnostic = operation.get("diagnostic")
                 if type(anchor) is _FailureAnchor and anchor.diagnostic is diagnostic:

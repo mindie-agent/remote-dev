@@ -158,7 +158,7 @@ def _safe_local_artifact_path(base: Path, relpath: str, *, create_parents: bool 
 
 @observed_tool("remote.artifact_manifest")
 @pinned_endpoint
-def remote_artifact_manifest(endpoint: Endpoint, *, remote_path: str, timeout_ms: int = 120000) -> dict[str, Any]:
+def remote_artifact_manifest(endpoint: Endpoint, *, remote_path: str, timeout_ms: int | None = None) -> dict[str, Any]:
     started = utc_now_iso()
     start = time.monotonic()
     try:
@@ -182,12 +182,17 @@ def remote_artifact_manifest(endpoint: Endpoint, *, remote_path: str, timeout_ms
         {"root": endpoint.root, "cwd": endpoint.effective_cwd, "remote_path": path},
         timeout_ms=timeout_ms,
     )
+    recording_error = None
     if isinstance(data, dict) and data.get("status") == "ok":
         data["endpoint_id"] = endpoint.endpoint_id
         artifact_id = f"manifest-{int(time.time())}-{uuid.uuid4().hex[:8]}"
         data["artifact_id"] = artifact_id
-        manifest_path = ensure_endpoint_state(endpoint) / "artifacts" / artifact_id / "manifest.json"
-        atomic_write_json(manifest_path, data)
+        try:
+            manifest_path = ensure_endpoint_state(endpoint) / "artifacts" / artifact_id / "manifest.json"
+            atomic_write_json(manifest_path, data)
+        except (OSError, ValueError, RuntimeError) as exc:
+            recording_error = f"{type(exc).__name__}: {exc}"
+            manifest_path = None
     else:
         manifest_path = None
     status = str(data.get("status", "failed"))
@@ -203,6 +208,11 @@ def remote_artifact_manifest(endpoint: Endpoint, *, remote_path: str, timeout_ms
         artifacts=[data] if status == "ok" else [],
         extra={"manifest": data, "error": data.get("error"), "error_details": data.get("error_details")},
     )
+    if recording_error:
+        result.update(outcome="failed", status="local_recording_failed", operation_completed=True,
+                      recording_error=recording_error,
+                      summary="Remote artifact manifest was received, but local recording failed.")
+        return {"text": result["summary"] + "\n" + recording_error + "\n", "result": result}
     return {"text": f"RemoteArtifactManifest {status}: {path}\nfiles: {data.get('file_count', 0)}\n", "result": result}
 
 
@@ -214,7 +224,9 @@ def _transfer_failure(endpoint, tool, started, start, exc, evidence):
     result = make_result(tool=tool, target=endpoint.to_result_target(), outcome=outcome,
                          status=status, summary=f"Artifact transfer {status}.", started_at=started,
                          duration_ms=_duration_ms(start), preview={"stderr": message}, artifacts=[evidence],
-                         extra={"error_details": error_details(exc), "expected_sha256": getattr(exc, "expected_sha256", None), "observed_sha256": getattr(exc, "observed_sha256", None)})
+                         extra={"error_details": error_details(exc), "expected_sha256": getattr(exc, "expected_sha256", None), "observed_sha256": getattr(exc, "observed_sha256", None),
+                                "operation_completed": getattr(exc, "operation_completed", False),
+                                "cleanup_error": getattr(exc, "cleanup_error", None), "automatic_retry": False})
     return {"text": result["summary"] + "\n" + message + "\n", "result": result}
 
 
@@ -234,11 +246,11 @@ def _pull_destination_exists(endpoint, started, start, evidence, conflicts):
 @observed_tool("remote.artifact_pull")
 @serialize_mutation
 def remote_artifact_pull(endpoint: Endpoint, *, remote_path: str, local_dir: str | None = None,
-                         overwrite: bool = False, timeout_ms: int = 120000) -> dict[str, Any]:
+                         overwrite: bool = False, timeout_ms: int | None = None) -> dict[str, Any]:
     started, start = utc_now_iso(), time.monotonic()
     manifest_payload = remote_artifact_manifest(endpoint, remote_path=remote_path, timeout_ms=timeout_ms)
     manifest = manifest_payload["result"].get("manifest", {})
-    if manifest.get("status") != "ok":
+    if manifest_payload["result"]["outcome"] != "success" or manifest.get("status") != "ok":
         return manifest_payload
     base = Path(local_dir) if local_dir else ensure_endpoint_state(endpoint) / "artifacts" / uuid.uuid4().hex
     base.mkdir(parents=True, exist_ok=True)
@@ -279,10 +291,11 @@ def remote_artifact_pull(endpoint: Endpoint, *, remote_path: str, local_dir: str
 @observed_tool("remote.artifact_push")
 @serialize_mutation
 def remote_artifact_push(endpoint: Endpoint, *, local_path: str, remote_path: str,
-                         timeout_ms: int = 120000) -> dict[str, Any]:
+                         timeout_ms: int | None = None) -> dict[str, Any]:
     started, start = utc_now_iso(), time.monotonic()
     pushed = []
     evidence = {"pushed": pushed}
+    stream = None
     try:
         remote_base = join_under_root(endpoint.root, endpoint.effective_cwd, remote_path)
         manifest = _local_manifest(Path(local_path))
@@ -298,6 +311,10 @@ def remote_artifact_push(endpoint: Endpoint, *, local_path: str, remote_path: st
                     pushed.append({"relpath": relpath, "local_path": item["path"], "remote_path": remote_file,
                                    "sha256": digest, "size": item["size"]})
     except (RemoteExecutionError, OSError, ValueError, PathPolicyError) as exc:
+        if stream is not None and stream.commit_possible and not getattr(exc, "submission_state", None):
+            uncertain = RemoteExecutionError(str(exc), submission_state="uncertain")
+            uncertain.__cause__ = exc
+            exc = uncertain
         payload = _transfer_failure(endpoint, "remote.artifact_push", started, start, exc, evidence)
         if isinstance(exc, PathPolicyError):
             payload["result"].update(outcome="blocked", status="path_outside_root")
