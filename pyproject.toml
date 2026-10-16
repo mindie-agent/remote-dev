@@ -42,7 +42,6 @@ include = [
   "/LICENSE",
   "/DESIGN.md",
   "/CLIENT_COMPATIBILITY.md",
-  "/VALIDATION.md",
 ]
 
 [tool.hatch.build.targets.wheel]

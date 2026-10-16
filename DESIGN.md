@@ -1,126 +1,96 @@
 # Remote Developer Substrate Design
 
-remote-dev makes remote development feel like local development for Codex,
-Claude Code, Cursor, Kimi, Grok and other MCP-capable agents. Local work keeps
-using the client's native Read/Edit/Write/Bash/Glob/Grep/apply_patch tools;
-remote work uses the matching `remote.*` tool and only adds endpoint fields.
+[中文](./docs/design.zh.md) · **English** · [Documentation Index](./docs/README.en.md)
 
-## Architecture
+`remote-dev` makes remote development feel like local development for Codex,
+Claude Code, Cursor, Kimi Code, Grok Build, and other MCP-capable coding agents.
+Local work keeps using the client's native `Read` / `Edit` / `Write` / `Bash` /
+`Glob` / `Grep` / `apply_patch` tools; remote work uses the matching `remote.*`
+tool and only adds explicit endpoint fields.
 
-Layer A is the remote-native developer tool surface:
+## Three-Layer Architecture
 
-- RemoteRead / `remote.read`
-- RemoteWrite / `remote.write`
-- RemoteEdit / `remote.edit`
-- RemoteMultiEdit / `remote.multi_edit`
-- RemoteBash / `remote.bash`
-- RemoteGlob / `remote.glob`
-- RemoteGrep / `remote.grep`
-- RemoteLS / `remote.ls`
-- RemoteApplyPatch / `remote.apply_patch`
+### Layer A: Remote-Native Developer Tool Surface
 
-plus jobs (`remote.job_status` / `job_tail` / `job_stop` / `job_stdin`), artifacts
-(`remote.artifact_manifest` / `artifact_pull` / `artifact_push`) and endpoint
-facts (`remote.probe`, `remote.context_snapshot`).
+- `remote.read` (`RemoteRead`)
+- `remote.write` (`RemoteWrite`)
+- `remote.edit` (`RemoteEdit`)
+- `remote.multi_edit` (`RemoteMultiEdit`)
+- `remote.bash` (`RemoteBash`)
+- `remote.glob` (`RemoteGlob`)
+- `remote.grep` (`RemoteGrep`)
+- `remote.ls` (`RemoteLS`)
+- `remote.apply_patch` (`RemoteApplyPatch`)
 
-Layer B is the shared substrate:
+Plus background job control (`remote.job_status` / `job_tail` / `job_stop` /
+`job_stdin`), artifact sync (`remote.artifact_manifest` / `artifact_pull` /
+`artifact_push`), and endpoint facts (`remote.probe`, `remote.context_snapshot`).
 
-- endpoint identity and explicit resolution (`remote_dev.core.endpoint`)
-- existing Docker container coordinates (`core.container_endpoint`): resolve a
-  name to a running full ID through the host's existing RPC, then freeze that ID
-  before operation records or concurrency checks; full IDs need no lookup
-- resolver plugin interface for consumer-owned selectors (same module)
-- binary SSH stdio RPC pooling on Windows and POSIX (`core.rpc_transport`),
-  with request ids, bounded code caches, scoped cancellation, concurrent
-  requests and no replay after unknown outcomes; no listener or installation
-- low-level SSH options, attached streams, port forwards and first-contact
-  bootstrap (`core.ssh_transport`); these retain explicit ControlMaster policy
-- full-permission default root with optional explicit root/cwd path policy
-  (`remote_dev.core.path_policy`, `remote_dev.core.permissions`)
-- optional read-ledger concurrency checks (`remote_dev.core.read_ledger`,
-  `remote_dev.core.state_store`)
-- compact previews plus full refs (`remote_dev.core.preview`, `remote_dev.result`)
-- generic remote process supervision (`remote_dev.processes.control`)
-- execute/yield/poll sessions and durable cursors on that same supervisor
-  (`core.job_ops`), including pipe input, real PTYs and synchronous library waits
-- artifact manifests and bounded binary batch streams (`core.artifact_ops`,
-  `core.artifact_transport`), atomic replacement after checksum verification
-- local record locks and a shared remote mutation lock across file tools,
-  patches and artifact commits; concurrent reads remain independent
-- Claude/Codex hook guards (`remote_dev.hooks`)
-- concurrent MCP server and resources with eight ordinary workers/32 slots and
-  two reserved control workers/eight slots (`remote_dev.mcp`); remote RPC uses
-  the same split; JSON lines and Content-Length frames share one dispatcher
+### Layer B: Shared Substrate
+
+- **Endpoint identity and explicit resolution** (`remote_dev.core.endpoint`).
+- **Existing Docker container coordinates** (`remote_dev.core.container_endpoint`):
+  resolve a container name or short ID to a running full container ID through the
+  host's existing RPC, then freeze that full ID before operation records or
+  concurrency checks; full IDs require no lookup.
+- **Resolver plugin interface** for consumer-owned selectors (`remote_dev.core.endpoint`).
+- **Binary SSH stdio RPC pooling** on Windows and POSIX (`remote_dev.core.rpc_transport`),
+  with request IDs, bounded code caches, scoped cancellation, concurrent requests,
+  and no replay after unknown outcomes.
+- **Low-level SSH options, attached streams, port forwards, and first-contact
+  bootstrap** (`remote_dev.core.ssh_transport`), retaining explicit ControlMaster policy.
+- **Full-permission default root with optional explicit root/cwd path policy**
+  (`remote_dev.core.path_policy`, `remote_dev.core.permissions`).
+- **Optional read-ledger optimistic concurrency checks** (`remote_dev.core.read_ledger`,
+  `remote_dev.core.state_store`).
+- **Compact previews plus full local refs** (`remote_dev.core.preview`, `remote_dev.result`).
+- **Generic remote process supervision** (`remote_dev.processes.control`) and
+  execute/yield/poll sessions with durable byte cursors (`remote_dev.core.job_ops`),
+  supporting pipe stdin, real PTYs, and synchronous library waits.
+- **Artifact manifests and bounded binary batch streams** (`remote_dev.core.artifact_ops`,
+  `remote_dev.core.artifact_transport`) with atomic replacement after SHA-256 verification.
+- **Local record locks and shared remote mutation locks** across file tools,
+  patches, and artifact commits while keeping concurrent reads independent.
+- **Hook guards** (`remote_dev.hooks`).
+- **Concurrent MCP server and resources** with eight ordinary workers (32 slots)
+  and two reserved control workers (8 slots) (`remote_dev.mcp`).
 
 `ssh_command` is the shared complete-command constructor. Container operations
 invoke `docker exec -i <full-id>` for the existing Python RPC worker, binary
-artifact worker, Bash scripts and streams. No container daemon/SSH server,
-separate supervisor, dependency installer or managed resource authority is added.
-Host-only prefixes, interactive bootstrap and port forwarding reject container
-endpoints before launching a process. RPC-created PTYs remain inside the container.
-Container IDs partition local state, mutation locks and connection pools; retained
-job records never re-resolve a mutable name. Within one container or the host,
-operation roots share an authenticated RPC transport; request roots still scope
-job receipts, locks and cancellation. New explicit names are fresh Docker
-selections, so no TTL, background watcher or invalidation protocol is needed.
+artifact worker, Bash scripts, and streams. No container daemon, SSH server,
+separate supervisor, dependency installer, or managed resource authority is added.
+Host-only prefixes, interactive bootstrap, and port forwarding reject container
+endpoints before launching a process. Container IDs partition local state,
+mutation locks, and connection pools; retained job records never re-resolve a
+mutable container name.
 
-Layer C is whatever the consumer builds on top: workflow skills, session
-managers, coordinators. It lives in the consumer's repository and talks to
-remote-dev through tool calls, environment variables, and registered resolver
-plugins. remote-dev never imports Layer C.
+### Layer C: Consumer Layer
 
-## Dependency direction
+Workflow skills, session managers, and coordinators live in their own consumer
+repositories and interact with `remote-dev` strictly through tool calls,
+environment variables, and registered resolver plugins. `remote-dev` never
+imports Layer C.
 
-The substrate depends on nothing but the Python standard library and an
-`ssh` binary. Consumers depend on the substrate. Concretely:
+## Dependency Direction
 
-- Endpoint resolution accepts `host`/`port`/`user`/`root`/`cwd`/... and
-  `alias`. Default cwd is the endpoint root. Every other selector is
-  resolved by a plugin the consumer registers via
-  `remote_dev.core.endpoint.register_resolver` or `REMOTE_DEV_RESOLVERS`.
-  remote-dev does not interpret session, profile, or binding identifiers.
-- Generic process control is `remote_dev.processes.control`. Ordinary
-  background jobs and coordinator-managed executions share that worker.
-  The package ships the Linux supervisor; it does not require a
-  coordinator install for host+port operations.
-- Consumer facts that used to be constants are environment-configured:
-  `REMOTE_DEV_RUNTIME_ENV_FILE` (remote profile script to source),
-  `REMOTE_DEV_SSH_MUX_DIR` (shared ControlMaster directory),
-  `REMOTE_DEV_STATE_DIR` (where local state lives),
-  `REMOTE_DEV_ENDPOINTS_FILE` (alias files).
-- Task/coordinator facades are not tools of this server. A consumer that
-  wants them runs its own MCP server or wraps this one.
+The substrate depends only on the Python standard library, `mindie-diagnostics`,
+and an `ssh` client binary. Consumers depend on the substrate:
 
-## Implementation phases (historical)
+- **Explicit endpoint resolution**: accepts `host` / `port` / `user` / `root` /
+  `cwd` / `container` and `alias`. Every other selector is resolved by a plugin
+  registered via `remote_dev.core.endpoint.register_resolver` or `REMOTE_DEV_RESOLVERS`.
+- **Generic process control**: `remote_dev.processes.control` serves both ordinary
+  background jobs and coordinator-managed executions without requiring a
+  coordinator installation on the remote host.
+- **Environment-driven configuration**: `REMOTE_DEV_RUNTIME_ENV_FILE`,
+  `REMOTE_DEV_SSH_MUX_DIR`, `REMOTE_DEV_STATE_DIR`, and `REMOTE_DEV_ENDPOINTS_FILE`.
 
-Phase 0 established schemas, result contracts, endpoint identity, path
-policy, and hook tests.
+## MCP Transport & Resources
 
-Phase 1 implemented `remote.bash`, `remote.read`, and `remote.ls`.
+The MCP server supports standard stdio `Content-Length` JSON-RPC framing (with
+newline-delimited JSON-RPC retained as a local test fallback).
 
-Phase 2 implemented `remote.write`, `remote.edit`, and `remote.multi_edit`
-with default write/edit permission, optional read-ledger concurrency checks,
-and atomic writes.
-
-Phase 3 implemented `remote.apply_patch` for Codex apply_patch payloads,
-including file moves and end-of-file markers, plus unified diffs.
-
-Phase 4 implemented search, monitor/jobs, and artifact manifest/pull/push.
-
-Phase 5 added MCP, client configuration examples, and hook guards.
-
-Phase 6 (this repository) extracted the substrate from its first consumer
-and inverted the dependency: explicit endpoints, resolver plugins, no
-consumer state, no consumer imports.
-
-## MCP transport
-
-The MCP server supports standard stdio `Content-Length` JSON-RPC framing.
-The newline-delimited JSON-RPC mode is retained only as a lightweight local
-test fallback.
-
-MCP resources expose endpoint index/context, job registries and bounded
-stdout/stderr reads, and local artifact manifests:
+Exposed MCP resources:
 
 - `remote://endpoints`
 - `remote://endpoint/<endpoint-id>/context/latest`
@@ -139,7 +109,10 @@ python -m pytest
 remote-dev validate --local-only
 ```
 
-Remote endpoint behaviour requires a reachable SSH endpoint. Use
-`remote-dev validate` with `--host/--port` (or an `--alias`, or
-`--selector KEY=VALUE` for a registered resolver) to run the live smoke,
-including parallel scratch workers.
+For live endpoint verification against a reachable SSH host:
+
+```bash
+remote-dev validate --host <host> --port <port> --root /srv/app --cwd /srv/app
+```
+
+See [Transport, Containers & Diagnostics](./docs/transport-and-diagnostics.en.md) for detailed transport and observability specifications.
