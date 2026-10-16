@@ -58,7 +58,7 @@ flowchart LR
 帮我安装并配置 https://github.com/mindie-agent/remote-dev
 ```
 
-<details open>
+<details>
 <summary>🤖 <b>AI Agent 自动安装与配置协议（Instructions for AI Agents）</b></summary>
 
 如果你是收到上述指令的 AI Agent，请按以下步骤为当前用户完成 `remote-dev` 的环境检查与自动接入：
