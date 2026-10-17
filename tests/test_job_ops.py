@@ -302,6 +302,125 @@ class StartRemoteJobTests(unittest.TestCase):
         self.assertIn("clamped", payload["result"]["warnings"][0])
         self.assertLessEqual(len(payload["text"]), MAX_TEXT_CHARS)
 
+    def test_running_session_never_reports_exit_code_in_summary(self) -> None:
+        row = _supervisor(
+            state="running",
+            quiet=False,
+            result={"state": "succeeded", "exit_code": 0, "descendants_drained": False},
+            stdout="still draining\n",
+            stdout_offset=15,
+            stdout_bytes_remaining=0,
+            stderr="",
+            stderr_offset=0,
+            stderr_bytes_remaining=0,
+        )
+        with mock.patch.object(job_ops, "control", return_value=row):
+            payload = job_ops.start_remote_job(self.endpoint, command="echo draining", job_id="job-draining")
+        self.assertEqual(payload["result"]["status"], "running")
+        self.assertIsNone(payload["result"]["exit_code"])
+        self.assertNotIn("Exit code:", payload["result"]["summary"])
+
+
+class WorkerExchangeAndSubreaperStatusTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from remote_dev.processes import worker as worker_module
+
+        self.worker = worker_module
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def _create_job_dir(self, job_id: str, *, supervision: str = "subreaper") -> Path:
+        job_dir = self.root / ".remote-dev" / "jobs" / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "receipt.json").write_text(
+            json.dumps(
+                {
+                    "pid": 4242,
+                    "ppid": 1,
+                    "pgid": 4242,
+                    "start_ticks": "12345",
+                    "boot_id": "boot-test-1",
+                    "marker": "m" * 32,
+                    "supervision": supervision,
+                    "job_id": job_id,
+                    "prepared_at": 1000.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (job_dir / "go.json").write_text(
+            json.dumps({"authorization": {"token": "t"}, "opened_at": 1000.0, "valid_until": None}),
+            encoding="utf-8",
+        )
+        return job_dir
+
+    def test_job_status_with_drained_result_and_exiting_subreaper_reports_succeeded_and_quiet(self) -> None:
+        job_dir = self._create_job_dir("job-subreaper-race")
+        (job_dir / "result.json").write_text(
+            json.dumps({"state": "succeeded", "exit_code": 0, "descendants_drained": True, "finished_at": 1001.0}),
+            encoding="utf-8",
+        )
+        exiting_anchor = {"pid": 4242, "ppid": 1, "pgid": 4242, "start_ticks": "12345", "state": "R"}
+        with mock.patch.object(self.worker, "boot_id", return_value="boot-test-1"), \
+                mock.patch.object(self.worker, "process_identity", return_value=exiting_anchor):
+            status = self.worker.job_status(job_dir)
+        self.assertEqual(status["state"], "succeeded")
+        self.assertTrue(status["quiet"])
+        self.assertEqual(status["processes"], [])
+        self.assertEqual(status["result"]["exit_code"], 0)
+
+    def test_fast_command_emitting_output_and_exiting_within_50ms_completes_in_single_exchange(self) -> None:
+        import threading
+        import time
+
+        job_id = "job-fast-coalesce"
+        job_dir = self._create_job_dir(job_id)
+        stdout_path = job_dir / "stdout.log"
+        stderr_path = job_dir / "stderr.log"
+        stdout_path.write_bytes(b"")
+        stderr_path.write_bytes(b"")
+
+        def writer() -> None:
+            time.sleep(0.005)
+            with stdout_path.open("ab") as stream:
+                stream.write(b"first line\n")
+                stream.flush()
+            time.sleep(0.035)
+            with stdout_path.open("ab") as stream:
+                stream.write(b"second line\n")
+                stream.flush()
+            self.worker.atomic_json(
+                job_dir / "result.json",
+                {"state": "succeeded", "exit_code": 0, "descendants_drained": True, "finished_at": time.time()},
+            )
+
+        thread = threading.Thread(target=writer, daemon=True)
+        exiting_anchor = {"pid": 4242, "ppid": 1, "pgid": 4242, "start_ticks": "12345", "state": "R"}
+        with mock.patch.object(self.worker, "boot_id", return_value="boot-test-1"), \
+                mock.patch.object(self.worker, "process_identity", return_value=exiting_anchor):
+            thread.start()
+            row = self.worker.control_job(
+                {
+                    "action": "exchange",
+                    "root": str(self.root),
+                    "job_id": job_id,
+                    "stdout_offset": 0,
+                    "stderr_offset": 0,
+                    "max_bytes": 8192,
+                    "shared_budget": True,
+                    "wait_for_exit": False,
+                    "yield_time_ms": 2000,
+                },
+                "",
+            )
+            thread.join(timeout=1)
+        self.assertEqual(row["state"], "succeeded")
+        self.assertTrue(row["quiet"])
+        self.assertEqual(row["result"]["exit_code"], 0)
+        self.assertEqual(row["stdout"], "first line\nsecond line\n")
+        self.assertEqual(row["stdout_bytes_remaining"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

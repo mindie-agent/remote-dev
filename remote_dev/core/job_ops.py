@@ -231,7 +231,7 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
     state = str(row.get("state") or "unknown")
     quiet = bool(row.get("quiet"))
     pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
-    exit_code = (row.get("result") or {}).get("exit_code")
+    exit_code = (row.get("result") or {}).get("exit_code") if state not in {"prepared", "running"} else None
     accepted = row.get("accepted", True)
     uncertain = state in UNKNOWN_JOB_STATES or bool(row.get("unknown"))
     outcome = ("failed" if not accepted or uncertain or state in {"failed", "absent"}
