@@ -135,32 +135,277 @@ def scan_text_lines(path, max_chars, digest=None):
                 return
 
 
+def extract_symbols(text, suffix):
+    import ast
+    import re
+    lines = text.splitlines()
+    symbols = []
+    if suffix in {".py", ".pyi", ""}:
+        try:
+            tree = ast.parse(text)
+            def visit_nodes(nodes, prefix):
+                for node in nodes:
+                    if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                        qual = ".".join([*prefix, node.name])
+                        kind = "class" if isinstance(node, ast.ClassDef) else ("method" if prefix else "function")
+                        dec_lines = [getattr(d, "lineno", node.lineno) for d in getattr(node, "decorator_list", [])]
+                        start_ln = min([node.lineno, *dec_lines]) if dec_lines else node.lineno
+                        end_ln = getattr(node, "end_lineno", None) or node.lineno
+                        sig = lines[node.lineno - 1].strip() if 1 <= node.lineno <= len(lines) else node.name
+                        symbols.append({
+                            "name": node.name,
+                            "qualified_name": qual,
+                            "kind": kind,
+                            "start_line": int(start_ln),
+                            "end_line": int(end_ln),
+                            "signature": sig[:240],
+                        })
+                        if isinstance(node, ast.ClassDef):
+                            visit_nodes(node.body, [*prefix, node.name])
+            visit_nodes(tree.body, [])
+            return symbols
+        except SyntaxError:
+            pass
+    pattern = re.compile(
+        r"^(?P<indent>\s*)(?:(?:pub(?:\([^)]*\))?\s+|export\s+|default\s+|async\s+|static\s+|inline\s+|virtual\s+|__global__\s+|__device__\s+|__host__\s+|__aicore__\s+)*)"
+        r"(?:(?P<kind>class|struct|interface|enum|trait|impl|def|func|fn|function)\s+(?P<name>[A-Za-z_~][A-Za-z0-9_:]*)"
+        r"|(?P<ret>[A-Za-z_][A-Za-z0-9_:<>,\s\*&]+?)\s+(?P<cname>[A-Za-z_~][A-Za-z0-9_:]*)\s*\([^;]*\)\s*(?:const\s*)?(?:noexcept\s*)?\{?\s*$)"
+    )
+    class_stack = []
+    for idx, raw_line in enumerate(lines, 1):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith(("//", "#", "/*", "*")):
+            continue
+        m = pattern.match(raw_line)
+        if not m:
+            continue
+        indent = len(m.group("indent") or "")
+        kind_raw = m.group("kind") or "function"
+        name = m.group("name") or m.group("cname") or ""
+        if name in {"if", "for", "while", "switch", "catch", "return", "sizeof", "else"}:
+            continue
+        while class_stack and class_stack[-1][0] >= indent:
+            class_stack.pop()
+        prefix = [ item[1] for item in class_stack ]
+        if "::" in name:
+            qual = name.replace("::", ".")
+            short_name = name.split("::")[-1]
+        else:
+            short_name = name
+            qual = ".".join([*prefix, short_name]) if prefix else short_name
+        kind = "class" if kind_raw in {"class", "struct", "interface", "enum", "trait", "impl"} else ("method" if prefix or "::" in name else "function")
+        end_ln = idx
+        if "{" in raw_line or (idx < len(lines) and lines[idx].strip().startswith("{")):
+            depth = 0
+            started_brace = False
+            for scan_idx in range(idx - 1, min(len(lines), idx + 2000)):
+                for ch in lines[scan_idx]:
+                    if ch == "{":
+                        depth += 1
+                        started_brace = True
+                    elif ch == "}":
+                        depth -= 1
+                if started_brace and depth <= 0:
+                    end_ln = scan_idx + 1
+                    break
+        else:
+            for scan_idx in range(idx, min(len(lines), idx + 2000)):
+                s_line = lines[scan_idx]
+                if not s_line.strip() or s_line.strip().startswith("#"):
+                    continue
+                cur_indent = len(s_line) - len(s_line.lstrip())
+                if cur_indent <= indent:
+                    break
+                end_ln = scan_idx + 1
+        if kind == "class":
+            class_stack.append((indent, short_name))
+        symbols.append({
+            "name": short_name,
+            "qualified_name": qual,
+            "kind": kind,
+            "start_line": idx,
+            "end_line": end_ln,
+            "signature": stripped[:240],
+        })
+    return symbols
+
+
 if op == "read":
     path, resolved = resolve_path(payload["file_path"])
     if path.is_dir():
         fail("is_directory", f"RemoteRead reads files, not directories: {path}")
+    start_line = payload.get("start_line")
+    end_line = payload.get("end_line")
     offset = int(payload.get("offset") or 1)
     limit = int(payload.get("limit") or 200)
+    if start_line is not None and end_line is not None:
+        s_ln = int(start_line)
+        e_ln = int(end_line)
+        if s_ln < 1 or e_ln < s_ln:
+            fail("invalid_pagination", f"invalid line range: start_line={s_ln}, end_line={e_ln}")
+        offset = s_ln
+        limit = e_ln - s_ln + 1
+    elif start_line is not None:
+        s_ln = int(start_line)
+        if s_ln < 1:
+            fail("invalid_pagination", f"start_line must be >= 1, got {s_ln}")
+        offset = s_ln
+    elif end_line is not None:
+        e_ln = int(end_line)
+        s_ln = max(1, offset)
+        if e_ln < s_ln:
+            fail("invalid_pagination", f"end_line ({e_ln}) must be >= start_line ({s_ln})")
+        offset = s_ln
+        limit = e_ln - s_ln + 1
+    content_offset = int(payload.get("content_offset") or 0)
+    if content_offset < 0:
+        fail("invalid_pagination", "content_offset must be >= 0")
     if limit < 1 or offset == 0:
         fail("invalid_pagination", "limit must be positive and offset must not be zero")
     max_line_chars = int(payload.get("max_line_chars") or 2000)
     verify = bool(payload.get("verify_content", True))
+    outline = bool(payload.get("outline", False))
+    node_paths = payload.get("node_paths")
     before = path.stat()
+
+    if outline or (isinstance(node_paths, list) and node_paths):
+        raw_bytes = path.read_bytes()
+        if b"\x00" in raw_bytes[:8192]:
+            fail("binary_file", "remote.read returns UTF-8 text; use remote.artifact_pull for binary/image files")
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+            fail("file_changed", "file changed during read; retry to obtain a consistent read")
+        digest_hex = sha256_bytes(raw_bytes) if verify else None
+        text = raw_bytes.decode("utf-8", errors="replace")
+        all_lines = text.splitlines()
+        total = len(all_lines)
+        symbols = extract_symbols(text, path.suffix.lower())
+        warnings = []
+        if not verify:
+            warnings.append("Content hash not requested; this read does not update the edit concurrency guard.")
+        if outline:
+            item_offset = max(0, int(payload.get("item_offset") or 0))
+            page = symbols[item_offset : item_offset + limit]
+            numbered = "\n".join(
+                f"{item['start_line']}-{item['end_line']} | [{item['kind']}] {item['qualified_name']} — {item['signature']}"
+                for item in page
+            )
+            partial = item_offset > 0 or (item_offset + limit) < len(symbols)
+            info = {
+                "path": str(path), "resolved_path": str(resolved), "size": after.st_size,
+                "mtime_ns": after.st_mtime_ns, "sha256": digest_hex,
+                "total_lines": total, "offset": item_offset + 1 if symbols else 1, "limit": limit,
+                "line_start": page[0]["start_line"] if page else 0,
+                "line_end": page[-1]["end_line"] if page else 0,
+                "partial": partial, "content": numbered,
+                "truncated_line_count": 0, "symlink": path.is_symlink(),
+                "content_verified": verify, "outline": page, "total_items": len(symbols),
+            }
+            print(json.dumps({"status": "partial" if partial else "ok", "file": info, "warnings": warnings}, sort_keys=True))
+            raise SystemExit(0)
+        else:
+            matched_items = []
+            missing = []
+            for req in node_paths:
+                req_norm = str(req).strip().replace("::", ".")
+                hits = [
+                    s for s in symbols
+                    if s["qualified_name"] == req_norm or s["name"] == req_norm or s["qualified_name"].endswith("." + req_norm)
+                ]
+                if not hits:
+                    missing.append(str(req))
+                else:
+                    for h in hits:
+                        if h not in matched_items:
+                            matched_items.append(h)
+            if not matched_items:
+                fail("symbol_not_found", f"Requested symbol(s) not found in {path}: {', '.join(missing)}", available_symbols=[s["qualified_name"] for s in symbols[:50]])
+            if missing:
+                warnings.append(f"Symbol(s) not found: {', '.join(missing)}")
+            sections = []
+            for sym in matched_items:
+                s_idx = max(1, int(sym["start_line"]))
+                e_idx = min(total, int(sym["end_line"]))
+                body_lines = [
+                    f"{ln} | {all_lines[ln - 1][:max_line_chars]}"
+                    + ("<remote-dev line truncated>" if len(all_lines[ln - 1]) > max_line_chars else "")
+                    for ln in range(s_idx, e_idx + 1)
+                ]
+                sections.append(f"# {sym['qualified_name']} ({sym['kind']}, lines {s_idx}-{e_idx})\n" + "\n".join(body_lines))
+            numbered = "\n\n".join(sections)
+            info = {
+                "path": str(path), "resolved_path": str(resolved), "size": after.st_size,
+                "mtime_ns": after.st_mtime_ns, "sha256": digest_hex,
+                "total_lines": total, "offset": matched_items[0]["start_line"], "limit": limit,
+                "line_start": matched_items[0]["start_line"],
+                "line_end": matched_items[-1]["end_line"],
+                "partial": True, "content": numbered,
+                "truncated_line_count": 0, "symlink": path.is_symlink(),
+                "content_verified": verify, "code_items": matched_items, "missing_symbols": missing,
+            }
+            print(json.dumps({"status": "partial" if info["partial"] else "ok", "file": info, "warnings": warnings}, sort_keys=True))
+            raise SystemExit(0)
+
+    if content_offset > 0 and offset == 1 and start_line is None:
+        raw_bytes = path.read_bytes()
+        if b"\x00" in raw_bytes[:8192]:
+            fail("binary_file", "remote.read returns UTF-8 text; use remote.artifact_pull for binary/image files")
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+            fail("file_changed", "file changed during read; retry to obtain a consistent read")
+        digest_hex = sha256_bytes(raw_bytes) if verify else None
+        total = len(raw_bytes.decode("utf-8", errors="replace").splitlines())
+        sliced_bytes = raw_bytes[content_offset:]
+        base_line = raw_bytes[:content_offset].count(b"\n")
+        sliced_lines = sliced_bytes.decode("utf-8", errors="replace").splitlines()
+        selected = []
+        for idx, line_text in enumerate(sliced_lines[:limit], base_line + 1):
+            clipped = len(line_text) > max_line_chars
+            selected.append((idx, line_text[:max_line_chars], clipped))
+        truncated_lines = sum(clipped for _, _, clipped in selected)
+        numbered = "\n".join(f"{index} | {body}" + ("<remote-dev line truncated>" if clipped else "")
+                             for index, body, clipped in selected)
+        line_start = selected[0][0] if selected else 0
+        line_end = selected[-1][0] if selected else 0
+        partial = content_offset > 0 or len(sliced_lines) > limit
+        info = {"path": str(path), "resolved_path": str(resolved), "size": after.st_size,
+                "mtime_ns": after.st_mtime_ns, "sha256": digest_hex,
+                "total_lines": total, "offset": line_start or 1, "limit": limit,
+                "line_start": line_start, "line_end": line_end,
+                "content_offset": content_offset,
+                "partial": partial, "content": numbered,
+                "truncated_line_count": truncated_lines, "symlink": path.is_symlink(),
+                "content_verified": verify}
+        warnings = []
+        if truncated_lines:
+            warnings.append(f"{truncated_lines} line(s) truncated to {max_line_chars} chars")
+        if not verify:
+            warnings.append("Content hash not requested; this read does not update the edit concurrency guard.")
+        print(json.dumps({"status": "partial" if info["partial"] else "ok", "file": info, "warnings": warnings}, sort_keys=True))
+        raise SystemExit(0)
+
+    scan_limit = content_offset + max_line_chars if content_offset > 0 else max_line_chars
     digest = hashlib.sha256() if verify else None
     selected, total, more = [], 0, False
-    for index, line in enumerate(scan_text_lines(path, max_line_chars, digest), 1):
+    for index, line in enumerate(scan_text_lines(path, scan_limit, digest), 1):
         total = index
         if offset > 0 and offset <= index < offset + limit:
-            selected.append((index, *line))
+            body, clipped = line
+            if content_offset > 0:
+                body = body[content_offset : content_offset + max_line_chars]
+            selected.append((index, body, clipped))
         if not verify and offset > 0 and index >= offset + limit:
             more = True
             break
     total_lines = None if more else total
     if offset < 0:
         offset = max(1, total + offset + 1)
-        for index, line in enumerate(scan_text_lines(path, max_line_chars), 1):
+        for index, line in enumerate(scan_text_lines(path, scan_limit), 1):
             if offset <= index < offset + limit:
-                selected.append((index, *line))
+                body, clipped = line
+                if content_offset > 0:
+                    body = body[content_offset : content_offset + max_line_chars]
+                selected.append((index, body, clipped))
             if index >= offset + limit:
                 break
     after = path.stat()
@@ -175,9 +420,11 @@ if op == "read":
             "mtime_ns": after.st_mtime_ns, "sha256": digest.hexdigest() if digest else None,
             "total_lines": total_lines, "offset": offset, "limit": limit,
             "line_start": start + 1 if total else 0, "line_end": end,
-            "partial": start > 0 or more or end < total, "content": numbered,
+            "partial": start > 0 or more or end < total or content_offset > 0, "content": numbered,
             "truncated_line_count": truncated_lines, "symlink": path.is_symlink(),
             "content_verified": verify}
+    if content_offset > 0:
+        info["content_offset"] = content_offset
     warnings = []
     if truncated_lines:
         warnings.append(f"{truncated_lines} line(s) truncated to {max_line_chars} chars")
@@ -187,35 +434,56 @@ if op == "read":
     raise SystemExit(0)
 
 if op == "ls":
+    import fnmatch
     path, resolved = resolve_path(payload["path"])
     if not path.is_dir():
         fail("not_directory", f"RemoteLS lists directories, not files: {path}")
     limit = int(payload.get("limit") or 200)
     show_all = bool(payload.get("all", False))
+    max_depth = int(payload.get("max_depth") or 1)
+    ignore_globs = payload.get("ignore_globs") or []
+    if isinstance(ignore_globs, str):
+        ignore_globs = [ignore_globs]
     entries = []
-    for child in sorted(path.iterdir(), key=lambda item: item.name):
-        if not show_all and child.name.startswith("."):
-            continue
-        try:
-            st = child.lstat()
-            if child.is_symlink():
-                kind = "symlink"
-            elif child.is_dir():
-                kind = "directory"
-            elif child.is_file():
-                kind = "file"
-            else:
-                kind = "other"
-            entries.append({
-                "name": child.name,
-                "path": str(child),
-                "type": kind,
-                "size": st.st_size,
-                "mtime_ns": st.st_mtime_ns,
-                "is_symlink": child.is_symlink(),
-            })
-        except OSError as exc:
-            entries.append({"name": child.name, "path": str(child), "type": "error", "error": str(exc)})
+
+    def should_ignore(rel_name, base_name):
+        for pat in ignore_globs:
+            if fnmatch.fnmatch(base_name, pat) or fnmatch.fnmatch(rel_name, pat):
+                return True
+        return False
+
+    def scan_dir(current_dir, depth, rel_prefix=""):
+        for child in sorted(current_dir.iterdir(), key=lambda item: item.name):
+            if not show_all and child.name.startswith("."):
+                continue
+            rel_name = f"{rel_prefix}{child.name}" if rel_prefix else child.name
+            if ignore_globs and should_ignore(rel_name, child.name):
+                continue
+            try:
+                st = child.lstat()
+                if child.is_symlink():
+                    kind = "symlink"
+                elif child.is_dir():
+                    kind = "directory"
+                elif child.is_file():
+                    kind = "file"
+                else:
+                    kind = "other"
+                entry = {
+                    "name": rel_name,
+                    "path": str(child),
+                    "type": kind,
+                    "size": st.st_size,
+                    "mtime_ns": st.st_mtime_ns,
+                    "is_symlink": child.is_symlink(),
+                }
+                entries.append(entry)
+                if kind == "directory" and not child.is_symlink() and depth < max_depth and len(entries) <= limit:
+                    scan_dir(child, depth + 1, rel_name + "/")
+            except OSError as exc:
+                entries.append({"name": rel_name, "path": str(child), "type": "error", "error": str(exc)})
+
+    scan_dir(path, 1)
     truncated = len(entries) > limit
     print(json.dumps({"status": "ok", "path": str(path), "resolved_path": str(resolved), "entries": entries[:limit], "truncated": truncated}, sort_keys=True))
     raise SystemExit(0)
@@ -279,21 +547,64 @@ if op in {"edit", "multi_edit"}:
         "old_string": payload.get("old_string", ""),
         "new_string": payload.get("new_string", ""),
         "replace_all": bool(payload.get("replace_all", False)),
+        "start_line": payload.get("start_line"),
+        "end_line": payload.get("end_line"),
     }]
     if not isinstance(edits, list) or not edits:
         fail("invalid_edits", "edits must be a non-empty list")
+    line_delta = 0
     for index, edit in enumerate(edits):
-        old = edit.get("old_string", "")
-        new = edit.get("new_string", "")
-        replace_all = bool(edit.get("replace_all", False))
+        if not isinstance(edit, dict):
+            fail("invalid_edits", f"edit {index} must be an object")
+        old = edit.get("old_string")
+        if old is None:
+            for k in ("TargetContent", "target_content", "old_str"):
+                if k in edit:
+                    old = edit[k]
+                    break
+        old = "" if old is None else str(old)
+        new = edit.get("new_string")
+        if new is None:
+            for k in ("ReplacementContent", "replacement_content", "new_str"):
+                if k in edit:
+                    new = edit[k]
+                    break
+        new = "" if new is None else str(new)
+        replace_all = bool(edit.get("replace_all", edit.get("AllowMultiple", edit.get("allow_multiple", False))))
+        s_line = edit.get("start_line") if edit.get("start_line") is not None else edit.get("StartLine")
+        e_line = edit.get("end_line") if edit.get("end_line") is not None else edit.get("EndLine")
         if old == "":
             fail("empty_old_string", f"edit {index} has an empty old_string")
-        count = after.count(old)
-        if count == 0:
-            fail("old_string_not_found", f"edit {index} old_string was not found")
-        if count > 1 and not replace_all:
-            fail("old_string_not_unique", f"edit {index} old_string matched {count} times")
-        after = after.replace(old, new if replace_all else new, -1 if replace_all else 1)
+        if s_line is not None or e_line is not None:
+            lines = after.splitlines(keepends=True)
+            s_idx = int(s_line) if s_line is not None else 1
+            e_idx = int(e_line) if e_line is not None else len(lines)
+            if s_idx < 1 or (e_line is not None and e_idx < s_idx):
+                fail("invalid_pagination", f"edit {index} has invalid line range {s_idx}..{e_idx}")
+            slice_start = s_idx - 1
+            slice_end = min(len(lines), e_idx)
+            segment = "".join(lines[slice_start:slice_end])
+            if segment.count(old) == 0 and line_delta != 0:
+                adj_start = max(0, slice_start + line_delta)
+                adj_end = min(len(lines), max(adj_start, e_idx + line_delta))
+                adj_segment = "".join(lines[adj_start:adj_end])
+                if adj_segment.count(old) > 0:
+                    slice_start, slice_end, segment = adj_start, adj_end, adj_segment
+            count = segment.count(old)
+            if count == 0:
+                fail("old_string_not_found", f"edit {index} old_string was not found in lines {s_idx}-{e_idx}")
+            if count > 1 and not replace_all:
+                fail("old_string_not_unique", f"edit {index} old_string matched {count} times in lines {s_idx}-{e_idx}")
+            replaced = segment.replace(old, new, -1 if replace_all else 1)
+            line_delta += replaced.count("\n") - segment.count("\n")
+            after = "".join(lines[:slice_start]) + replaced + "".join(lines[slice_end:])
+        else:
+            count = after.count(old)
+            if count == 0:
+                fail("old_string_not_found", f"edit {index} old_string was not found")
+            if count > 1 and not replace_all:
+                fail("old_string_not_unique", f"edit {index} old_string matched {count} times")
+            after = after.replace(old, new, -1 if replace_all else 1)
     if after == before:
         fail("no_change", "edit produced no file changes")
     atomic_write(path, after.encode("utf-8"))
@@ -333,6 +644,12 @@ def remote_read(
     file_path: str,
     offset: int = 1,
     limit: int = 200,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    content_offset: int | None = None,
+    outline: bool = False,
+    item_offset: int = 0,
+    node_paths: list[str] | None = None,
     allow_symlink: bool = False,
     verify_content: bool = True,
     client_context_id: str | None = None,
@@ -341,6 +658,13 @@ def remote_read(
     started = utc_now_iso()
     start = time.monotonic()
     warnings = []
+    if start_line is not None and end_line is not None and end_line >= start_line >= 1:
+        offset = int(start_line)
+        limit = int(end_line) - int(start_line) + 1
+    elif start_line is not None and start_line >= 1:
+        offset = int(start_line)
+    elif end_line is not None and end_line >= max(1, offset):
+        limit = int(end_line) - max(1, offset) + 1
     if limit > MAX_READ_LINES:
         warnings.append(f"limit clamped from {limit} to {MAX_READ_LINES}")
         limit = MAX_READ_LINES
@@ -350,20 +674,32 @@ def remote_read(
         path = join_under_root(endpoint.root, endpoint.effective_cwd, file_path)
     except PathPolicyError as exc:
         return _path_blocked_result(endpoint, "remote.read", file_path, str(exc), started, start)
+    payload_req: dict[str, Any] = {
+        "op": "read",
+        "root": endpoint.root,
+        "cwd": endpoint.effective_cwd,
+        "file_path": path,
+        "offset": offset,
+        "limit": limit,
+        "allow_symlink": allow_symlink,
+        "verify_content": verify_content,
+        "max_line_chars": MAX_LINE_CHARS,
+    }
+    if start_line is not None:
+        payload_req["start_line"] = int(start_line)
+    if end_line is not None:
+        payload_req["end_line"] = int(end_line)
+    if content_offset is not None:
+        payload_req["content_offset"] = int(content_offset)
+    if outline:
+        payload_req["outline"] = True
+        payload_req["item_offset"] = int(item_offset)
+    if node_paths:
+        payload_req["node_paths"] = [str(item) for item in node_paths]
     data = run_remote_python(
         endpoint,
         REMOTE_FILE_PY,
-        {
-            "op": "read",
-            "root": endpoint.root,
-            "cwd": endpoint.effective_cwd,
-            "file_path": path,
-            "offset": offset,
-            "limit": limit,
-            "allow_symlink": allow_symlink,
-            "verify_content": verify_content,
-            "max_line_chars": MAX_LINE_CHARS,
-        },
+        payload_req,
         timeout_ms=timeout_ms,
     )
     status = str(data.get("status", "failed"))
@@ -407,6 +743,8 @@ def remote_ls(
     path: str | None = None,
     limit: int = 200,
     all: bool = False,
+    max_depth: int = 1,
+    ignore_globs: list[str] | None = None,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
@@ -416,10 +754,22 @@ def remote_ls(
         resolved = join_under_root(endpoint.root, endpoint.effective_cwd, raw_path)
     except PathPolicyError as exc:
         return _path_blocked_result(endpoint, "remote.ls", raw_path, str(exc), started, start)
+    ls_req: dict[str, Any] = {
+        "op": "ls",
+        "root": endpoint.root,
+        "cwd": endpoint.effective_cwd,
+        "path": resolved,
+        "limit": limit,
+        "all": all,
+    }
+    if max_depth and max_depth > 1:
+        ls_req["max_depth"] = int(max_depth)
+    if ignore_globs:
+        ls_req["ignore_globs"] = [str(g) for g in ignore_globs]
     data = run_remote_python(
         endpoint,
         REMOTE_FILE_PY,
-        {"op": "ls", "root": endpoint.root, "cwd": endpoint.effective_cwd, "path": resolved, "limit": limit, "all": all},
+        ls_req,
         timeout_ms=timeout_ms,
     )
     status = str(data.get("status", "failed"))
@@ -490,6 +840,8 @@ def remote_edit(
     old_string: str,
     new_string: str,
     replace_all: bool = False,
+    start_line: int | None = None,
+    end_line: int | None = None,
     client_context_id: str | None = None,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -504,19 +856,24 @@ def remote_edit(
     )
     if blocked:
         return blocked
+    edit_req: dict[str, Any] = {
+        "op": "edit", "_mutation": True,
+        "root": endpoint.root,
+        "cwd": endpoint.effective_cwd,
+        "file_path": path,
+        "old_string": old_string,
+        "new_string": new_string,
+        "replace_all": replace_all,
+        "expected_sha256": expected_sha,
+    }
+    if start_line is not None:
+        edit_req["start_line"] = int(start_line)
+    if end_line is not None:
+        edit_req["end_line"] = int(end_line)
     data = run_remote_python(
         endpoint,
         REMOTE_FILE_PY,
-        {
-            "op": "edit", "_mutation": True,
-            "root": endpoint.root,
-            "cwd": endpoint.effective_cwd,
-            "file_path": path,
-            "old_string": old_string,
-            "new_string": new_string,
-            "replace_all": replace_all,
-            "expected_sha256": expected_sha,
-        },
+        edit_req,
         timeout_ms=timeout_ms,
     )
     return _write_like_result(endpoint, "remote.edit", path, data, started, start, client_context_id=client_context_id)

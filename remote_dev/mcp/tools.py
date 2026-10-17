@@ -23,7 +23,7 @@ from remote_dev.core.state_store import (
     read_text_if_exists,
     state_root,
 )
-from remote_dev.mcp.schemas import ALIASES, PARAM_ALIASES, TOOL_SCHEMAS, normalize_arguments
+from remote_dev.mcp.schemas import ALIASES, HARNESS_TOOL_ALIASES, PARAM_ALIASES, TOOL_SCHEMAS, normalize_arguments
 from remote_dev.processes import control
 
 ENDPOINT_ID_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -195,7 +195,7 @@ def read_resource(uri: str) -> dict[str, Any]:
 
 
 def canonical_name(name: str) -> str:
-    return ALIASES.get(name, name)
+    return ALIASES.get(name, HARNESS_TOOL_ALIASES.get(name, name))
 
 
 def _require(args: dict[str, Any], key: str, tool: str, alias_hint: str = "") -> Any:
@@ -215,10 +215,13 @@ def _require(args: dict[str, Any], key: str, tool: str, alias_hint: str = "") ->
 
 @observed_tool(lambda name, arguments=None: canonical_name(name))
 def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
-    args = arguments or {}
+    raw_name = name
+    args = dict(arguments or {})
     name = canonical_name(name)
     if name not in TOOL_SCHEMAS:
         raise caller_error(f"unknown remote-dev tool: {name}", KeyError)
+    if raw_name in {"remote.view_file_outline", "remote_view_file_outline"}:
+        args.setdefault("outline", True)
     allowed = set(TOOL_SCHEMAS[name]["properties"]) | set(PARAM_ALIASES.get(name, {})) | set(selector_fields())
     # The common timeout applies to the file/search/artifact operations too.
     allowed.update({"timeout", "timeout_ms"})
@@ -241,7 +244,8 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     # only resolve when the caller supplied an explicit selector.
     if name not in {"remote.job_status", "remote.job_tail", "remote.job_stop", "remote.job_stdin"} or has_selector(args):
         endpoint = resolve_endpoint(args)
-    if name.startswith("remote.job_"):
+    job_action = str(args.get("action") or "status").strip().lower() if name == "remote.job_status" else "status"
+    if name.startswith("remote.job_") and not (name == "remote.job_status" and job_action == "list"):
         _require(args, "job_id", name, "session_id")
     if name == "remote.bash":
         assert endpoint is not None
@@ -259,19 +263,56 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         )
     if name == "remote.read":
         assert endpoint is not None
-        return remote_read(endpoint, file_path=str(_require(args, "file_path", name, "path")), offset=int(args.get("offset") or 1), limit=int(args.get("limit") or 200), allow_symlink=bool(args.get("allow_symlink", False)), verify_content=bool(args.get("verify_content", True)), client_context_id=args.get("client_context_id"), timeout_ms=timeout_ms)
+        return remote_read(
+            endpoint,
+            file_path=str(_require(args, "file_path", name, "path")),
+            offset=int(args.get("offset") or 1),
+            limit=int(args.get("limit") or 200),
+            start_line=int(args["start_line"]) if args.get("start_line") is not None else None,
+            end_line=int(args["end_line"]) if args.get("end_line") is not None else None,
+            content_offset=int(args["content_offset"]) if args.get("content_offset") is not None else None,
+            outline=bool(args.get("outline", False)),
+            item_offset=int(args.get("item_offset") or 0),
+            node_paths=list(args["node_paths"]) if args.get("node_paths") is not None else None,
+            allow_symlink=bool(args.get("allow_symlink", False)),
+            verify_content=bool(args.get("verify_content", True)),
+            client_context_id=args.get("client_context_id"),
+            timeout_ms=timeout_ms,
+        )
     if name == "remote.write":
         assert endpoint is not None
         return remote_write(endpoint, file_path=str(_require(args, "file_path", name, "path")), content=str(args.get("content", "")), overwrite=bool(args.get("overwrite", False)), append=bool(args.get("append", False)), create_dirs=bool(args.get("create_dirs", False)), client_context_id=args.get("client_context_id"), timeout_ms=timeout_ms)
     if name == "remote.edit":
         assert endpoint is not None
-        return remote_edit(endpoint, file_path=str(_require(args, "file_path", name, "path")), old_string=str(_require(args, "old_string", name)), new_string=str(_require(args, "new_string", name)), replace_all=bool(args.get("replace_all", False)), client_context_id=args.get("client_context_id"), timeout_ms=timeout_ms)
+        return remote_edit(
+            endpoint,
+            file_path=str(_require(args, "file_path", name, "path")),
+            old_string=str(_require(args, "old_string", name)),
+            new_string=str(_require(args, "new_string", name)),
+            replace_all=bool(args.get("replace_all", False)),
+            start_line=int(args["start_line"]) if args.get("start_line") is not None else None,
+            end_line=int(args["end_line"]) if args.get("end_line") is not None else None,
+            client_context_id=args.get("client_context_id"),
+            timeout_ms=timeout_ms,
+        )
     if name == "remote.multi_edit":
         assert endpoint is not None
         return remote_multi_edit(endpoint, file_path=str(_require(args, "file_path", name, "path")), edits=list(args.get("edits") or []), client_context_id=args.get("client_context_id"), timeout_ms=timeout_ms)
     if name == "remote.glob":
         assert endpoint is not None
-        return remote_glob(endpoint, pattern=str(args["pattern"]), path=args.get("path"), limit=int(args.get("limit") or 100), respect_gitignore=bool(args.get("respect_gitignore", False)), timeout_ms=timeout_ms)
+        return remote_glob(
+            endpoint,
+            pattern=str(args.get("pattern") or "*"),
+            path=args.get("path"),
+            limit=int(args.get("limit") or 100),
+            respect_gitignore=bool(args.get("respect_gitignore", False)),
+            extensions=list(args["extensions"]) if args.get("extensions") is not None else None,
+            excludes=list(args["excludes"]) if args.get("excludes") is not None else None,
+            entry_type=str(args["entry_type"]) if args.get("entry_type") is not None else None,
+            max_depth=int(args["max_depth"]) if args.get("max_depth") is not None else None,
+            full_path=bool(args.get("full_path", False)),
+            timeout_ms=timeout_ms,
+        )
     if name == "remote.grep":
         assert endpoint is not None
         return remote_grep(
@@ -279,10 +320,13 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             pattern=str(args["pattern"]),
             path=args.get("path"),
             glob=args.get("glob"),
+            includes=list(args["includes"]) if args.get("includes") is not None else None,
+            excludes=list(args["excludes"]) if args.get("excludes") is not None else None,
             type=args.get("type"),
             output_mode=str(args.get("output_mode") or "files_with_matches"),
             multiline=bool(args.get("multiline", False)),
             case_insensitive=bool(args.get("case_insensitive", False)),
+            fixed_strings=bool(args.get("fixed_strings", False)),
             before_context=int(args.get("before_context") or 0),
             after_context=int(args.get("after_context") or 0),
             context_lines=int(args.get("context_lines") or 0),
@@ -294,11 +338,51 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         )
     if name == "remote.ls":
         assert endpoint is not None
-        return remote_ls(endpoint, path=args.get("path"), limit=int(args.get("limit") or 200), all=bool(args.get("all", False)), timeout_ms=timeout_ms)
+        return remote_ls(
+            endpoint,
+            path=args.get("path"),
+            limit=int(args.get("limit") or 200),
+            all=bool(args.get("all", False)),
+            max_depth=int(args.get("max_depth") or 1),
+            ignore_globs=list(args["ignore_globs"]) if args.get("ignore_globs") is not None else None,
+            timeout_ms=timeout_ms,
+        )
     if name == "remote.apply_patch":
         assert endpoint is not None
         return remote_apply_patch(endpoint, patch=args.get("patch"), command=args.get("command"), cwd=args.get("cwd"), timeout_ms=timeout_ms)
     if name == "remote.job_status":
+        if job_action == "list":
+            from remote_dev.result import make_result
+            jobs: list[dict[str, Any]] = []
+            if endpoint is not None:
+                jobs = list_job_records(endpoint.endpoint_id)
+            else:
+                for ep_rec in list_endpoint_records():
+                    ep_id = str(ep_rec.get("endpoint_id") or "")
+                    if ep_id:
+                        jobs.extend(list_job_records(ep_id))
+            res = make_result(
+                tool="remote.job_status",
+                target=endpoint.to_result_target() if endpoint is not None else {"kind": "local_state"},
+                outcome="success",
+                status="ok",
+                summary=f"Listed {len(jobs)} remote job(s).",
+                extra={"jobs": jobs, "job_count": len(jobs)},
+            )
+            lines = [f"Listed {len(jobs)} remote job(s):"] + [
+                f"- {j.get('job_id')} ({j.get('state', 'unknown')}): {j.get('command_preview', '')}" for j in jobs
+            ]
+            return {"text": "\n".join(lines) + "\n", "result": res}
+        if job_action in {"kill", "stop"}:
+            return remote_job_stop(endpoint, job_id=str(args["job_id"]), force=bool(args.get("force", False)))
+        if job_action in {"send_input", "stdin"}:
+            return remote_job_stdin(
+                endpoint,
+                job_id=str(args["job_id"]),
+                chars=args.get("chars") if args.get("chars") is None else str(args.get("chars")),
+            )
+        if job_action == "tail":
+            return remote_job_tail(endpoint, job_id=str(args["job_id"]), lines=int(args.get("lines") or 80))
         return remote_job_status(endpoint, job_id=str(args["job_id"]))
     if name == "remote.job_tail":
         return remote_job_tail(endpoint, job_id=str(args["job_id"]), lines=int(args.get("lines") or 80), stream=str(args.get("stream") or "both"))

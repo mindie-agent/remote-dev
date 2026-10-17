@@ -5,7 +5,7 @@ from remote_dev.observability import observed_tool
 import time
 from typing import Any
 
-from importlib.metadata import version as package_version
+from remote_dev import package_version
 from .endpoint import Endpoint
 from .container_endpoint import pinned_endpoint
 from remote_dev.result import make_result, utc_now_iso
@@ -76,7 +76,7 @@ def write_context_snapshot(endpoint: Endpoint, summary: dict[str, Any], full_pro
         "refs": {},
         "created_at": utc_now_iso(),
         "ttl_seconds": 300,
-        "package_version": package_version("remote-dev"),
+        "package_version": package_version(),
     }
     stamp = payload["created_at"].replace(":", "").replace("-", "")
     full_path = base / f"context-{stamp}.json"

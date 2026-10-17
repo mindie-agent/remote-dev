@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
 
 def package_version() -> str:
-    return version("remote-dev")
+    try:
+        return version("remote-dev")
+    except PackageNotFoundError:
+        return "0.10.0"
 
 
 __version__ = package_version()
