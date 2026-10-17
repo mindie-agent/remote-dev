@@ -279,19 +279,62 @@ if op == "glob":
     pattern = payload.get("pattern") or "*"
     limit = int(payload.get("limit") or 100)
     respect_gitignore = bool(payload.get("respect_gitignore"))
+    extensions = payload.get("extensions") or []
+    if isinstance(extensions, str):
+        extensions = [extensions]
+    norm_exts = {str(ext).lstrip(".").lower() for ext in extensions if str(ext).strip()}
+    excludes = payload.get("excludes") or []
+    if isinstance(excludes, str):
+        excludes = [excludes]
+    entry_type = payload.get("entry_type")
+    if entry_type in {"dir", "d"}:
+        entry_type = "directory"
+    elif entry_type == "f":
+        entry_type = "file"
+    max_depth = int(payload["max_depth"]) if payload.get("max_depth") is not None else None
+    full_path = bool(payload.get("full_path", False))
+    has_extra_filters = bool(norm_exts or excludes or entry_type in {"file", "directory"} or max_depth is not None or full_path)
+    eff_pattern = pattern
+    if has_extra_filters and "/" not in eff_pattern and "**" not in eff_pattern and (max_depth is None or max_depth > 1):
+        eff_pattern = f"**/{eff_pattern}"
     matches = []
     warnings = []
     import heapq
     seen = 0
     # One-shot helper: chdir so glob(pattern, recursive=True) works on Python 3.9 (no root_dir).
     os.chdir(str(base))
-    for item in glob_mod.iglob(pattern, recursive=True):
+    for item in glob_mod.iglob(eff_pattern, recursive=True):
+        rel_norm = item.replace("\\", "/").lstrip("./")
+        if not rel_norm:
+            continue
+        if max_depth is not None:
+            depth = len([p for p in rel_norm.split("/") if p])
+            if depth > max_depth:
+                continue
+        if full_path and not fnmatch.fnmatch(rel_norm, pattern):
+            continue
+        if excludes:
+            parts = rel_norm.split("/")
+            if any(
+                fnmatch.fnmatch(rel_norm, ex)
+                or fnmatch.fnmatch(parts[-1], ex)
+                or any(fnmatch.fnmatch(part, ex.rstrip("/")) for part in parts)
+                for ex in excludes
+            ):
+                continue
         path = base / item
         try:
             st = path.lstat()
         except FileNotFoundError:
             continue
-        row = {"path": str(path), "relpath": item, "type": "directory" if path.is_dir() else "file", "mtime_ns": st.st_mtime_ns, "size": st.st_size}
+        kind = "directory" if path.is_dir() else "file"
+        if entry_type in {"file", "directory"} and kind != entry_type:
+            continue
+        if norm_exts:
+            suffix = path.suffix.lstrip(".").lower()
+            if suffix not in norm_exts:
+                continue
+        row = {"path": str(path), "relpath": item, "type": kind, "mtime_ns": st.st_mtime_ns, "size": st.st_size}
         seen += 1
         if respect_gitignore:
             matches.append(row)
@@ -323,9 +366,16 @@ if op == "grep":
     max_line_chars = int(payload.get("max_line_chars") or 2000)
     output_mode = payload.get("output_mode") or "files_with_matches"
     glob_pattern = payload.get("glob")
+    includes = payload.get("includes") or []
+    if isinstance(includes, str):
+        includes = [includes]
+    excludes = payload.get("excludes") or []
+    if isinstance(excludes, str):
+        excludes = [excludes]
     type_name = payload.get("type")
     multiline = bool(payload.get("multiline", False))
     case_insensitive = bool(payload.get("case_insensitive", False))
+    fixed_strings = bool(payload.get("fixed_strings", False))
     before_context = int(payload.get("before_context") or 0)
     after_context = int(payload.get("after_context") or 0)
     context_lines = int(payload.get("context_lines") or 0)
@@ -342,6 +392,8 @@ if op == "grep":
     rg_path = shutil.which("rg")
     if rg_path:
         cmd = [rg_path, "--color", "never"]
+        if fixed_strings:
+            cmd.append("-F")
         if multiline:
             cmd.append("-U")
         if case_insensitive:
@@ -350,6 +402,13 @@ if op == "grep":
             cmd.extend(["--no-ignore", "--hidden"])
         if glob_pattern:
             cmd.extend(["--glob", glob_pattern])
+        for inc in includes:
+            if inc:
+                cmd.extend(["--glob", str(inc)])
+        for exc in excludes:
+            if exc:
+                clean_exc = str(exc).lstrip("!")
+                cmd.extend(["--glob", f"!{clean_exc}"])
         if type_name:
             cmd.extend(["--type", type_name])
         if output_mode == "files_with_matches":
@@ -369,7 +428,7 @@ if op == "grep":
                 cmd.extend(["-B", str(before_context)])
             if after_context:
                 cmd.extend(["-A", str(after_context)])
-        cmd.extend([pattern, str(base)])
+        cmd.extend(["--", pattern, str(base)])
         lines, truncated, total_matches, clipped = collect_page(cmd, output_mode, offset, limit, max_line_chars)
         if clipped:
             warnings.append(f"{clipped} line(s) truncated to {max_line_chars} chars")
@@ -378,30 +437,26 @@ if op == "grep":
                           "warnings": warnings}, sort_keys=True))
         raise SystemExit(0)
 
-    # rg is unavailable: fall back to POSIX `grep -E`, which preserves regex
-    # semantics. Never silently degrade to substring matching, and fail fast on
-    # features grep cannot honor instead of returning semantically wrong "ok".
+    # rg is unavailable: fall back to POSIX `grep -E` (or `grep -F` when fixed_strings=True).
     if multiline:
         fail("rg_required", "multiline grep requires ripgrep (rg) on the remote host; install rg or drop multiline")
     if type_name:
         fail("rg_required", f"grep fallback cannot honor --type {type_name}; install ripgrep (rg) or use --glob")
-    if glob_pattern and "/" in glob_pattern:
-        # grep --include matches file basenames only; a path-anchored glob
-        # like "src/**/*.py" cannot be honored faithfully.
-        fail("rg_required", f"grep fallback cannot honor path-anchored --glob {glob_pattern}; install ripgrep (rg) or use a basename glob")
+    for pat in ([glob_pattern] if glob_pattern else []) + list(includes) + list(excludes):
+        if pat and "/" in str(pat):
+            fail("rg_required", f"grep fallback cannot honor path-anchored --glob {pat}; install ripgrep (rg) or use a basename glob")
     grep_path = shutil.which("grep")
     if not grep_path:
         fail("grep_unavailable", "neither rg nor grep found on the remote host")
-    warnings.append("rg not found; used grep -E fallback (POSIX ERE semantics)")
-    cmd = [grep_path, "-r", "-E", "-I"]
+    mode_flag = "-F" if fixed_strings else "-E"
+    warnings.append(
+        "rg not found; used grep -F fallback (fixed-strings semantics)"
+        if fixed_strings
+        else "rg not found; used grep -E fallback (POSIX ERE semantics)"
+    )
+    cmd = [grep_path, "-r", mode_flag, "-I"]
     if case_insensitive:
         cmd.append("-i")
-    # Align with rg defaults, which skip .git and hidden directories while
-    # descending. grep applies --exclude-dir to the base operand itself, so
-    # skip a pattern that matches the explicitly requested base (rg searches
-    # an explicitly named hidden or .git path). grep cannot evaluate
-    # .gitignore rules at all: include_ignored only lifts these default
-    # directory excludes, which is an approximation and is reported as such.
     if include_ignored:
         warnings.append("grep fallback cannot evaluate .gitignore; include_ignored only re-enables hidden and .git directories")
     else:
@@ -411,13 +466,16 @@ if op == "grep":
             cmd.append(f"--exclude-dir={exclude_dir}")
     if glob_pattern:
         cmd.append(f"--include={glob_pattern}")
+    for inc in includes:
+        if inc:
+            cmd.append(f"--include={inc}")
+    for exc in excludes:
+        if exc:
+            cmd.append(f"--exclude={str(exc).lstrip('!')}")
     if output_mode == "count_matches":
-        # POSIX grep has no per-file match count. Find candidate files first,
-        # then count -o matches per file. Never degrade to line counts: with
-        # several matches on one line that would silently change semantics.
         import contextlib
         counts, total_matches, count = [], 0, 0
-        count_cmd = [grep_path, "-o", "-E"]
+        count_cmd = [grep_path, "-o", mode_flag]
         if case_insensitive:
             count_cmd.append("-i")
         with contextlib.closing(command_lines([*cmd, "-l", "--", pattern, str(base)])) as candidates:
@@ -484,10 +542,15 @@ def _compact_matches(matches: list[Any]) -> tuple[list[str], bool]:
 def remote_glob(
     endpoint: Endpoint,
     *,
-    pattern: str,
+    pattern: str = "*",
     path: str | None = None,
     limit: int = 100,
     respect_gitignore: bool = False,
+    extensions: list[str] | None = None,
+    excludes: list[str] | None = None,
+    entry_type: str | None = None,
+    max_depth: int | None = None,
+    full_path: bool = False,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
@@ -497,18 +560,29 @@ def remote_glob(
         base = join_under_root(endpoint.root, endpoint.effective_cwd, raw_path)
     except PathPolicyError as exc:
         return _path_blocked_result(endpoint, "remote.glob", raw_path, str(exc), started, start)
+    glob_req: dict[str, Any] = {
+        "op": "glob",
+        "root": endpoint.root,
+        "cwd": endpoint.effective_cwd,
+        "path": base,
+        "pattern": pattern or "*",
+        "limit": limit,
+        "respect_gitignore": respect_gitignore,
+    }
+    if extensions:
+        glob_req["extensions"] = [str(e) for e in extensions]
+    if excludes:
+        glob_req["excludes"] = [str(e) for e in excludes]
+    if entry_type:
+        glob_req["entry_type"] = str(entry_type)
+    if max_depth is not None:
+        glob_req["max_depth"] = int(max_depth)
+    if full_path:
+        glob_req["full_path"] = True
     data = run_remote_python(
         endpoint,
         REMOTE_SEARCH_PY,
-        {
-            "op": "glob",
-            "root": endpoint.root,
-            "cwd": endpoint.effective_cwd,
-            "path": base,
-            "pattern": pattern,
-            "limit": limit,
-            "respect_gitignore": respect_gitignore,
-        },
+        glob_req,
         timeout_ms=timeout_ms,
     )
     matches = data.get("matches", []) if isinstance(data.get("matches"), list) else []
@@ -539,10 +613,13 @@ def remote_grep(
     pattern: str,
     path: str | None = None,
     glob: str | None = None,
+    includes: list[str] | None = None,
+    excludes: list[str] | None = None,
     type: str | None = None,
     output_mode: str = "files_with_matches",
     multiline: bool = False,
     case_insensitive: bool = False,
+    fixed_strings: bool = False,
     before_context: int = 0,
     after_context: int = 0,
     context_lines: int = 0,
@@ -571,29 +648,36 @@ def remote_grep(
         base = join_under_root(endpoint.root, endpoint.effective_cwd, raw_path)
     except PathPolicyError as exc:
         return _path_blocked_result(endpoint, "remote.grep", raw_path, str(exc), started, start)
+    grep_req: dict[str, Any] = {
+        "op": "grep",
+        "root": endpoint.root,
+        "cwd": endpoint.effective_cwd,
+        "path": base,
+        "pattern": pattern,
+        "glob": glob,
+        "type": type,
+        "output_mode": output_mode,
+        "multiline": multiline,
+        "case_insensitive": case_insensitive,
+        "before_context": before_context,
+        "after_context": after_context,
+        "context_lines": context_lines,
+        "line_numbers": line_numbers,
+        "include_ignored": include_ignored,
+        "offset": offset,
+        "limit": limit,
+        "max_line_chars": MAX_LINE_CHARS,
+    }
+    if fixed_strings:
+        grep_req["fixed_strings"] = True
+    if includes:
+        grep_req["includes"] = [str(i) for i in includes]
+    if excludes:
+        grep_req["excludes"] = [str(e) for e in excludes]
     data = run_remote_python(
         endpoint,
         REMOTE_SEARCH_PY,
-        {
-            "op": "grep",
-            "root": endpoint.root,
-            "cwd": endpoint.effective_cwd,
-            "path": base,
-            "pattern": pattern,
-            "glob": glob,
-            "type": type,
-            "output_mode": output_mode,
-            "multiline": multiline,
-            "case_insensitive": case_insensitive,
-            "before_context": before_context,
-            "after_context": after_context,
-            "context_lines": context_lines,
-            "line_numbers": line_numbers,
-            "include_ignored": include_ignored,
-            "offset": offset,
-            "limit": limit,
-            "max_line_chars": MAX_LINE_CHARS,
-        },
+        grep_req,
         timeout_ms=timeout_ms,
     )
     matches = data.get("matches", []) if isinstance(data.get("matches"), list) else []

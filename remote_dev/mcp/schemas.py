@@ -57,16 +57,22 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "remote.read": schema(
         {
             "file_path": {"type": "string"},
-            "path": {"type": "string", "description": "Alias of file_path (Kimi/Cursor native Read habit)."},
+            "path": {"type": "string", "description": "Alias of file_path (Kimi/Cursor/DSH native Read habit)."},
             "verify_content": {"type": "boolean", "default": True, "description": "Compute full SHA256 and exact line count for edit concurrency. False bounds positive-offset log reads to the requested window and reports unknown total_lines when more data exists."},
             "allow_symlink": {"type": "boolean", "default": False},
             "offset": {"type": "integer", "default": 1, "description": "1-based first line. Negative values count back from the end of the file."},
             "limit": {"type": "integer", "default": 200, "maximum": 500},
             "line_offset": {"type": "integer", "description": "Alias of offset (Kimi native Read habit)."},
             "n_lines": {"type": "integer", "description": "Alias of limit (Kimi native Read habit)."},
+            "start_line": {"type": "integer", "description": "1-based inclusive start line (Antigravity StartLine / Cursor / DSH habit)."},
+            "end_line": {"type": "integer", "description": "1-based inclusive end line (Antigravity EndLine / Cursor / DSH habit)."},
+            "content_offset": {"type": "integer", "description": "0-based byte/character offset for reading truncated content (Antigravity ContentOffset habit)."},
+            "outline": {"type": "boolean", "default": False, "description": "Return structured class/function symbol outline with line ranges (Antigravity view_file_outline habit)."},
+            "item_offset": {"type": "integer", "default": 0, "description": "0-based symbol offset when outline=true (Antigravity ItemOffset habit)."},
+            "node_paths": {"type": "array", "items": {"type": "string"}, "description": "Inspect specific class/function symbol paths by AST/definition range (Antigravity view_code_item NodePaths habit)."},
             "client_context_id": {"type": "string"},
         },
-        description="file_path is required; the alias path is also accepted (Kimi/Cursor habit). Enforced by the server so alias-only calls pass provider schema validation.",
+        description="file_path is required; aliases path / AbsolutePath / TargetFile / target_file are also accepted. Enforced by the server so alias-only calls pass provider schema validation.",
     ),
     "remote.write": schema(
         {
@@ -74,12 +80,14 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "path": {"type": "string", "description": "Alias of file_path (Kimi/Cursor native Write habit)."},
             "content": {"type": "string"},
             "overwrite": {"type": "boolean"},
-            "append": {"type": "boolean", "description": "Append content at end of file instead of replacing it (Kimi Write mode=append). Mutually exclusive with overwrite; creates a missing file."},
+            "append": {"type": "boolean", "description": "Append content at end of file instead of replacing it (Kimi Write mode=append / Antigravity Append). Mutually exclusive with overwrite; creates a missing file."},
+            "mode": {"type": "string", "enum": ["overwrite", "write", "append"], "description": "Optional Kimi WriteFile mode ('overwrite'/'write' or 'append')."},
             "create_dirs": {"type": "boolean"},
+            "description": {"type": "string", "description": "Optional change description (Antigravity write_to_file Description habit)."},
             "client_context_id": {"type": "string"},
         },
         ["content"],
-        description="file_path is required; the alias path is also accepted. Enforced by the server so alias-only calls pass provider schema validation.",
+        description="file_path is required; the alias path / TargetFile is also accepted. Enforced by the server so alias-only calls pass provider schema validation.",
     ),
     "remote.edit": schema(
         {
@@ -88,10 +96,14 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "old_string": {"type": "string"},
             "new_string": {"type": "string"},
             "replace_all": {"type": "boolean"},
+            "start_line": {"type": "integer", "description": "Optional 1-based inclusive start line scoping the replacement (Antigravity StartLine habit)."},
+            "end_line": {"type": "integer", "description": "Optional 1-based inclusive end line scoping the replacement (Antigravity EndLine habit)."},
+            "instruction": {"type": "string", "description": "Optional edit instruction (Antigravity replace_file_content habit)."},
+            "description": {"type": "string", "description": "Optional edit description (Antigravity replace_file_content habit)."},
             "client_context_id": {"type": "string"},
         },
         ["old_string", "new_string"],
-        description="file_path is required; the alias path is also accepted. Enforced by the server so alias-only calls pass provider schema validation.",
+        description="file_path is required; the alias path / TargetFile is also accepted. Enforced by the server so alias-only calls pass provider schema validation.",
     ),
     "remote.multi_edit": schema(
         {
@@ -109,10 +121,12 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 },
             },
             "path": {"type": "string", "description": "Alias of file_path."},
+            "instruction": {"type": "string", "description": "Optional edit instruction (Antigravity multi_replace_file_content habit)."},
+            "description": {"type": "string", "description": "Optional edit description (Antigravity multi_replace_file_content habit)."},
             "client_context_id": {"type": "string"},
         },
         ["edits"],
-        description="file_path is required; the alias path is also accepted. Enforced by the server so alias-only calls pass provider schema validation.",
+        description="file_path is required; the alias path / TargetFile is also accepted. Enforced by the server so alias-only calls pass provider schema validation.",
     ),
     "remote.bash": schema(
         {
@@ -124,20 +138,37 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "timeout": {"type": "integer", "minimum": 1, "description": "Alias of timeout_ms; values must agree if both are supplied."},
             "tty": {"type": "boolean", "default": False, "description": "Allocate a remote PTY (24x80). Ctrl-C signals its foreground process group; stderr is merged into stdout."},
             "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 300000, "default": 10000, "description": "Remote wait for output/completion after connection and preparation. Returns session_id when running or unread output remains."},
+            "run_in_background": {"type": "boolean", "description": "Launch in background and return job_id/session_id immediately (Claude Code run_in_background / Antigravity IsDaemon / Cursor is_background habit)."},
             "max_output_tokens": {"type": "integer", "minimum": 1, "description": "Approximate output budget at four UTF-8 bytes/token across text plus structured previews, shared by stdout/stderr. Status/refs metadata is separate. Unreturned bytes remain available through the session cursor."},
             "env": {"type": "object", "additionalProperties": {"type": "string"}},
         },
-        description="command is required; the alias cmd is also accepted (Codex habit). Enforced by the server so alias-only calls pass provider schema validation.",
+        description="command is required; the alias cmd / CommandLine is also accepted (Codex / Antigravity habit). Enforced by the server so alias-only calls pass provider schema validation.",
     ),
-    "remote.glob": schema({"pattern": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}, "respect_gitignore": {"type": "boolean", "description": "Omit paths ignored by .gitignore. Uses git check-ignore when the remote tree is a git worktree; otherwise applies .gitignore rules in-process."}}, ["pattern"]),
+    "remote.glob": schema(
+        {
+            "pattern": {"type": "string"},
+            "path": {"type": "string"},
+            "limit": {"type": "integer"},
+            "respect_gitignore": {"type": "boolean", "description": "Omit paths ignored by .gitignore. Uses git check-ignore when the remote tree is a git worktree; otherwise applies .gitignore rules in-process."},
+            "extensions": {"type": "array", "items": {"type": "string"}, "description": "Optional file extensions filter without leading dot (Antigravity find_by_name Extensions habit)."},
+            "excludes": {"type": "array", "items": {"type": "string"}, "description": "Optional glob patterns to exclude (Antigravity Excludes / Cursor exclude_pattern habit)."},
+            "entry_type": {"type": "string", "enum": ["file", "directory", "any"], "description": "Filter by entry type: file, directory, or any (Antigravity find_by_name Type habit)."},
+            "max_depth": {"type": "integer", "description": "Maximum directory traversal depth (Antigravity MaxDepth / Codex depth habit)."},
+            "full_path": {"type": "boolean", "description": "Match pattern against full relative path instead of filename (Antigravity FullPath habit)."},
+        },
+        ["pattern"],
+    ),
     "remote.grep": schema(
         {
             "pattern": {"type": "string"},
             "path": {"type": "string"},
             "glob": {"type": "string"},
+            "includes": {"type": "array", "items": {"type": "string"}, "description": "Additional glob patterns to include (Antigravity Includes / Cursor include_pattern habit)."},
+            "excludes": {"type": "array", "items": {"type": "string"}, "description": "Glob patterns to exclude (Antigravity Excludes / Cursor exclude_pattern habit)."},
             "type": {"type": "string"},
             "output_mode": {"type": "string", "enum": ["files_with_matches", "content", "count", "count_matches"], "description": "count = matching lines per file (Claude habit); count_matches = total matches per file (Kimi habit, rg --count-matches). They differ when one line holds several matches."},
             "multiline": {"type": "boolean"},
+            "fixed_strings": {"type": "boolean", "description": "Treat pattern as a literal string instead of a regular expression (rg -F / grep -F; Antigravity IsRegex=false habit)."},
             "case_insensitive": {"type": "boolean", "description": "Case-insensitive matching (rg -i / grep -i). Alias: -i."},
             "-i": {"type": "boolean", "description": "Alias of case_insensitive (Claude Code / Kimi native Grep parameter)."},
             "context_lines": {"type": "integer", "description": "Show N lines before and after each match in content mode (rg/grep -C). Alias: -C."},
@@ -163,7 +194,15 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         ["pattern"],
     ),
-    "remote.ls": schema({"path": {"type": "string"}, "limit": {"type": "integer"}, "all": {"type": "boolean"}}),
+    "remote.ls": schema(
+        {
+            "path": {"type": "string"},
+            "limit": {"type": "integer"},
+            "all": {"type": "boolean"},
+            "max_depth": {"type": "integer", "description": "Maximum directory traversal depth (default 1; Codex/DSH depth habit)."},
+            "ignore_globs": {"type": "array", "items": {"type": "string"}, "description": "Optional glob patterns to omit from directory listing (Cursor ignore_globs habit)."},
+        }
+    ),
     "remote.apply_patch": schema(
         {
             "patch": {"type": "string", "description": "Codex apply_patch payload or unified diff. Prefer this field."},
@@ -172,13 +211,23 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         description="Provide a non-empty patch or command. If both are provided, patch takes precedence. Missing patch content is rejected by the server.",
     ),
-    "remote.job_status": schema({"job_id": {"type": "string"}}, ["job_id"], endpoint_selector=False),
+    "remote.job_status": schema(
+        {
+            "job_id": {"type": "string"},
+            "action": {"type": "string", "enum": ["status", "list", "kill", "stop", "send_input", "tail"], "description": "Optional task management action (Antigravity manage_task Action habit). Defaults to status."},
+            "chars": {"type": "string", "description": "Input bytes when action='send_input' (Antigravity manage_task Input habit)."},
+            "force": {"type": "boolean", "description": "Force kill when action='kill'/'stop'."},
+            "lines": {"type": "integer", "maximum": 500, "description": "Line count when action='tail'."},
+        },
+        ["job_id"],
+        endpoint_selector=False,
+    ),
     "remote.job_tail": schema({"job_id": {"type": "string"}, "lines": {"type": "integer", "maximum": 500}, "stream": {"type": "string", "enum": ["stdout", "stderr", "both"]}}, ["job_id"], endpoint_selector=False),
     "remote.job_stop": schema({"job_id": {"type": "string"}, "force": {"type": "boolean"}}, ["job_id"], endpoint_selector=False),
     "remote.job_stdin": schema(
         {
             "job_id": {"type": "string"},
-            "chars": {"type": "string", "description": "Bytes to write to the job's stdin (Codex write_stdin habit). Omit or pass an empty string to only poll output. When stdin_buffer_full is reported, resend only the unwritten remainder: slice the original string at the returned written_chars character count (a byte count cannot slice a Unicode string)."},
+            "chars": {"type": "string", "description": "Bytes to write to the job's stdin (Codex write_stdin / Antigravity manage_task Input habit). Omit or pass an empty string to only poll output. When stdin_buffer_full is reported, resend only the unwritten remainder: slice the original string at the returned written_chars character count (a byte count cannot slice a Unicode string)."},
             "eof": {"type": "boolean", "description": "Close the job's stdin after writing chars. Programs waiting for end-of-input then finish. If the write was only partially accepted (stdin_buffer_full), the close is deferred: resend the unwritten remainder with eof=true."},
             "yield_time_ms": {"type": "integer", "description": "After writing, keep polling up to this many milliseconds for output or completion before returning new output."},
             "max_output_tokens": {"type": "integer", "description": "Cap the new output returned by this call, counted as four UTF-8 bytes/token across text and structured previews, shared by stdout/stderr; metadata separate. Skipped bytes are not lost: the read cursor only advances past what was returned."},
@@ -186,7 +235,6 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         ["job_id"],
         endpoint_selector=False,
         description="Poll any session; non-empty chars requires writable stdin. Endpoint and identity are restored from the job record. Stop via remote.job_stop.",
-
     ),
     "remote.artifact_manifest": schema({"remote_path": {"type": "string"}}, ["remote_path"]),
     "remote.artifact_pull": schema({"remote_path": {"type": "string"}, "local_dir": {"type": "string"}, "overwrite": {"type": "boolean", "default": False, "description": "Replace existing local files only when explicitly true. Hash-identical files are skipped."}}, ["remote_path"]),
@@ -202,30 +250,274 @@ for _job_name in ("remote.job_status", "remote.job_tail", "remote.job_stop", "re
 
 ALIASES: dict[str, str] = {name.replace(".", "_"): name for name in TOOL_SCHEMAS}
 
+# Additional Harness-native tool name aliases accepted by canonical_name() / call_tool()
+# across Codex, Claude Code, Cursor, Kimi Code, DSH, and Antigravity.
+HARNESS_TOOL_ALIASES: dict[str, str] = {
+    "remote.view_file": "remote.read",
+    "remote_view_file": "remote.read",
+    "remote.read_file": "remote.read",
+    "remote_read_file": "remote.read",
+    "remote.view_file_outline": "remote.read",
+    "remote_view_file_outline": "remote.read",
+    "remote.view_code_item": "remote.read",
+    "remote_view_code_item": "remote.read",
+    "remote.write_to_file": "remote.write",
+    "remote_write_to_file": "remote.write",
+    "remote.write_file": "remote.write",
+    "remote_write_file": "remote.write",
+    "remote.replace_file_content": "remote.edit",
+    "remote_replace_file_content": "remote.edit",
+    "remote.str_replace_file": "remote.edit",
+    "remote_str_replace_file": "remote.edit",
+    "remote.multi_replace_file_content": "remote.multi_edit",
+    "remote_multi_replace_file_content": "remote.multi_edit",
+    "remote.exec_command": "remote.bash",
+    "remote_exec_command": "remote.bash",
+    "remote.run_command": "remote.bash",
+    "remote_run_command": "remote.bash",
+    "remote.run_terminal_cmd": "remote.bash",
+    "remote_run_terminal_cmd": "remote.bash",
+    "remote.shell": "remote.bash",
+    "remote_shell": "remote.bash",
+    "remote.write_stdin": "remote.job_stdin",
+    "remote_write_stdin": "remote.job_stdin",
+    "remote.send_command_input": "remote.job_stdin",
+    "remote_send_command_input": "remote.job_stdin",
+    "remote.manage_task": "remote.job_status",
+    "remote_manage_task": "remote.job_status",
+    "remote.command_status": "remote.job_status",
+    "remote_command_status": "remote.job_status",
+    "remote.bash_output": "remote.job_status",
+    "remote_bash_output": "remote.job_status",
+    "remote.task_output": "remote.job_status",
+    "remote_task_output": "remote.job_status",
+    "remote.kill_shell": "remote.job_stop",
+    "remote_kill_shell": "remote.job_stop",
+    "remote.task_stop": "remote.job_stop",
+    "remote_task_stop": "remote.job_stop",
+    "remote.find_by_name": "remote.glob",
+    "remote_find_by_name": "remote.glob",
+    "remote.file_search": "remote.glob",
+    "remote_file_search": "remote.glob",
+    "remote.grep_search": "remote.grep",
+    "remote_grep_search": "remote.grep",
+    "remote.list_dir": "remote.ls",
+    "remote_list_dir": "remote.ls",
+}
+
 # Thin client-native parameter aliases folded into the canonical fields by
 # normalize_arguments. One shared mapping serves the MCP dispatcher and the
 # CLI --input-json path; there is no per-client execution fork. A canonical
 # key always wins over its alias, and unknown keys pass through untouched so
 # consumer resolver selectors keep working.
 PARAM_ALIASES: dict[str, dict[str, str]] = {
-    "remote.read": {"path": "file_path", "line_offset": "offset", "n_lines": "limit"},
-    "remote.write": {"path": "file_path"},
-    "remote.edit": {"path": "file_path"},
-    "remote.multi_edit": {"path": "file_path"},
-    "remote.bash": {"cmd": "command", "workdir": "cwd"},
+    "remote.read": {
+        "path": "file_path",
+        "TargetFile": "file_path",
+        "target_file": "file_path",
+        "AbsolutePath": "file_path",
+        "absolute_path": "file_path",
+        "File": "file_path",
+        "line_offset": "offset",
+        "n_lines": "limit",
+        "StartLine": "start_line",
+        "start_line_one_indexed": "start_line",
+        "EndLine": "end_line",
+        "end_line_one_indexed_inclusive": "end_line",
+        "ContentOffset": "content_offset",
+        "ItemOffset": "item_offset",
+        "NodePaths": "node_paths",
+        "symbol": "node_paths",
+        "symbols": "node_paths",
+        "should_read_entire_file": "_should_read_entire_file",
+        "explanation": "_explanation",
+    },
+    "remote.write": {
+        "path": "file_path",
+        "TargetFile": "file_path",
+        "target_file": "file_path",
+        "AbsolutePath": "file_path",
+        "absolute_path": "file_path",
+        "CodeContent": "content",
+        "code_content": "content",
+        "contents": "content",
+        "Overwrite": "overwrite",
+        "Append": "append",
+        "Description": "description",
+        "explanation": "description",
+    },
+    "remote.edit": {
+        "path": "file_path",
+        "TargetFile": "file_path",
+        "target_file": "file_path",
+        "AbsolutePath": "file_path",
+        "absolute_path": "file_path",
+        "TargetContent": "old_string",
+        "target_content": "old_string",
+        "old_str": "old_string",
+        "ReplacementContent": "new_string",
+        "replacement_content": "new_string",
+        "new_str": "new_string",
+        "AllowMultiple": "replace_all",
+        "allow_multiple": "replace_all",
+        "StartLine": "start_line",
+        "start_line_one_indexed": "start_line",
+        "EndLine": "end_line",
+        "end_line_one_indexed_inclusive": "end_line",
+        "Instruction": "instruction",
+        "Description": "description",
+        "explanation": "description",
+    },
+    "remote.multi_edit": {
+        "path": "file_path",
+        "TargetFile": "file_path",
+        "target_file": "file_path",
+        "AbsolutePath": "file_path",
+        "absolute_path": "file_path",
+        "ReplacementChunks": "edits",
+        "replacement_chunks": "edits",
+        "Instruction": "instruction",
+        "Description": "description",
+        "explanation": "description",
+    },
+    "remote.bash": {
+        "cmd": "command",
+        "CommandLine": "command",
+        "command_line": "command",
+        "workdir": "cwd",
+        "working_dir": "cwd",
+        "Cwd": "cwd",
+        "WaitMsBeforeAsync": "yield_time_ms",
+        "wait_ms_before_async": "yield_time_ms",
+        "is_background": "run_in_background",
+        "IsDaemon": "run_in_background",
+        "is_daemon": "run_in_background",
+        "explanation": "description",
+    },
+    "remote.glob": {
+        "Pattern": "pattern",
+        "glob_pattern": "pattern",
+        "file_pattern": "pattern",
+        "query": "pattern",
+        "SearchDirectory": "path",
+        "search_directory": "path",
+        "target_directory": "path",
+        "DirectoryPath": "path",
+        "dir_path": "path",
+        "Extensions": "extensions",
+        "Excludes": "excludes",
+        "exclude_pattern": "excludes",
+        "Type": "entry_type",
+        "type": "entry_type",
+        "file_type": "entry_type",
+        "MaxDepth": "max_depth",
+        "depth": "max_depth",
+        "FullPath": "full_path",
+        "explanation": "_explanation",
+    },
     "remote.grep": {
+        "Query": "pattern",
+        "query": "pattern",
+        "SearchPath": "path",
+        "search_path": "path",
+        "target_directory": "path",
         "-i": "case_insensitive",
+        "CaseInsensitive": "case_insensitive",
+        "ignore_case": "case_insensitive",
+        "case_sensitive": "_case_sensitive",
+        "IsRegex": "_is_regex",
+        "is_regex": "_is_regex",
+        "literal": "fixed_strings",
+        "-F": "fixed_strings",
+        "MatchPerLine": "_match_per_line",
+        "match_per_line": "_match_per_line",
+        "Includes": "includes",
+        "include_pattern": "includes",
+        "Excludes": "excludes",
+        "exclude_pattern": "excludes",
         "-A": "after_context",
         "-B": "before_context",
         "-C": "context_lines",
         "-n": "line_numbers",
         "head_limit": "limit",
+        "explanation": "_explanation",
+    },
+    "remote.ls": {
+        "DirectoryPath": "path",
+        "directory_path": "path",
+        "dir_path": "path",
+        "target_directory": "path",
+        "MaxDepth": "max_depth",
+        "depth": "max_depth",
+        "recursive": "_recursive",
+        "Excludes": "ignore_globs",
+        "excludes": "ignore_globs",
+        "explanation": "_explanation",
+    },
+    "remote.job_status": {
+        "TaskId": "job_id",
+        "task_id": "job_id",
+        "bash_id": "job_id",
+        "shell_id": "job_id",
+        "Action": "action",
+        "Input": "chars",
+        "input": "chars",
+        "stdin": "chars",
+    },
+    "remote.job_tail": {
+        "TaskId": "job_id",
+        "task_id": "job_id",
+        "bash_id": "job_id",
+        "shell_id": "job_id",
+    },
+    "remote.job_stop": {
+        "TaskId": "job_id",
+        "task_id": "job_id",
+        "bash_id": "job_id",
+        "shell_id": "job_id",
+    },
+    "remote.job_stdin": {
+        "TaskId": "job_id",
+        "task_id": "job_id",
+        "bash_id": "job_id",
+        "shell_id": "job_id",
+        "Input": "chars",
+        "input": "chars",
+        "stdin": "chars",
+        "WaitMsBeforeAsync": "yield_time_ms",
+        "wait_ms_before_async": "yield_time_ms",
     },
 }
 
 
+def _normalize_edit_chunk(chunk: Any) -> Any:
+    if not isinstance(chunk, dict):
+        return chunk
+    out = dict(chunk)
+    chunk_map = {
+        "TargetContent": "old_string",
+        "target_content": "old_string",
+        "old_str": "old_string",
+        "ReplacementContent": "new_string",
+        "replacement_content": "new_string",
+        "new_str": "new_string",
+        "AllowMultiple": "replace_all",
+        "allow_multiple": "replace_all",
+        "StartLine": "start_line",
+        "start_line_one_indexed": "start_line",
+        "EndLine": "end_line",
+        "end_line_one_indexed_inclusive": "end_line",
+    }
+    for alias, canonical in chunk_map.items():
+        if alias in out and canonical not in out:
+            out[canonical] = out[alias]
+        out.pop(alias, None)
+    return out
+
+
 def normalize_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Fold known client-native alias keys into their canonical fields."""
+    had_target_file = "TargetFile" in args
     if tool.startswith("remote.job_"):
         args = dict(args)
         if "job_id" not in args and "session_id" in args:
@@ -238,4 +530,57 @@ def normalize_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
         if alias in normalized and canonical not in normalized:
             normalized[canonical] = normalized[alias]
         normalized.pop(alias, None)
+    normalized.pop("_explanation", None)
+
+    if tool == "remote.read":
+        should_entire = normalized.pop("_should_read_entire_file", None)
+        if should_entire and "limit" not in normalized and "end_line" not in normalized:
+            normalized["limit"] = 500
+        if "node_paths" in normalized and isinstance(normalized["node_paths"], str):
+            normalized["node_paths"] = [normalized["node_paths"]]
+    elif tool == "remote.write":
+        mode = normalized.pop("mode", None)
+        if isinstance(mode, str):
+            mode_low = mode.strip().lower()
+            if mode_low in {"append", "a"} and "append" not in normalized:
+                normalized["append"] = True
+            elif mode_low in {"overwrite", "write", "w"} and "overwrite" not in normalized:
+                normalized["overwrite"] = True
+        if had_target_file and "create_dirs" not in normalized:
+            normalized["create_dirs"] = True
+    elif tool == "remote.multi_edit":
+        if isinstance(normalized.get("edits"), list):
+            normalized["edits"] = [_normalize_edit_chunk(item) for item in normalized["edits"]]
+    elif tool == "remote.bash":
+        bg = normalized.pop("run_in_background", None)
+        if bg and "yield_time_ms" not in normalized:
+            normalized["yield_time_ms"] = 200
+    elif tool == "remote.glob":
+        for list_key in ("extensions", "excludes"):
+            if isinstance(normalized.get(list_key), str):
+                normalized[list_key] = [normalized[list_key]]
+        if "pattern" not in normalized and any(
+            k in normalized for k in ("extensions", "excludes", "entry_type", "max_depth", "full_path")
+        ):
+            normalized["pattern"] = "*"
+    elif tool == "remote.grep":
+        case_sens = normalized.pop("_case_sensitive", None)
+        if case_sens is not None and "case_insensitive" not in normalized:
+            normalized["case_insensitive"] = not bool(case_sens)
+        is_regex = normalized.pop("_is_regex", None)
+        if is_regex is not None and "fixed_strings" not in normalized:
+            normalized["fixed_strings"] = not bool(is_regex)
+        match_per_line = normalized.pop("_match_per_line", None)
+        if match_per_line is not None and "output_mode" not in normalized:
+            normalized["output_mode"] = "content" if bool(match_per_line) else "files_with_matches"
+        for list_key in ("includes", "excludes"):
+            if isinstance(normalized.get(list_key), str):
+                normalized[list_key] = [normalized[list_key]]
+    elif tool == "remote.ls":
+        recursive = normalized.pop("_recursive", None)
+        if recursive and "max_depth" not in normalized:
+            normalized["max_depth"] = 3
+        if isinstance(normalized.get("ignore_globs"), str):
+            normalized["ignore_globs"] = [normalized["ignore_globs"]]
+
     return normalized

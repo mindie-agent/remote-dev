@@ -242,6 +242,9 @@ def _direct_endpoint(payload: dict[str, Any], *, caller_fields: set[str]) -> End
         raise _field_error(f"endpoint cwd must be an absolute path, got {effective_cwd!r}",
                            "cwd", caller_fields)
     runtime_env_file = payload.get("runtime_env_file", DEFAULT_RUNTIME_ENV_FILE)
+    raw_container = payload.get("container")
+    if isinstance(raw_container, dict):
+        raw_container = str(raw_container.get("id") or raw_container.get("name") or "").strip() or None
     return Endpoint(
         host=str(payload["host"]),
         port=port,
@@ -257,7 +260,7 @@ def _direct_endpoint(payload: dict[str, Any], *, caller_fields: set[str]) -> End
         kind=str(payload.get("kind") or "direct-endpoint"),
         alias=str(payload["alias"]) if payload.get("alias") else None,
         source=payload.get("source") if isinstance(payload.get("source"), dict) else None,
-        container=payload.get("container"),
+        container=raw_container,
     )
 
 
@@ -492,12 +495,16 @@ def resolve_endpoint(payload: dict[str, Any]) -> Endpoint:
     if payload.get("alias"):
         aliases = _read_endpoint_aliases()
         alias = str(payload["alias"])
-        if alias not in aliases:
-            raise EndpointError(f"endpoint alias {alias!r} is not configured")
-        overrides = {k: v for k, v in payload.items() if v is not None}
-        merged = {**aliases[alias], **overrides}
-        merged["alias"] = alias
-        return _direct_endpoint(merged, caller_fields=set(overrides))
+        if alias in aliases:
+            overrides = {k: v for k, v in payload.items() if v is not None}
+            merged = {**aliases[alias], **overrides}
+            merged["alias"] = alias
+            return _direct_endpoint(merged, caller_fields=set(overrides))
+        for entry in registered_resolvers():
+            endpoint = _endpoint_from_resolver(entry, payload)
+            if endpoint is not None:
+                return endpoint
+        raise EndpointError(f"endpoint alias {alias!r} is not configured")
     for entry in registered_resolvers():
         endpoint = _endpoint_from_resolver(entry, payload)
         if endpoint is not None:
