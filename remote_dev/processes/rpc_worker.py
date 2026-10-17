@@ -68,7 +68,7 @@ def main():
                     import time
                     timeout = message.get("timeout_ms")
                     deadline = None if timeout is None else time.monotonic() + timeout / 1000
-                    proc = subprocess.Popen([sys.executable, "-c", source], stdin=subprocess.PIPE,
+                    proc = subprocess.Popen([sys.executable, "-I", "-c", source], stdin=subprocess.PIPE,
                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                             start_new_session=True)
                     first_input = json.dumps(message["payload"], ensure_ascii=False).encode("utf-8")

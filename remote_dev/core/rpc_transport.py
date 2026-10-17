@@ -31,15 +31,16 @@ from .container_endpoint import pin_container_endpoint
 
 
 def _worker_command(source):
+    """Keep package RPC imports independent of the SSH login cwd and PYTHONPATH."""
     from .ssh_transport import _native_windows_ssh_client
 
     if not _native_windows_ssh_client():
-        return "python3 -u -c " + shlex.quote(source)
+        return "python3 -I -u -c " + shlex.quote(source)
     # Git for Windows SSH can truncate a long remote command at 8191 bytes.
     # Carry the unchanged worker in a shorter ASCII command, not a new protocol.
     encoded = base64.b64encode(zlib.compress(source.encode("utf-8"))).decode("ascii")
     bootstrap = "import base64,zlib;exec(zlib.decompress(base64.b64decode(" + repr(encoded) + ")))"
-    command = "python3 -u -c " + shlex.quote(bootstrap)
+    command = "python3 -I -u -c " + shlex.quote(bootstrap)
     if len(command) > 8191:
         raise RemoteExecutionError(
             "Windows SSH RPC bootstrap exceeds the supported command length",

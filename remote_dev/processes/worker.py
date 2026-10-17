@@ -184,14 +184,16 @@ def job_status(directory):
     result = read_json(directory / "result.json")
     # A verified subreaper's completion is a stronger fact than another /proc
     # walk. It cannot publish this receipt until all descendants are reaped.
+    # The supervisor itself (receipt["pid"]) may still be exiting Python when
+    # result.json is first observed; do not mistake it for a running child.
     if (result and result.get("descendants_drained") and
             receipt.get("supervision") == "subreaper" and receipt["boot_id"] == boot_id()):
-        anchor = process_identity(receipt["pid"])
-        processes = ([anchor] if anchor and anchor["state"] != "Z" and
-                     anchor["start_ticks"] == receipt["start_ticks"] else [])
+        processes = []
         unknown = []
     else:
         processes, unknown = owned_processes(receipt)
+        if result and result.get("descendants_drained"):
+            processes = [row for row in processes if row["pid"] != receipt["pid"]]
     gate = read_json(directory / "go.json")
     if receipt.get("supervision") == "subreaper" and result is None and not any(
             row["pid"] == receipt["pid"] and row["start_ticks"] == receipt["start_ticks"] for row in processes):
@@ -257,7 +259,7 @@ def worker(directory):
                 os.close(fifo_fd)
             atomic_json(directory / "result.json", {"state": "cancelled", "reason": "start gate not opened", "descendants_drained": True})
             return
-        time.sleep(0.1)
+        time.sleep(0.005)
     gate = read_json(directory / "go.json")
     if (directory / "stop.json").exists() or (gate.get("valid_until") is not None and gate["valid_until"] <= time.time()):
         if fifo_fd is not None:
@@ -387,20 +389,20 @@ def worker(directory):
             children = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children").read_text().strip()
             if code is not None and not children:
                 break
-            time.sleep(0.05)
+            time.sleep(0.01)
         if pipe_w is not None:
             os.close(pipe_w)
         if fifo_fd is not None:
             os.close(fifo_fd)
-        command_finished = time.monotonic()
-        shell_exit_observed = shell_exit_observed if shell_exit_observed is not None else command_finished
-        result = {"state": terminal or ("succeeded" if code == 0 else "failed"),
-                  "exit_code": code, "descendants_drained": True, "finished_at": time.time(),
-                  "timings": {"clock_domain": "remote-supervisor:" + boot_id() + ":" + str(os.getpid()),
-                              "spawn_ms": round((spawned_at - command_started) * 1000, 3),
-                              "shell_ms": round((shell_exit_observed - spawned_at) * 1000, 3),
-                              "descendant_drain_ms": round((command_finished - shell_exit_observed) * 1000, 3)}}
-        atomic_json(directory / "result.json", result)
+    command_finished = time.monotonic()
+    shell_exit_observed = shell_exit_observed if shell_exit_observed is not None else command_finished
+    result = {"state": terminal or ("succeeded" if code == 0 else "failed"),
+              "exit_code": code, "descendants_drained": True, "finished_at": time.time(),
+              "timings": {"clock_domain": "remote-supervisor:" + boot_id() + ":" + str(os.getpid()),
+                          "spawn_ms": round((spawned_at - command_started) * 1000, 3),
+                          "shell_ms": round((shell_exit_observed - spawned_at) * 1000, 3),
+                          "descendant_drain_ms": round((command_finished - shell_exit_observed) * 1000, 3)}}
+    atomic_json(directory / "result.json", result)
 
 
 def signal_processes(processes, sig, *, exclude=None):
@@ -460,22 +462,42 @@ def control_job(request, source, cancel_event=None):
             raise ValueError("job directory escapes the runtime root")
         wait_ms = max(0, min(300000, int(request.get("yield_time_ms") or 0)))
         deadline = time.monotonic() + wait_ms / 1000
+        first_available_at = None
+        last_output_change = None
+        last_sizes = (int(request.get("stdout_offset") or 0), int(request.get("stderr_offset") or 0))
         while reply.get("accepted") and time.monotonic() < deadline:
             if cancel_event is not None and cancel_event.is_set():
                 break
             if (directory / "result.json").exists() or not directory.exists():
                 break
+            sizes = []
             available = False
             for stream in ("stdout", "stderr"):
                 path = directory / (stream + ".log")
-                if path.exists() and path.stat().st_size > int(request.get(stream + "_offset") or 0):
+                size = path.stat().st_size if path.exists() else 0
+                sizes.append(size)
+                if size > int(request.get(stream + "_offset") or 0):
                     available = True
-                    break
-            # Synchronous SDK capture already waits for completion. Returning
-            # on early output only adds a second round trip to observe exit.
-            if available and not request.get("wait_for_exit"):
-                break
-            time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+            now = time.monotonic()
+            if tuple(sizes) != last_sizes:
+                last_sizes = tuple(sizes)
+                last_output_change = now
+            if available:
+                if first_available_at is None:
+                    first_available_at = now
+                if last_output_change is None:
+                    last_output_change = now
+                # Synchronous SDK capture already waits for completion. For
+                # non-blocking/interactive calls, give fast commands a brief
+                # completion/coalescing grace window before returning partial
+                # streaming output so short commands finish in one round trip.
+                if not request.get("wait_for_exit"):
+                    grace_deadline = min(deadline, first_available_at + 0.5, last_output_change + 0.15)
+                    if now >= grace_deadline:
+                        break
+                    time.sleep(min(0.01, max(0, grace_deadline - now)))
+                    continue
+            time.sleep(min(0.01, max(0, deadline - now)))
         if cancel_event is not None and cancel_event.is_set():
             cancel_and_drain(request, source)
             reply["cancellation_requested"] = True
@@ -566,7 +588,7 @@ def control_job(request, source, cancel_event=None):
                             log.seek(max(0, log.seek(0, 2) - 8000))
                             detail = log.read().decode("utf-8", "replace")
                         raise RuntimeError(f"waiting supervisor exited with {process.returncode} before readiness: {detail}")
-                    time.sleep(0.02)
+                    time.sleep(0.005)
             except BaseException as error:
                 # The job mutation lock still excludes go: no command has
                 # been activated. Reclaim our exact waiting child on failure,
