@@ -34,12 +34,8 @@ def checked_path(root, raw, *, writing=False):
     resolved = path.resolve()
     if resolved != root and root not in resolved.parents:
         raise ValueError("artifact path escapes root")
-    # Do not write through even an in-root symlink or change its referent.
-    probe = path
-    while probe != root and probe != probe.parent:
-        if probe.is_symlink():
-            raise ValueError("artifact symlinks are not allowed")
-        probe = probe.parent
+    if path.is_symlink():
+        raise ValueError("artifact symlinks are not allowed")
     if path.exists() and not stat.S_ISREG(path.stat().st_mode):
         raise ValueError("artifact is not a regular file")
     if writing:

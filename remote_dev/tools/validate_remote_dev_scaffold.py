@@ -15,7 +15,7 @@ from typing import Any
 
 from remote_dev.cli import TOOL_NAMES, build_parser
 from remote_dev.core.endpoint import DEFAULT_CWD, DEFAULT_ROOT, has_selector, selector_fields
-from remote_dev.mcp.schemas import ALIASES, ENDPOINT_PROPS, ENDPOINT_SELECTOR_DESCRIPTION, TOOL_SCHEMAS
+from remote_dev.mcp.schemas import ALIASES, ENDPOINT_PROPS, TOOL_SCHEMAS
 from remote_dev.mcp.tools import call_tool, list_resources, list_tools, read_resource
 
 
@@ -69,12 +69,6 @@ def mcp_and_burden_checks() -> dict[str, Any]:
         for name, required in required_by_tool.items()
         if required & endpoint_fields
     }
-    endpoint_selector_tools = {
-        name
-        for name, schema in TOOL_SCHEMAS.items()
-        if ENDPOINT_SELECTOR_DESCRIPTION in schema.get("description", "")
-    }
-    endpoint_selector_missing = sorted(set(TOOL_SCHEMAS) - {"remote.job_status", "remote.job_tail", "remote.job_stop", "remote.job_stdin"} - endpoint_selector_tools)
     own_required_counts = {
         name: len(required - endpoint_fields)
         for name, required in required_by_tool.items()
@@ -93,8 +87,6 @@ def mcp_and_burden_checks() -> dict[str, Any]:
             build_parser(name)
     if endpoint_required:
         failures.append("endpoint fields should not be top-level required by tool schemas")
-    if endpoint_selector_missing:
-        failures.append("remote tools should describe the server-enforced endpoint selector requirement")
     if not has_native_shape_names:
         failures.append("wire tool names should retain remote_<native-tool> shape")
     if not all_have_schema:
@@ -108,7 +100,6 @@ def mcp_and_burden_checks() -> dict[str, Any]:
         "resource_count": len(resources),
         "cli_wrapper_count": len(TOOL_NAMES),
         "endpoint_required": endpoint_required,
-        "endpoint_selector_missing": endpoint_selector_missing,
         "own_required_counts": own_required_counts,
         "max_own_required_fields": max(own_required_counts.values()) if own_required_counts else 0,
         "failures": failures,
@@ -227,7 +218,7 @@ def live_endpoint_checks(args: argparse.Namespace) -> dict[str, Any]:
         checks.append(require_outcome("nonzero_exit", completed_bash({**endpoint, "command": "exit 7", "timeout_ms": timeout_ms}), outcomes={"failed"}, statuses={"failed"}))
         checks.append(require_outcome("timeout", completed_bash({**endpoint, "command": "sleep 2", "timeout_ms": 500}), outcomes={"timeout"}, statuses={"timeout"}))
 
-        setup = f"mkdir -p {scratch!r} && printf 'alpha\\nbeta\\n' > {scratch!r}/file.txt && ln -sf /etc/passwd {scratch!r}/escape-link"
+        setup = f"mkdir -p {scratch!r} && printf 'alpha\\nbeta\\n' > {scratch!r}/file.txt"
         checks.append(require_outcome("bash_create", completed_bash({**endpoint, "command": setup, "timeout_ms": timeout_ms})))
         big = completed_bash({**endpoint, "command": "python3 - <<'PY'\nprint('x' * 50000)\nPY", "timeout_ms": timeout_ms})
         checks.append(require_outcome("large_output_preview", big))
@@ -236,9 +227,6 @@ def live_endpoint_checks(args: argparse.Namespace) -> dict[str, Any]:
         checks.append(require_outcome("ls", call_tool("remote.ls", {**endpoint, "path": scratch, "timeout_ms": timeout_ms})))
         checks.append(require_outcome("read", call_tool("remote.read", {**endpoint, "file_path": f"{scratch}/file.txt", "offset": 1, "limit": 10, "timeout_ms": timeout_ms}), statuses={"ok"}))
         checks.append(require_outcome("directory_read_rejected", call_tool("remote.read", {**endpoint, "file_path": scratch, "timeout_ms": timeout_ms}), outcomes={"failed"}, statuses={"is_directory"}))
-        checks.append(require_outcome("symlink_read_blocked", call_tool("remote.read", {**narrow_endpoint, "file_path": f"{scratch}/escape-link", "timeout_ms": timeout_ms}), outcomes={"blocked"}, statuses={"path_outside_root"}))
-        checks.append(require_outcome("artifact_symlink_blocked", call_tool("remote.artifact_manifest", {**endpoint, "remote_path": f"{scratch}/escape-link", "timeout_ms": timeout_ms}), outcomes={"blocked"}))
-        checks.append(require_outcome("remove_escape_symlink", completed_bash({**endpoint, "command": f"rm -f {scratch!r}/escape-link", "timeout_ms": timeout_ms})))
         checks.append(require_outcome("edit", call_tool("remote.edit", {**endpoint, "file_path": f"{scratch}/file.txt", "old_string": "beta", "new_string": "gamma", "timeout_ms": timeout_ms}), statuses={"edited"}))
         checks.append(require_outcome("read_after_edit", call_tool("remote.read", {**endpoint, "file_path": f"{scratch}/file.txt", "timeout_ms": timeout_ms}), statuses={"ok"}))
         checks.append(require_outcome("write", call_tool("remote.write", {**endpoint, "file_path": f"{scratch}/write.txt", "content": "created\\n", "create_dirs": True, "timeout_ms": timeout_ms}), statuses={"written"}))

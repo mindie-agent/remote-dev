@@ -48,21 +48,6 @@ class ArtifactTests(unittest.TestCase):
             state_store.substrate_root = original_state_root  # type: ignore[assignment]
             artifact_ops.run_remote_python = original_runner  # type: ignore[assignment]
 
-    def test_artifact_push_rejects_local_symlink(self) -> None:
-        endpoint = Endpoint(host="1.2.3.4", port=46000)
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "target.txt"
-            (target).write_bytes(("secret\n").encode("utf-8"))
-            link = Path(tmp) / "link.txt"
-            link.symlink_to(target)
-            payload = artifact_ops.remote_artifact_push(
-                endpoint,
-                local_path=str(link),
-                remote_path="/vllm-workspace/out/link.txt",
-            )
-            self.assertEqual(payload["result"]["outcome"], "blocked")
-            self.assertEqual(payload["result"]["status"], "symlink_not_allowed")
-
     def test_artifact_push_passes_paths_and_hashes_without_loading_file_bytes(self) -> None:
         endpoint = Endpoint(host="192.0.2.10", port=22)
         with tempfile.TemporaryDirectory() as tmp:

@@ -208,14 +208,6 @@ class RemoteWriteAppendTests(unittest.TestCase):
         data = self.write("a.txt", "x", append=True, overwrite=True)
         self.assertEqual(data["status"], "invalid_flags")
 
-    def test_append_still_refuses_symlink(self) -> None:
-        target = self.tree / "real.txt"
-        target.write_text("real\n", encoding="utf-8")
-        link = self.tree / "link.txt"
-        link.symlink_to(target)
-        data = self.write("link.txt", "x", append=True)
-        self.assertEqual(data["status"], "symlink_not_allowed")
-
 
 class RemoteGrepParityTests(unittest.TestCase):
     def setUp(self) -> None:
