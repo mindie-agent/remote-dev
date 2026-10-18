@@ -34,13 +34,14 @@ class ArtifactStream:
     def __init__(self, endpoint, operation, count, timeout_ms=None):
         timeout_value(timeout_ms)
         from .container_endpoint import pin_container_endpoint
+        from .rpc_transport import _worker_command
         from .ssh_transport import ssh_command
         endpoint = pin_container_endpoint(endpoint, timeout_ms=timeout_ms)
         source = (Path(__file__).parents[1] / "processes" / "artifact_worker.py").read_text(encoding="utf-8")
         helper = (Path(__file__).parents[1] / "processes" / "mutation.py").read_text(encoding="utf-8")
         source = source.replace("# REMOTE_DEV_MUTATION_LOCK", helper)
         self.owner = OwnedProcess(
-            ssh_command(replace(endpoint, ssh_mux=False, keepalive=True), "python3 -u -c " + shlex.quote(source)),
+            ssh_command(replace(endpoint, ssh_mux=False, keepalive=True), _worker_command(source)),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.proc = self.owner.process
@@ -180,8 +181,14 @@ class ArtifactStream:
         with contextlib.suppress(OSError):
             self.proc.stdin.close()
         try:
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                self.proc.wait(timeout=2)
+            if self.phase == "completed" and not self.reason and self.proc.poll() is None:
+                try:
+                    self.proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(OSError):
+                        self.proc.kill()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        self.proc.wait(timeout=5.0)
             with self.stop_lock:
                 self.owner.stop()
         except Exception as exc:

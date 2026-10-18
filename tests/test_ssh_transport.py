@@ -622,7 +622,7 @@ class LiveStreamTests(unittest.TestCase):
                 with self.subTest(close_pipes=close_pipes, timeout=timeout):
                     cancelled = threading.Event()
                     code = "import os,time;" + ("os.close(1);os.close(2);" if close_pipes else "") + "time.sleep(3)"
-                    timer = threading.Timer(0.15, cancelled.set)
+                    timer = threading.Timer(0.04, cancelled.set)
                     with mock.patch.object(ssh_transport, "stream_ssh_command", return_value=[sys.executable, "-c", code]):
                         started = time.monotonic()
                         timer.start()
@@ -786,9 +786,9 @@ class LiveStreamTests(unittest.TestCase):
         local_cmd = [
             sys.executable,
             "-c",
-            "import os,time;os.close(1);os.close(2);time.sleep(0.3)",
+            "import os,time;os.close(1);os.close(2);time.sleep(0.1)",
         ]
-        with mock.patch.object(ssh_transport, "STREAM_SELECT_SLICE_SECONDS", 0.05):
+        with mock.patch.object(ssh_transport, "STREAM_SELECT_SLICE_SECONDS", 0.02):
             with mock.patch.object(ssh_transport, "stream_ssh_command", return_value=local_cmd):
                 started = time.monotonic()
                 result = ssh_transport.run_stream(
@@ -800,10 +800,10 @@ class LiveStreamTests(unittest.TestCase):
                 elapsed = time.monotonic() - started
         self.assertEqual(result.returncode, 0)
         self.assertFalse(result.timed_out)
-        self.assertGreaterEqual(elapsed, 0.2)
+        self.assertGreaterEqual(elapsed, 0.08)
         self.assertLess(elapsed, 2.0)
 
-        with mock.patch.object(ssh_transport, "STREAM_SELECT_SLICE_SECONDS", 0.05):
+        with mock.patch.object(ssh_transport, "STREAM_SELECT_SLICE_SECONDS", 0.02):
             with mock.patch.object(ssh_transport, "stream_ssh_command", return_value=local_cmd):
                 started = time.monotonic()
                 result = ssh_transport.run_stream(
@@ -815,7 +815,7 @@ class LiveStreamTests(unittest.TestCase):
                 elapsed = time.monotonic() - started
         self.assertEqual(result.returncode, 0)
         self.assertFalse(result.timed_out)
-        self.assertGreaterEqual(elapsed, 0.2)
+        self.assertGreaterEqual(elapsed, 0.08)
         self.assertLess(elapsed, 2.0)
 
     def test_run_stream_separate_channels_honours_deadline_on_partial_line(self) -> None:
@@ -829,7 +829,7 @@ class LiveStreamTests(unittest.TestCase):
             result = ssh_transport.run_stream(
                 self.endpoint,
                 "unused",
-                timeout_ms=200,
+                timeout_ms=100,
                 merge_stderr=False,
             )
         elapsed = time.monotonic() - started
@@ -847,7 +847,7 @@ class LiveStreamTests(unittest.TestCase):
             result = ssh_transport.run_stream(
                 self.endpoint,
                 "unused",
-                timeout_ms=800,
+                timeout_ms=150,
                 forward_prefix="",
                 output=buf,
             )
@@ -1264,7 +1264,7 @@ class LocalForwardTests(unittest.TestCase):
     def test_wait_ready_times_out_and_close_reaps_hanging_ssh(self) -> None:
         with mock.patch.dict(os.environ, self._env_with(FAKE_SSH_MODE="hang")):
             with self.assertRaises(RemoteExecutionError) as raised:
-                ssh_transport.open_local_forward(self.endpoint, 8123, ready_timeout_s=0.6)
+                ssh_transport.open_local_forward(self.endpoint, 8123, ready_timeout_s=0.15)
         self.assertIn("timed out", str(raised.exception))
 
 

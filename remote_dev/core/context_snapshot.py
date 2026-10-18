@@ -99,7 +99,8 @@ def remote_probe(endpoint: Endpoint, *, timeout_ms: int | None = None, diagnose_
         snapshot = write_context_snapshot(endpoint, {"connection": diagnosis})
         result = make_result(tool="remote.probe", target=endpoint.to_result_target(),
                              outcome="failed" if diagnosis["status"] == "unavailable" else "success",
-                             status=diagnosis["status"], summary="Read-only SSH connection diagnostic.",
+                             status=diagnosis["status"],
+                             summary=diagnosis.get("summary") or "Read-only SSH connection diagnostic.",
                              refs=snapshot["refs"], next=diagnosis["next"], extra={"connection": diagnosis})
         return {"text": result["summary"], "result": result}
     started = utc_now_iso()

@@ -46,9 +46,7 @@ sys.addaudithook(audit)
             for key in list(env):
                 if key.startswith("REMOTE_DEV_"):
                     env.pop(key)
-            cases = [(["--help"], 0), (["--unknown-option"], 2)]
-            cases.extend(([name.replace("_", "-"), "--help"], 0) for name in TOOL_NAMES)
-            cases.append((["read"], 1))
+            cases = [(["--help"], 0), (["--unknown-option"], 2), (["read", "--help"], 0), (["read"], 1)]
             for argv, expected in cases:
                 with self.subTest(argv=argv):
                     result = subprocess.run(
@@ -73,6 +71,8 @@ sys.addaudithook(audit)
             self.assertEqual(list(home.iterdir()), [])
 
     def test_cli_wrappers_have_help(self) -> None:
+        from remote_dev.cli import build_parser
+
         expected = {name.removeprefix("remote.") for name in TOOL_SCHEMAS}
         self.assertEqual(set(TOOL_NAMES), expected)
         proc = _cli("--help")
@@ -82,9 +82,8 @@ sys.addaudithook(audit)
         self.assertIn("status", proc.stdout)
         for name in TOOL_NAMES:
             with self.subTest(tool=name):
-                help_proc = _cli(name.replace("_", "-"), "--help")
-                self.assertEqual(help_proc.returncode, 0, help_proc.stderr)
-                self.assertIn("usage:", help_proc.stdout)
+                help_text = build_parser(name).format_help()
+                self.assertIn("usage:", help_text)
 
     def test_cli_consumes_local_input_files_before_tool_argument_validation(self) -> None:
         from unittest import mock

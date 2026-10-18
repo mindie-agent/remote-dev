@@ -94,7 +94,12 @@ def main():
                         if proc.poll() is None:
                             with contextlib.suppress(ProcessLookupError):
                                 os.killpg(proc.pid, signal.SIGKILL)
-                        proc.wait()
+                        try:
+                            proc.wait(timeout=5.0)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            with contextlib.suppress(subprocess.TimeoutExpired):
+                                proc.wait(timeout=5.0)
             else:
                 raise ValueError("unsupported RPC operation")
             send({"id": identifier, "result": result,

@@ -142,14 +142,31 @@ class RpcConnection:
         timeout_value(timeout_ms)
         event = current_event()
         started = time.monotonic()
+        deadline = None if timeout_ms is None else started + (timeout_ms / 1000.0)
         reused = self.ready.is_set() and not self.closed
-        while not self.ready.wait(0.05):
+        while not self.ready.wait(
+            0.05 if deadline is None else min(0.05, max(0.0, deadline - time.monotonic()))
+        ):
             if event is not None and event.is_set():
                 raise RemoteExecutionError("SSH RPC cancelled before submission; request was not sent", category="cancelled", submission_state="not_sent")
             # The SSH process/reader reports refusal, EOF and heartbeat loss.
             # Quiet startup is not evidence that the connection failed.
             if self.proc.poll() is not None:
                 self._fail("SSH RPC exited before readiness")
+            if deadline is not None and time.monotonic() >= deadline:
+                detail = self.error_tail.decode("utf-8", "replace").strip()
+                failure = RemoteExecutionError(
+                    "Remote RPC worker handshake timed out; request was not sent" + (": " + detail if detail else ""),
+                    category="rpc_timeout",
+                    submission_state="not_sent",
+                    retryable=True,
+                )
+                failure.code = "TIMEOUT"
+                try:
+                    self.close()
+                except Exception as cleanup_error:
+                    record_cleanup_failure(failure, cleanup_error)
+                raise failure
         connected = time.monotonic()
         if event is not None and event.is_set():
             raise RemoteExecutionError("SSH RPC cancelled before submission; request was not sent", category="cancelled", submission_state="not_sent")
@@ -184,7 +201,8 @@ class RpcConnection:
                 except Exception as cleanup_error:
                     record_cleanup_failure(failure, cleanup_error)
                 raise failure from exc
-        deadline = None if timeout_ms is None else time.monotonic() + timeout_ms / 1000 + (5 if kind == "python" else 0)
+        if deadline is not None and kind == "python":
+            deadline = time.monotonic() + (timeout_ms / 1000.0) + 5.0
         event = current_event()
         cancel_sent = False
         try:
@@ -242,13 +260,15 @@ class RpcConnection:
             with self.state_lock:
                 self.pending.pop(identifier, None)
 
+    call = request
+
     def close(self):
         with self.close_lock:
             failures = []
             with contextlib.suppress(OSError, ValueError):
                 self.proc.stdin.close()
             try:
-                if self.proc.poll() is None:
+                if self.ready.is_set() and self.proc.poll() is None:
                     with contextlib.suppress(subprocess.TimeoutExpired):
                         self.proc.wait(timeout=2)
                 self._stop_owner()
@@ -313,7 +333,7 @@ def _reap_idle():
                     _cleanup_failures.append(exc)
 
 
-def _acquire(endpoint, key):
+def _acquire(endpoint, key, *, deadline=None):
     global _reaper_started
     event = current_event()
     while True:
@@ -321,6 +341,15 @@ def _acquire(endpoint, key):
         with _pool_lock:
             if event is not None and event.is_set():
                 raise RemoteExecutionError("SSH RPC cancelled while waiting for a connection; request was not sent", category="cancelled", submission_state="not_sent")
+            if deadline is not None and time.monotonic() >= deadline:
+                failure = RemoteExecutionError(
+                    "Remote RPC worker handshake timed out while waiting for connection pool; request was not sent",
+                    category="rpc_timeout",
+                    submission_state="not_sent",
+                    retryable=True,
+                )
+                failure.code = "TIMEOUT"
+                raise failure
             entry = _pool.get(key)
             if entry is not None and entry.connection is not None:
                 connection = entry.connection
@@ -346,7 +375,8 @@ def _acquire(endpoint, key):
                     threading.Thread(target=_reap_idle, daemon=True).start()
                     _reaper_started = True
             else:
-                _pool_lock.wait(timeout=0.05)
+                wait_slice = 0.05 if deadline is None else min(0.05, max(0.0, deadline - time.monotonic()))
+                _pool_lock.wait(timeout=wait_slice)
                 continue
         # Neither SSH process startup nor shutdown holds the global pool lock.
         try:
@@ -383,8 +413,9 @@ def request(endpoint, kind, source, payload, *, timeout_ms=None):
     key = (endpoint.host, endpoint.port, endpoint.user, endpoint.identity_file,
            endpoint.connect_timeout_ms, endpoint.container)
     started = time.monotonic()
+    acquire_deadline = None if timeout_ms is None else started + (timeout_ms / 1000.0)
     with get_recorder("remote-dev").operation("rpc.pool.acquire", level="DEBUG"):
-        entry = _acquire(endpoint, key)
+        entry = _acquire(endpoint, key, deadline=acquire_deadline)
     acquired = time.monotonic()
     try:
         result = entry.connection.request(kind, source, payload, timeout_ms)
@@ -404,6 +435,13 @@ def request(endpoint, kind, source, payload, *, timeout_ms=None):
             entry.active -= 1
             entry.last_used = time.monotonic()
             entry.use_order = next(_use_order)
+            if (
+                entry.connection is not None
+                and entry.active == 0
+                and (entry.connection.closed or entry.connection.proc.poll() is not None)
+                and _pool.get(key) is entry
+            ):
+                _pool.pop(key, None)
             _pool_lock.notify_all()
 
 

@@ -78,7 +78,7 @@ class RpcTests(unittest.TestCase):
             source = """import json,sys,time
 from pathlib import Path
 p=json.load(sys.stdin); path=Path(p['path'])
-n=int(path.read_text()); time.sleep(p.get('delay', 0.1)); path.write_text(str(n+1))
+n=int(path.read_text()); time.sleep(p.get('delay', 0.03)); path.write_text(str(n+1))
 print(json.dumps({'status':'ok'}))
 """
             args = {"path": str(path), "_mutation": True}
@@ -94,7 +94,7 @@ print(json.dumps({'status':'ok'}))
                     return rpc_transport.request(self.endpoint, "python", source, args)
             with remote_mutation_lock(), ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(waiting)
-                time.sleep(0.1)
+                time.sleep(0.03)
                 event.set()
                 with self.assertRaisesRegex(RemoteExecutionError, "mutation cancelled"):
                     future.result(timeout=3)
@@ -103,11 +103,11 @@ print(json.dumps({'status':'ok'}))
     def test_fast_python_request_overtakes_slow_request_on_same_channel(self):
         self.request({})  # Establish the transport before comparing requests.
         with ThreadPoolExecutor(max_workers=2) as pool:
-            slow = pool.submit(ssh_transport.run_remote_python, self.endpoint, PYTHON_ECHO, {"delay": 1})
+            slow = pool.submit(ssh_transport.run_remote_python, self.endpoint, PYTHON_ECHO, {"delay": 0.25})
             fast = pool.submit(ssh_transport.run_remote_python, self.endpoint, PYTHON_ECHO, {"delay": 0})
             self.assertEqual(fast.result(timeout=3)["delay"], 0)
             self.assertFalse(slow.done())
-            self.assertEqual(slow.result(timeout=3)["delay"], 1)
+            self.assertEqual(slow.result(timeout=3)["delay"], 0.25)
 
     def test_cancellation_is_forwarded_without_cancelling_other_requests(self):
         self.request({})
@@ -117,7 +117,7 @@ print(json.dumps({'status':'ok'}))
                 return self.request({"wait": True})
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(slow)
-            time.sleep(0.1)
+            time.sleep(0.03)
             cancelled.set()
             self.assertEqual(future.result(timeout=3)["state"], "cancelled")
         self.assertEqual(self.request({})["state"], "succeeded")
@@ -127,7 +127,7 @@ print(json.dumps({'status':'ok'}))
         connection = next(iter(rpc_transport._pool.values())).connection
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(self.request, {"wait": True})
-            time.sleep(0.1)
+            time.sleep(0.03)
             connection.proc.kill()
             with self.assertRaisesRegex(RemoteExecutionError, "unknown"):
                 future.result(timeout=3)
@@ -216,3 +216,24 @@ print(json.dumps({'status':'ok'}))
                     future.result(timeout=5)
                 except RemoteExecutionError as exc:
                     self.assertIn("cancelled before execution", str(exc))
+
+    def test_worker_handshake_timeout_kills_hung_worker_and_does_not_block_subsequent_calls(self):
+        hung_cmd = "python3 -I -u -c 'import time; time.sleep(30)'"
+        started = time.monotonic()
+        with mock.patch.object(rpc_transport, "_worker_command", return_value=hung_cmd):
+            with self.assertRaises(RemoteExecutionError) as caught:
+                self.request({"value": "never-sent"}, timeout_ms=300)
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, 0.25)
+        self.assertLess(elapsed, 1.2)
+        self.assertEqual(caught.exception.code, "TIMEOUT")
+        self.assertEqual(caught.exception.category, "rpc_timeout")
+        self.assertEqual(caught.exception.submission_state, "not_sent")
+        self.assertTrue(caught.exception.retryable)
+        self.assertIn("handshake timed out", str(caught.exception))
+        self.assertEqual(len(rpc_transport._pool), 0)
+
+        recovered = self.request({"value": "after-timeout"}, timeout_ms=2000)
+        self.assertEqual(recovered["state"], "succeeded")
+        self.assertEqual(recovered["value"], "after-timeout")
+        self.assertEqual(recovered["calls"], 1)

@@ -132,9 +132,58 @@ class AliasFileTests(unittest.TestCase):
 
     def test_alias_file_env_precedes_checkout_local_files(self) -> None:
         files = endpoint_module.alias_files()
-        self.assertEqual(files[0], self.alias_file)
+        self.assertEqual(
+            files[:2],
+            [
+                Path("~/.mindie/endpoints.json").expanduser(),
+                Path("~/.mindie-coordinator/endpoints.json").expanduser(),
+            ],
+        )
+        self.assertEqual(files[2], self.alias_file)
         cwd = Path.cwd()
         self.assertEqual(files[-2:], [cwd / "endpoints.json", cwd / "endpoints.local.json"])
+
+    def test_zero_arg_resolves_default_alias_and_container_dict_inherits_workdir(self) -> None:
+        coord_file = Path(self.temp.name) / "coordinator-endpoints.json"
+        coord_file.write_text(
+            json.dumps(
+                {
+                    "default_alias": "a2",
+                    "endpoints": {
+                        "a2": {
+                            "host": "173.125.1.2",
+                            "port": 22,
+                            "user": "root",
+                            "container": {
+                                "name": "mindie-bench-a2-core-20261017",
+                                "id": "b2bb20466bf7",
+                                "user": "root",
+                                "workdir": "/workspace/mindie",
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"REMOTE_DEV_ENDPOINTS_FILE": str(coord_file)}):
+            auto_ep = resolve_endpoint({})
+            self.assertEqual(auto_ep.host, "173.125.1.2")
+            self.assertEqual(auto_ep.port, 22)
+            self.assertEqual(auto_ep.alias, "a2")
+            self.assertEqual(auto_ep.container, "b2bb20466bf7")
+            self.assertEqual(auto_ep.root, "/workspace/mindie")
+            self.assertEqual(auto_ep.cwd, "/workspace/mindie")
+            self.assertEqual(auto_ep.effective_cwd, "/workspace/mindie")
+
+            default_ep = resolve_endpoint({"alias": "default"})
+            self.assertEqual(default_ep.host, "173.125.1.2")
+            self.assertEqual(default_ep.container, "b2bb20466bf7")
+            self.assertEqual(default_ep.effective_cwd, "/workspace/mindie")
+
+            overridden_ep = resolve_endpoint({"cwd": "/workspace/mindie/sub"})
+            self.assertEqual(overridden_ep.root, "/workspace/mindie")
+            self.assertEqual(overridden_ep.cwd, "/workspace/mindie/sub")
 
 
 class ResolverPluginTests(unittest.TestCase):
@@ -145,6 +194,9 @@ class ResolverPluginTests(unittest.TestCase):
         self._saved = list(endpoint_module._RESOLVERS)
         clear_resolvers()
         self.addCleanup(self._restore)
+        alias_patcher = mock.patch.object(endpoint_module, "alias_files", return_value=[])
+        alias_patcher.start()
+        self.addCleanup(alias_patcher.stop)
 
     def _restore(self) -> None:
         clear_resolvers()

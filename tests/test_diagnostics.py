@@ -39,7 +39,7 @@ def test_successful_probe_needs_no_second_connection():
 
 
 @pytest.mark.skipif(os.name == "nt", reason="ControlMaster is unsupported by Win32 OpenSSH")
-def test_explicit_probe_deadline_is_shared_without_hidden_cap():
+def test_explicit_probe_deadline_splits_stage_budgets_and_preserves_remaining_time():
     endpoint = resolve_endpoint({"host": "192.0.2.1", "port": 22, "ssh_mux": True,
                                  "connect_timeout_ms": 2500})
     with patch("remote_dev.diagnostics.run_script", side_effect=[
@@ -47,21 +47,44 @@ def test_explicit_probe_deadline_is_shared_without_hidden_cap():
         RemoteCompleted(0, json.dumps({"marker": "remote-dev-connection-ok"}), ""),
     ]) as run, patch("remote_dev.diagnostics.time.monotonic", side_effect=[10.0, 10.25]):
         result = diagnose_ssh(endpoint, timeout_ms=7200000)
-    assert [call.kwargs["timeout_ms"] for call in run.call_args_list] == [7200000, 7199750]
+    assert [call.kwargs["timeout_ms"] for call in run.call_args_list] == [4320000, 7199750]
     assert result["status"] == "independent_connection_works"
+    assert result["summary"] == "SSH succeeded only after bypassing ControlMaster."
+    assert result["next"] == {"ssh_mux": False}
     assert result["probes"][0]["connect_timeout_ms"] == 2000
 
 
 @pytest.mark.skipif(os.name == "nt", reason="ControlMaster is unsupported by Win32 OpenSSH")
-def test_expired_probe_deadline_does_not_start_second_connection():
+def test_stage1_mux_timeout_still_runs_stage2_with_reserved_budget(tmp_path, monkeypatch):
+    from remote_dev.core.context_snapshot import remote_probe
+
+    monkeypatch.setenv("REMOTE_DEV_STATE_DIR", str(tmp_path))
     endpoint = resolve_endpoint({"host": "192.0.2.1", "port": 22, "ssh_mux": True})
-    with patch("remote_dev.diagnostics.run_script", return_value=RemoteCompleted(
-        None, "", "deadline expired", timed_out=True)) as run, patch(
-            "remote_dev.diagnostics.time.monotonic", side_effect=[10.0, 12.0]):
-        result = diagnose_ssh(endpoint, timeout_ms=1000)
-    assert run.call_count == 1
-    assert result["status"] == "unavailable"
-    assert result["probes"][0]["timed_out"] is True
+    with patch("remote_dev.diagnostics.run_script", side_effect=[
+        RemoteCompleted(None, "", "ControlMaster socket hung", timed_out=True),
+        RemoteCompleted(0, json.dumps({"marker": "remote-dev-connection-ok"}), "", timed_out=False),
+    ]) as run, patch("remote_dev.diagnostics.time.monotonic", side_effect=[10.0, 13.0]):
+        diag = diagnose_ssh(endpoint, timeout_ms=5000)
+    assert run.call_count == 2
+    assert [call.kwargs["timeout_ms"] for call in run.call_args_list] == [3000, 2000]
+    assert run.call_args_list[0].args[0].ssh_mux is True
+    assert run.call_args_list[1].args[0].ssh_mux is False
+    assert diag["status"] == "independent_connection_works"
+    assert diag["summary"] == "SSH succeeded only after bypassing ControlMaster."
+    assert diag["next"] == {"ssh_mux": False}
+    assert diag["probes"][0]["timed_out"] is True
+    assert diag["probes"][1]["ok"] is True
+
+    with patch("remote_dev.diagnostics.run_script", side_effect=[
+        RemoteCompleted(None, "", "ControlMaster socket hung", timed_out=True),
+        RemoteCompleted(0, json.dumps({"marker": "remote-dev-connection-ok"}), "", timed_out=False),
+    ]):
+        payload = remote_probe(endpoint, timeout_ms=5000, diagnose_connection=True)
+    result = payload["result"]
+    assert result["outcome"] == "success"
+    assert result["status"] == "independent_connection_works"
+    assert result["summary"] == "SSH succeeded only after bypassing ControlMaster."
+    assert result["next"] == {"ssh_mux": False}
 
 
 @pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "1000", float("inf"), float("nan")])

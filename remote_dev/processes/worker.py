@@ -41,6 +41,14 @@ STDIN_BUFFER_CAP = 262144
 STDIN_WRITE_CHUNK = getattr(select, "PIPE_BUF", 512)
 # States in which a job may still append to its logs.
 LIVE_JOB_STATES = frozenset({"prepared", "running", "uncertain"})
+_INITIAL_STOP_GRACE_SECONDS = float(os.environ.get("REMOTE_DEV_STOP_GRACE_SECONDS", "2.0"))
+STOP_GRACE_SECONDS = _INITIAL_STOP_GRACE_SECONDS
+
+
+def _stop_grace_seconds() -> float:
+    if STOP_GRACE_SECONDS != _INITIAL_STOP_GRACE_SECONDS:
+        return float(STOP_GRACE_SECONDS)
+    return float(os.environ.get("REMOTE_DEV_STOP_GRACE_SECONDS", str(STOP_GRACE_SECONDS)))
 
 
 def _utf8_incomplete_tail(chunk):
@@ -381,7 +389,7 @@ def worker(directory):
                 stopping_at = time.monotonic()
             if terminal:
                 processes, _ = owned_processes(receipt)
-                force = bool(stop and stop.get("force")) or time.monotonic() >= stopping_at + 2
+                force = bool(stop and stop.get("force")) or time.monotonic() >= stopping_at + _stop_grace_seconds()
                 signal_processes(processes, signal.SIGKILL if force else signal.SIGTERM, exclude=os.getpid())
             # This kernel list includes zombies and adopted clean-env children.
             # A process cannot fork again after it has been reaped; only this
@@ -417,7 +425,7 @@ def signal_processes(processes, sig, *, exclude=None):
 
 def cancel_and_drain(request, source):
     status = control_job({**request, "action": "stop"}, source)
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + max(5.0, _stop_grace_seconds() + 3.0)
     while not status.get("quiet") and not status.get("unknown") and time.monotonic() < deadline:
         time.sleep(0.02)
         status = control_job({**request, "action": "status"}, source)
@@ -563,7 +571,7 @@ def control_job(request, source, cancel_event=None):
             marker = uuid.uuid4().hex
             with (directory / "supervisor.log").open("ab") as supervisor_log:
                 process = subprocess.Popen(
-                    [sys.executable, str(script), "--worker", str(directory)],
+                    [sys.executable, "-I", str(script), "--worker", str(directory)],
                     env={**os.environ, JOB_TOKEN_ENV: marker},
                     stdin=subprocess.DEVNULL, stdout=supervisor_log, stderr=supervisor_log,
                     start_new_session=True,
@@ -805,7 +813,7 @@ def run_supervisor(directory):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+    if len(sys.argv) > 1 and sys.argv[1] in ("--worker", "supervise"):
         run_supervisor(Path(sys.argv[2]))
     else:
         worker_source = globals().get("WORKER_SOURCE")

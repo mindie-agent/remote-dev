@@ -103,6 +103,42 @@ class RpcBootstrapTests(unittest.TestCase):
         self.assertTrue(value["system"])
         self.assertTrue(value["uuid_valid"])
 
+    def test_all_remote_python_entrypoints_use_isolated_flag(self):
+        from remote_dev.core import artifact_transport, patch_ops
+        from remote_dev import diagnostics
+
+        # 1. ArtifactStream uses _worker_command (python3 -I -u -c ...)
+        captured_cmds = []
+
+        class DummyOwner:
+            def __init__(self, cmd, **_kwargs):
+                captured_cmds.append(cmd)
+                raise RuntimeError("stop after capturing argv")
+
+        with mock.patch.object(
+            artifact_transport, "OwnedProcess", DummyOwner
+        ), mock.patch(
+            "remote_dev.core.container_endpoint.pin_container_endpoint", side_effect=lambda ep, **_kw: ep
+        ), mock.patch.object(
+            ssh_transport, "_native_windows_ssh_client", return_value=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stop after capturing argv"):
+                artifact_transport.ArtifactStream(Endpoint("192.0.2.10", 22, ssh_mux=False), "pull", 1)
+        self.assertEqual(len(captured_cmds), 1)
+        self.assertIn("python3 -I -u -c", captured_cmds[0][-1])
+
+        # 2. diagnostics.CONNECTION_PROBE_SCRIPT uses python3 -I -
+        self.assertIn("python3 -I -", diagnostics.CONNECTION_PROBE_SCRIPT)
+
+        # 3. patch_ops._apply_unified_patch uses python3 -I -
+        patch_src = Path(patch_ops.__file__).read_text(encoding="utf-8")
+        self.assertIn('python3 -I - \\"$tmp_before\\"', patch_src)
+        self.assertNotIn('python3 - \\"$tmp_before\\"', patch_src)
+
+        # 4. processes/worker.py spawns runner.py with -I
+        worker_src = (Path(rpc_transport.__file__).parents[1] / "processes" / "worker.py").read_text(encoding="utf-8")
+        self.assertIn('[sys.executable, "-I", str(script), "--worker", str(directory)]', worker_src)
+
 
 if __name__ == "__main__":
     unittest.main()

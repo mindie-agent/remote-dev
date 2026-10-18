@@ -257,7 +257,7 @@ def test_attached_stream_stops_tree_on_timeout_or_parent_exit(tmp_path, parent_e
     with mock.patch.object(ssh_transport, 'stream_ssh_command', return_value=command):
         result = ssh_transport.run_stream(Endpoint.for_long_stream('192.0.2.1', 22),
                                          '#' * 1000000, merge_stderr=False,
-                                         timeout_ms=None if parent_exit else 1200)
+                                         timeout_ms=None if parent_exit else 400)
     assert time.monotonic() - started < 4
     assert result.timed_out is (not parent_exit)
     assert result.returncode == (0 if parent_exit else None)

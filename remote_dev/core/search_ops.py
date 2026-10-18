@@ -233,8 +233,12 @@ def command_lines(cmd, max_chars=32768):
             if ended:
                 yield prefix, length > max_chars
                 prefix, length = "", 0
-        code = proc.wait()
-        reader.join()
+        try:
+            code = proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = proc.wait(timeout=5.0)
+        reader.join(timeout=1.0)
         if code not in (0, 1):
             fail("failed", tail.decode("utf-8", "replace"))
     finally:
@@ -244,8 +248,9 @@ def command_lines(cmd, max_chars=32768):
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
-        reader.join()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=5.0)
+        reader.join(timeout=1.0)
         output.close()
         proc.stderr.close()
 

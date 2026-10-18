@@ -23,21 +23,22 @@ pytestmark = pytest.mark.skipif(
     os.environ.get('REMOTE_DEV_REAL_SSH') != '1', reason='explicit isolated OpenSSH acceptance only')
 
 
-@pytest.fixture
-def endpoint(tmp_path, monkeypatch):
+@pytest.fixture(scope='module')
+def _sshd_server(tmp_path_factory):
+    base = tmp_path_factory.mktemp('sshd')
     sshd = shutil.which('sshd') or '/usr/sbin/sshd'
     assert Path(sshd).is_file(), 'OpenSSH server is required for the acceptance job'
     for name in ('host', 'client'):
-        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(tmp_path / name)], check=True)
+        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(base / name)], check=True)
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
-    config = tmp_path / 'sshd_config'
+    config = base / 'sshd_config'
     config.write_text(f'''Port {port}
 ListenAddress 127.0.0.1
-HostKey {tmp_path / 'host'}
-PidFile {tmp_path / 'sshd.pid'}
-AuthorizedKeysFile {tmp_path / 'client.pub'}
+HostKey {base / 'host'}
+PidFile {base / 'sshd.pid'}
+AuthorizedKeysFile {base / 'client.pub'}
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 UsePAM no
@@ -48,36 +49,44 @@ LogLevel ERROR
     # ssh always uses passwd's HOME. A test-only executable wrapper supplies
     # only isolated client config/known_hosts; the real transport and ssh run.
     real_ssh = shutil.which('ssh')
-    bindir = tmp_path / 'bin'
+    bindir = base / 'bin'
     bindir.mkdir()
     wrapper = bindir / 'ssh'
     import shlex
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(real_ssh) + ' -F /dev/null -o UserKnownHostsFile=' +
-                       shlex.quote(str(tmp_path / 'known_hosts')) + ' "$@"\n')
+                       shlex.quote(str(base / 'known_hosts')) + ' "$@"\n')
     wrapper.chmod(0o700)
-    monkeypatch.setenv('PATH', str(bindir) + os.pathsep + os.environ['PATH'])
-    monkeypatch.setenv('REMOTE_DEV_STATE_DIR', str(tmp_path / 'client-state'))
-    workspace = tmp_path / 'remote-work'
-    workspace.mkdir()
-    log = (tmp_path / 'sshd.log').open('wb')
+    log = (base / 'sshd.log').open('wb')
     server = subprocess.Popen([sshd, '-D', '-e', '-f', str(config)], stdout=log, stderr=log)
     try:
         deadline = time.monotonic() + 10
         while True:
-            assert server.poll() is None, (tmp_path / 'sshd.log').read_text()
+            assert server.poll() is None, (base / 'sshd.log').read_text()
             try:
                 with socket.create_connection(('127.0.0.1', port), timeout=.1):
                     break
             except OSError:
                 assert time.monotonic() < deadline, 'sshd did not listen'
                 time.sleep(.02)
-        yield Endpoint('127.0.0.1', port, user=getpass.getuser(), root=str(workspace), cwd=str(workspace),
-                       identity_file=str(tmp_path / 'client'), ssh_mux=False, runtime_env=False)
+        yield {'port': port, 'bindir': bindir, 'identity_file': str(base / 'client')}
     finally:
         rpc_transport.close_connections()
         server.terminate()
         server.wait(timeout=5)
         log.close()
+
+
+@pytest.fixture
+def endpoint(tmp_path, monkeypatch, _sshd_server):
+    monkeypatch.setenv('PATH', str(_sshd_server['bindir']) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('REMOTE_DEV_STATE_DIR', str(tmp_path / 'client-state'))
+    workspace = tmp_path / 'remote-work'
+    workspace.mkdir()
+    try:
+        yield Endpoint('127.0.0.1', _sshd_server['port'], user=getpass.getuser(), root=str(workspace), cwd=str(workspace),
+                       identity_file=_sshd_server['identity_file'], ssh_mux=False, runtime_env=False)
+    finally:
+        rpc_transport.close_connections()
 
 
 def test_real_rpc_and_binary_artifact_roundtrip(endpoint, tmp_path):
