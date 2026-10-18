@@ -1,3 +1,13 @@
+"""
+[Role] MCP tool dispatcher, 6-Harness tool/parameter alias router, and `remote://` resource reader (`mcp/tools.py`).
+[Invariants]
+- Exposes 18 canonical `remote.*` tools (`remote_read`..`remote_probe`) and routes 40 native Harness tool aliases (Claude Code, Codex, Kimi, Cursor, Antigravity, DSH) via `canonical_name` and `normalize_arguments`.
+- Validates required fields and `execution_timeout` before endpoint resolution or any external side effect.
+[Timeouts & Locks]
+- Forwards validated `timeout_ms` to all underlying `core.*_ops` implementations.
+[Side-Effect Policy]
+- Dispatches tool calls to `core.*_ops` and serves read-only `remote://` state resources.
+"""
 from __future__ import annotations
 
 import json

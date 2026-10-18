@@ -1,3 +1,13 @@
+"""
+[Role] Structured exception hierarchy and transport submission-state extractor (`errors.py`).
+[Invariants]
+- Distinguishes `submission_state` (`not_sent`, `acknowledged`, `uncertain`) and `category` (`caller`, `validation`, `permission`, `remote_execution`, `cleanup`) without fragile prose regexes.
+- `record_cleanup_failure` attaches secondary cleanup errors to the primary exception without masking the primary cause.
+[Timeouts & Locks]
+- Pure in-memory exception chain traversal (`error_details`).
+[Side-Effect Policy]
+- Side-effect-free exception metadata annotation.
+"""
 from __future__ import annotations
 
 

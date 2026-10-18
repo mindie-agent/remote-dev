@@ -1,7 +1,14 @@
 """Ephemeral SSH stdio transport. Process ownership stays in worker.py.
 
-Self-contained, standard-library-only Linux program shipped by the client.
-No listener, installation, container, scheduler or independent job registry.
+[Role] Remote persistent JSON-RPC worker for workspace file, search, git, and patch operations (`rpc_worker.py`).
+[Invariants]
+- Invoked over SSH under `python -I -c` isolated mode so remote workspace files never shadow Python stdlib modules.
+- Enforces strict workspace boundary (`_ensure_within(workspace_root, target)`) and symlink escape rejection before any file read/write/patch.
+- Returns explicit structured error codes (`PATH_OUTSIDE_WORKSPACE`, `CONFLICT_MTIME`, `PATCH_CONFLICT`, `DEPENDENCY_MISSING`) without silent fallback.
+[Timeouts & Locks]
+- Subprocess helpers (`rg`, `git`, `python3`) run with explicit bounded timeouts (`timeout=60` / `timeout=300`) and `stdin=DEVNULL`.
+[Side-Effect Policy]
+- Read/search/diff handlers are side-effect-free; write/patch/atomic-replace handlers stage to `<path>.remote-dev.tmp.<pid>` with `fsync` before `os.replace()`.
 """
 from __future__ import annotations
 

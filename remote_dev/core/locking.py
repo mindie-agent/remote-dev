@@ -1,4 +1,12 @@
-"""Cross-thread and cross-process locks for package-owned mutable records."""
+"""
+[Role] Cross-thread and cross-process file locks for local records and endpoint mutations (`locking.py`).
+[Invariants]
+- Combines an in-process `threading.RLock` with an OS file lock (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows) so threads and processes share one serialization boundary.
+[Timeouts & Locks]
+- Polls non-blocking lock acquisition every `20ms` (`0.02s`) while checking `current_event()` so cancelled requests abort immediately without deadlocking.
+[Side-Effect Policy]
+- Creates `.lock` files under `state_root() / "locks"` or adjacent to target record paths.
+"""
 from __future__ import annotations
 
 import contextlib

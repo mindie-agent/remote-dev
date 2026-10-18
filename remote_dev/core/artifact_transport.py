@@ -1,4 +1,13 @@
-"""Binary artifact streaming over one independent, cancellable SSH channel."""
+"""
+[Role] Binary artifact streaming over an independent, cancellable SSH channel (`artifact_transport.py`).
+[Invariants]
+- Always uses an independent SSH connection (`ssh_mux=False, keepalive=True`) so large binary transfers cannot stall or tear down a shared ControlMaster.
+- Verifies SHA-256 digests on both `pull` and `push`, distinguishing `not_sent`, `acknowledged`, and `uncertain` (`commit_possible`) states.
+[Timeouts & Locks]
+- Acquires local `path_lock(destination)` during `pull` and runs a background `_watch` guard thread enforcing `timeout_ms` and cancellation events.
+[Side-Effect Policy]
+- `pull` writes to a sibling `.remote-dev-*` temp file with `fsync` before `publish_file`; `push` streams chunks to the remote `artifact_worker.py`.
+"""
 from __future__ import annotations
 
 import contextlib

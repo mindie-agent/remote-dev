@@ -1,3 +1,12 @@
+"""
+[Role] Remote POSIX path normalization and workspace root containment checks (`path_policy.py`).
+[Invariants]
+- Every remote path must normalize to an absolute POSIX path inside `endpoint.root` (`assert_under_root`, `join_under_root`).
+[Timeouts & Locks]
+- Pure in-memory string/path computation.
+[Side-Effect Policy]
+- Side-effect-free validation and SHA-256 path fingerprinting.
+"""
 from __future__ import annotations
 
 import posixpath

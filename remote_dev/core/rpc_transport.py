@@ -1,7 +1,13 @@
-"""Reusable binary-pipe SSH RPC, identical on Windows and POSIX clients.
-
-Never retries a submitted request: a lost reply is an unknown outcome. A new
-call can reconnect; persistent jobs remain discoverable by their job id.
+"""
+[Role] Pooled binary-pipe SSH JSON-RPC transport (`rpc_transport.py`).
+[Invariants]
+- Launches the remote worker with `python3 -I -u -c` so login `cwd` files never shadow stdlib modules.
+- Never retries a submitted request: a lost reply after write is surfaced with `submission_state="uncertain"`, whereas pre-send failures use `submission_state="not_sent"`.
+[Timeouts & Locks]
+- Entry-level `deadline` covers both `_acquire` pool wait and `ready.wait` worker handshake, preventing indefinite hangs on half-open SSH sessions.
+- Uses `_pool_lock` (`threading.Condition`) for connection pool coordination (`_POOL_LIMIT = 32`, `_IDLE_SECONDS = 300`) without holding it across SSH process spawn/teardown.
+[Side-Effect Policy]
+- Spawns local `OwnedProcess` SSH clients and dispatches length/line-framed JSON-RPC requests; closes idle connections in a background reaper thread.
 """
 from __future__ import annotations
 

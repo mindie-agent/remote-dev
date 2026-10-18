@@ -1,12 +1,12 @@
-"""Endpoint identity and resolution.
-
-remote-dev resolves endpoints from explicit fields only: ``host`` + ``port``
-(plus optional ``user`` / ``root`` / ``cwd`` / ``identity_file`` /
-``ssh_mux`` / ``keepalive`` / ...), or an ``alias`` looked up in a local
-alias file. Anything else - managed sessions, machine inventories, worktree
-bindings, coordinator state - belongs to the consumer. A consumer injects
-that knowledge through the resolver plugin interface
-(:func:`register_resolver`); remote-dev never imports the consumer.
+"""
+[Role] Endpoint identity, alias resolution, and consumer resolver plugin registry (`endpoint.py`).
+[Invariants]
+- Resolves endpoints strictly from explicit `host`+`port`, configured alias files, or registered consumer resolvers (`register_resolver` / `REMOTE_DEV_RESOLVERS`).
+- `Endpoint.for_long_stream` enforces `ssh_mux=False` and `keepalive=True`, refusing `ssh_mux=True`.
+[Timeouts & Locks]
+- Pure in-memory/local-config resolution; validates positive integer `connect_timeout_ms`.
+[Side-Effect Policy]
+- Reads local endpoint alias files (`~/.mindie/endpoints.json`, `endpoints.json`, etc.) without network I/O.
 """
 from __future__ import annotations
 

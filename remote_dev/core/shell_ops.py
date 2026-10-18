@@ -1,3 +1,12 @@
+"""
+[Role] Entry point for `remote.bash` command execution over the durable job supervisor (`shell_ops.py`).
+[Invariants]
+- Validates that `cwd` is an absolute path under `endpoint.root` before delegating to `start_remote_job`, returning an actionable `endpoint_patch` hint when blocked.
+[Timeouts & Locks]
+- Forwards `timeout_ms` and `yield_time_ms` to `start_remote_job`.
+[Side-Effect Policy]
+- Launches a supervised remote job via `job_ops.start_remote_job`.
+"""
 from __future__ import annotations
 
 from remote_dev.observability import observed_tool

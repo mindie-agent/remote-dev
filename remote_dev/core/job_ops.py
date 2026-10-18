@@ -1,3 +1,14 @@
+"""
+[Role] Remote background job lifecycle and interactive session orchestration (`job_ops.py`).
+[Invariants]
+- Enforces `STOP_DRAIN_SECONDS >= STOP_GRACE_SECONDS + 3.0` (`max(5.0, grace + 3.0)`) so `remote.job_stop` waits long enough for the remote supervisor's SIGTERM drain + SIGKILL escalation.
+- Persists the local job record before launching the remote job and never replays an uncertain launch or acknowledged `stdin` write.
+- Preserves acknowledged remote execution outcomes when local cursor/log commit fails (`_recording_failure`).
+[Timeouts & Locks]
+- Uses `record_lock(path)` around local cursor and log offset updates (`_save_output`), releasing the lock during long `yield_time_ms > 250` polls so concurrent `stdin` or `stop` calls do not block.
+[Side-Effect Policy]
+- Writes local `<job_id>.json` and `.stdout.log`/`.stderr.log` under `state/endpoints/<id>/jobs/` and drives remote `processes/worker.py` via `processes.control`.
+"""
 from __future__ import annotations
 
 from remote_dev.observability import current_tool, observed_tool

@@ -1,4 +1,13 @@
-"""Explicit connection diagnostics; never replay a caller's business command."""
+"""
+[Role] Read-only two-stage SSH connection diagnostic (`diagnose_ssh`) and HTTP connection sanitizer (`diagnostics.py`).
+[Invariants]
+- Never replays a caller's business command; runs only the fixed read-only `CONNECTION_PROBE_SCRIPT` under `python3 -I`.
+- Isolates Stage 1 (shared ControlMaster mux, `60%` budget) and Stage 2 (independent connection `ssh_mux=False`, `>= 40%` / `2000ms` floor budget) so a wedged mux socket cannot starve the independent fallback probe.
+[Timeouts & Locks]
+- Enforces `_stage_budgets_ms` per-stage deadlines and strips credentials/query strings from HTTP diagnostic URLs.
+[Side-Effect Policy]
+- Read-only SSH connection probes; zero remote or local file mutations.
+"""
 from __future__ import annotations
 
 import json

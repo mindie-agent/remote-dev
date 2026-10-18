@@ -1,10 +1,12 @@
-"""Client boundary for generic remote process supervision.
-
-``remote_dev.processes.control(endpoint, job_id, action, **parameters)`` is
-the package contract. Coordinator and ordinary background jobs share this
-path. The Linux worker is shipped once per pooled SSH stdio connection;
-subsequent requests carry JSON payloads and a code digest. The local client does
-not invoke Bash or PowerShell to quote that payload.
+"""
+[Role] Client boundary for remote background process supervision (`processes/client.py`).
+[Invariants]
+- Ships `processes/worker.py` over the pooled SSH JSON-RPC channel (`rpc_transport.request`) keyed by SHA-256 code digest (`lru_cache` loaded).
+- Validates that every supervisor reply is a JSON object containing an explicit `state` field.
+[Timeouts & Locks]
+- Uses `rpc_transport.request` with caller/supervisor action bounds (`prepare`, `go`, `status`, `tail`, `stop`, `stdin`, `launch`, `exchange`).
+[Side-Effect Policy]
+- Dispatches process-control RPCs to the remote endpoint's `.remote-dev/jobs/<job_id>` directory.
 """
 from __future__ import annotations
 

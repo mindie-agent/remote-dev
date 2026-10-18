@@ -1,5 +1,17 @@
+"""
+[Role] Remote file operations (`remote.read`, `remote.ls`, `remote.write`, `remote.edit`, `remote.multi_edit`) (`file_ops.py`).
+[Invariants]
+- Loads the standalone `remote_file_worker.py` script via `functools.lru_cache(maxsize=1)` (Iron Rule 4 — no giant inline Python string blobs).
+- Enforces `join_under_root` workspace containment and read-ledger SHA-256 optimistic concurrency on mutations.
+- Preserves succeeded remote mutations if local read-ledger recording fails (`operation_completed=True` via `recording_failure`).
+[Timeouts & Locks]
+- Wraps mutating operations (`remote_write`, `remote_edit`, `remote_multi_edit`) in `@serialize_mutation` and passes `timeout_ms` through `run_remote_python`.
+[Side-Effect Policy]
+- `remote_read` updates the local read ledger on verified reads; mutating operations update remote files atomically and refresh the local read ledger.
+"""
 from __future__ import annotations
 
+from functools import lru_cache
 from remote_dev.observability import observed_tool
 
 import time
@@ -17,7 +29,13 @@ from .state_store import load_write_ledger_guard, resolve_ledger_scope, write_re
 
 from pathlib import Path
 
-REMOTE_FILE_PY = Path(__file__).with_name("remote_file_worker.py").read_text(encoding="utf-8")
+
+@lru_cache(maxsize=1)
+def _remote_file_source() -> str:
+    return Path(__file__).with_name("remote_file_worker.py").read_text(encoding="utf-8")
+
+
+REMOTE_FILE_PY = _remote_file_source()
 
 
 def _duration_ms(start: float) -> int:

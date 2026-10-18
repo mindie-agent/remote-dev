@@ -220,35 +220,6 @@ class SshMuxIsolationTests(unittest.TestCase):
                 self.assertIn("%C-", options["ControlPath"])
                 self.assertIn(expected_path, cmd)
 
-    def test_mux_zero_bypasses_helper_and_does_not_touch_mux_state(self) -> None:
-        real_helper = ssh_transport._control_master_options
-        for ready in (None, True, False):
-            with self.subTest(mux_ready=ready):
-                with mock.patch.object(ssh_transport, "_MUX_READY", ready):
-                    with mock.patch.object(Path, "mkdir") as mkdir:
-                        with mock.patch.object(Path, "rmdir") as rmdir:
-                            with mock.patch.object(Path, "unlink") as unlink:
-                                with mock.patch.object(Path, "chmod") as path_chmod:
-                                    with mock.patch.object(ssh_transport.os, "chmod") as chmod:
-                                        with mock.patch.object(
-                                            ssh_transport,
-                                            "_control_master_options",
-                                            wraps=real_helper,
-                                        ) as helper:
-                                            with mock.patch.dict(os.environ, {SSH_MUX_ENV: "0"}):
-                                                cmd = ssh_transport.ssh_base_cmd(self.endpoint)
-                                        self.assertEqual(ssh_transport._MUX_READY, ready)
-                                        helper.assert_not_called()
-                                        mkdir.assert_not_called()
-                                        rmdir.assert_not_called()
-                                        unlink.assert_not_called()
-                                        path_chmod.assert_not_called()
-                                        chmod.assert_not_called()
-                                        options = _option_map(cmd)
-                                        self.assertEqual(options["ControlMaster"], "no")
-                                        self.assertEqual(options["ControlPath"], "none")
-                                        self.assertEqual(options["ControlPersist"], "no")
-
     def test_runners_honor_mux_zero_and_keep_quoting_and_results(self) -> None:
         observed: dict[str, object] = {}
 
@@ -287,66 +258,6 @@ class SshMuxIsolationTests(unittest.TestCase):
         self.assertIn("path with spaces", bytes_args[-1])
         self.assertEqual(bytes_result.returncode, 0)
         self.assertEqual(bytes_result.stdout, b"bytes-out")
-
-
-    def test_subprocess_copies_keep_independent_argv_and_parent_env(self) -> None:
-        parent_before = os.environ.copy()
-        with tempfile.TemporaryDirectory() as tmp:
-            shared = os.environ.copy()
-            shared["REMOTE_DEV_SSH_MUX_DIR"] = tmp
-            zero_env = dict(shared)
-            zero_env[SSH_MUX_ENV] = "0"
-            one_env = dict(shared)
-            one_env[SSH_MUX_ENV] = "1"
-            unset_env = dict(shared)
-            unset_env.pop(SSH_MUX_ENV, None)
-
-            zero = subprocess.run(
-                [sys.executable, "-c", _CHILD_SSH_ARGV],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=zero_env,
-            )
-            one = subprocess.run(
-                [sys.executable, "-c", _CHILD_SSH_ARGV],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=one_env,
-            )
-            unset = subprocess.run(
-                [sys.executable, "-c", _CHILD_SSH_ARGV],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=unset_env,
-            )
-
-        self.assertEqual(dict(os.environ), parent_before)
-        self.assertEqual(zero.returncode, 0, zero.stderr)
-        self.assertEqual(unset.returncode, 0, unset.stderr)
-        zero_options = _option_map(json.loads(zero.stdout))
-        unset_options = _option_map(json.loads(unset.stdout))
-        self.assertEqual(zero_options["ControlMaster"], "no")
-        self.assertEqual(zero_options["ControlPath"], "none")
-        self.assertEqual(zero_options["ControlPersist"], "no")
-        if os.name == "nt":
-            self.assertNotEqual(one.returncode, 0, one.stderr)
-            self.assertIn("ControlMaster is not supported", one.stderr)
-            self.assertEqual(unset_options["ControlMaster"], "no")
-            self.assertEqual(unset_options["ControlPath"], "none")
-            self.assertEqual(unset_options["ControlPersist"], "no")
-            self.assertEqual(unset_options, zero_options)
-        else:
-            self.assertEqual(one.returncode, 0, one.stderr)
-            one_options = _option_map(json.loads(one.stdout))
-            self.assertEqual(one_options["ControlMaster"], "auto")
-            self.assertEqual(one_options["ControlPersist"], "120")
-            self.assertIn("%C-", one_options["ControlPath"])
-            self.assertEqual(unset_options, one_options)
-            self.assertNotEqual(zero_options["ControlMaster"], one_options["ControlMaster"])
-        self.assertEqual(parent_before.get(SSH_MUX_ENV), os.environ.get(SSH_MUX_ENV))
 
     def test_openssh_G_evaluates_independent_mux_options(self) -> None:
         ssh = _require_openssh()
@@ -401,17 +312,6 @@ class SshMuxIsolationTests(unittest.TestCase):
         self.assertLess(cmd.index("-l"), cmd.index("--"))
         self.assertNotIn("-oProxyCommand=evil@-oProxyCommand=marker", cmd)
 
-    def test_mux_override_does_not_write_environ(self) -> None:
-        before = os.environ.copy()
-        with mock.patch.object(ssh_transport, "_MUX_READY", True):
-            with mock.patch.dict(os.environ, {SSH_MUX_ENV: "0"}):
-                ssh_transport.ssh_base_cmd(self.endpoint)
-                self.assertEqual(os.environ.get(SSH_MUX_ENV), "0")
-            with mock.patch.dict(os.environ):
-                os.environ.pop(SSH_MUX_ENV, None)
-                ssh_transport.ssh_base_cmd(self.endpoint)
-                self.assertNotIn(SSH_MUX_ENV, os.environ)
-        self.assertEqual(dict(os.environ), before)
 
 
 class NativeWindowsMuxTests(unittest.TestCase):

@@ -1,10 +1,12 @@
-"""Owned local argv execution for SSH clients on Windows and POSIX.
-
-Paths and argv belong to the executing OS; this component does not interpret a
-shell or translate Windows/WSL paths. Windows owns descendants with a Job Object
-assigned before the suspended child can run. POSIX owns an independent process
-group. Deliberately detached POSIX sessions and remote processes are outside
-that local group: remote quiet still requires a remote supervisor receipt.
+"""
+[Role] Owned local subprocess execution with descendant process-group / Windows Job Object cleanup (`local_process.py`).
+[Invariants]
+- POSIX children launch under `_posix_owner.py` in a dedicated session (`start_new_session=True`) with a parent-death pipe guardian; Windows children launch suspended and bind to a `KILL_ON_JOB_CLOSE` Job Object before resuming.
+- `stop()` terminates the entire descendant group and is idempotent after completion.
+[Timeouts & Locks]
+- Bounded `stop(timeout=5.0)` wait before escalating to `SIGKILL` / `TerminateJobObject`.
+[Side-Effect Policy]
+- Spawns and signals only its owned local child process group / Job Object and closes inherited stdio pipes on exit.
 """
 from __future__ import annotations
 

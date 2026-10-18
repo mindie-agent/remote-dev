@@ -1,4 +1,12 @@
-"""Source fragment shared by the remote RPC and artifact workers."""
+"""
+[Role] Remote host mutation file lock shared by `rpc_worker.py` and `artifact_worker.py` (`processes/mutation.py`).
+[Invariants]
+- Serializes concurrent remote workspace mutations across independent SSH worker processes via `~/.cache/remote-dev/mutation.lock`.
+[Timeouts & Locks]
+- Polls non-blocking `fcntl.flock` / `msvcrt.locking` every `20ms` (`0.02s`), aborting immediately if the request cancellation event is set.
+[Side-Effect Policy]
+- Creates and locks `~/.cache/remote-dev/mutation.lock` (`0o700` parent directory) on the remote host.
+"""
 import contextlib
 
 

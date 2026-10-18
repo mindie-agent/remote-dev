@@ -1,3 +1,13 @@
+"""
+[Role] Standalone remote Python helper module executed over one-shot SSH for file read/write/list/stat (`remote_file_worker.py`).
+[Invariants]
+- Maintained as a standalone `.py` file (Iron Rule 4 — never inline giant Python string blobs in `file_ops.py`) and loaded via `functools.lru_cache`.
+- Enforces workspace root containment, symlink escape detection, and optimistic `expected_mtime_ns` concurrency checks.
+[Timeouts & Locks]
+- Executed within the caller's bounded SSH command timeout.
+[Side-Effect Policy]
+- `read`, `list`, and `stat` are pure queries; `write` stages to `<target>.remote-dev.tmp.<pid>`, flushes + `fsync`s, and commits via `os.replace()`.
+"""
 from __future__ import annotations
 
 import ast

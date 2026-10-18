@@ -1,3 +1,13 @@
+"""
+[Role] Remote Codex `apply_patch` and unified-diff atomic transaction engine (`patch_ops.py`).
+[Invariants]
+- Evaluates multi-file patches in an in-memory virtual overlay first; only commits when every hunk and path check succeeds.
+- Snapshots touched files prior to commit and rolls back to `before_state` if any file replacement fails mid-commit.
+[Timeouts & Locks]
+- Serialized per endpoint via `@serialize_mutation` with caller-supplied `timeout_ms`.
+[Side-Effect Policy]
+- Atomically writes/deletes target files on the remote endpoint and saves patch audit records under `state/endpoints/<id>/patches/`.
+"""
 from __future__ import annotations
 
 from remote_dev.observability import observed_tool

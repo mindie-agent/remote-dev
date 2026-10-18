@@ -1,7 +1,12 @@
-"""Thin result adapters over the shared diagnostics recorder.
-
-Only operation names and already-public outcome facts enter logs. Arguments,
-commands, environment values and file contents are deliberately not inspected.
+"""
+[Role] Structured operation span adapter over `mindie_diagnostics` and MCP stdio descriptor guard (`observability.py`).
+[Invariants]
+- Logs only operation names and public outcome metadata (`outcome`, `status`, `state`, `job_id`, `duration_ms`); never inspects or logs user commands, environment variables, or file contents.
+- `protocol_streams()` duplicates and redirects `stdin`/`stdout` before serving MCP so child processes or stray library prints cannot corrupt the JSON-RPC wire stream.
+[Timeouts & Locks]
+- Uses `contextvars.ContextVar` for per-request span correlation and non-blocking `stderr` warning emission.
+[Side-Effect Policy]
+- Emits structured diagnostic events to `mindie_diagnostics` and attaches `diagnostics` summaries to tool results.
 """
 from __future__ import annotations
 

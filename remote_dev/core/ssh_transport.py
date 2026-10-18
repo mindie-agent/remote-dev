@@ -1,3 +1,13 @@
+"""
+[Role] SSH command builder, ControlMaster policy, attached stream runner, and port-forward transport (`ssh_transport.py`).
+[Invariants]
+- Places all SSH options before `--` and uses `-l <user> -p <port> -- <host>` so user/host values cannot be parsed as OpenSSH flags.
+- Refuses shared `ControlMaster` multiplexing on attached streams (`run_stream`) and `-N -L` port forwards (`open_local_forward`), because OpenSSH mux silently exits `rc=0` while tearing down tunnels.
+[Timeouts & Locks]
+- Enforces caller `timeout_ms` both remotely (`timeout --preserve-status`) and locally (`STREAM_SELECT_SLICE_SECONDS = 0.1` + `OwnedProcess.stop()`).
+[Side-Effect Policy]
+- Lazily prepares `~/.ssh/remote-dev-mux` (`0o700`) once per process when multiplexing is active; spawns local SSH processes via `OwnedProcess`.
+"""
 from __future__ import annotations
 
 import codecs

@@ -1,3 +1,13 @@
+"""
+[Role] Local endpoint state, read-ledger, and job-record persistence (`state_store.py`).
+[Invariants]
+- Scopes all local state by deterministic `endpoint_id` and SHA-256 `client_context_id` (`id-<sha256>`) so concurrent sessions never collide or leak stale-write authorization.
+- Writes JSON/text records via sibling `.tmp` + `fsync` + `replace_file` (`os.replace()`).
+[Timeouts & Locks]
+- File replacement tolerates transient Windows sharing locks up to `0.5s` via `atomic.replace_file`.
+[Side-Effect Policy]
+- Mutates files exclusively under `state_root()` (`<cwd>/state` or `REMOTE_DEV_STATE_DIR`).
+"""
 from __future__ import annotations
 
 import hashlib
