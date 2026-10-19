@@ -1,12 +1,12 @@
-"""Endpoint identity and resolution.
-
-remote-dev resolves endpoints from explicit fields only: ``host`` + ``port``
-(plus optional ``user`` / ``root`` / ``cwd`` / ``identity_file`` /
-``ssh_mux`` / ``keepalive`` / ...), or an ``alias`` looked up in a local
-alias file. Anything else - managed sessions, machine inventories, worktree
-bindings, coordinator state - belongs to the consumer. A consumer injects
-that knowledge through the resolver plugin interface
-(:func:`register_resolver`); remote-dev never imports the consumer.
+"""
+[Role] Endpoint identity, alias resolution, and consumer resolver plugin registry (`endpoint.py`).
+[Invariants]
+- Resolves endpoints strictly from explicit `host`+`port`, configured alias files, or registered consumer resolvers (`register_resolver` / `REMOTE_DEV_RESOLVERS`).
+- `Endpoint.for_long_stream` enforces `ssh_mux=False` and `keepalive=True`, refusing `ssh_mux=True`.
+[Timeouts & Locks]
+- Pure in-memory/local-config resolution; validates positive integer `connect_timeout_ms`.
+[Side-Effect Policy]
+- Reads local endpoint alias files (`~/.mindie/endpoints.json`, `endpoints.json`, etc.) without network I/O.
 """
 from __future__ import annotations
 
@@ -154,12 +154,17 @@ def substrate_root() -> Path:
 def alias_files() -> list[Path]:
     """Alias files searched in order; later files override earlier ones.
 
+    User-level files under ``~/.mindie/endpoints.json`` and
+    ``~/.mindie-coordinator/endpoints.json`` provide fallbacks.
     ``REMOTE_DEV_ENDPOINTS_FILE`` may hold one path or an ``os.pathsep``
     separated list. The process-cwd ``endpoints.json`` /
     ``endpoints.local.json`` are always consulted afterwards; both are
     ignored by Git so a checkout never carries real endpoint data.
     """
-    paths: list[Path] = []
+    paths: list[Path] = [
+        Path("~/.mindie/endpoints.json").expanduser(),
+        Path("~/.mindie-coordinator/endpoints.json").expanduser(),
+    ]
     configured = os.environ.get("REMOTE_DEV_ENDPOINTS_FILE", "")
     for item in configured.split(os.pathsep):
         if item.strip():
@@ -169,8 +174,9 @@ def alias_files() -> list[Path]:
     return paths
 
 
-def _read_endpoint_aliases() -> dict[str, Any]:
+def _read_endpoint_aliases_and_default() -> tuple[dict[str, Any], str | None]:
     merged: dict[str, Any] = {}
+    default_alias: str | None = None
     for path in alias_files():
         if not path.exists():
             continue
@@ -178,10 +184,29 @@ def _read_endpoint_aliases() -> dict[str, Any]:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise EndpointError(f"invalid endpoint alias file {path}: {exc}") from exc
-        entries = data.get("endpoints", data if isinstance(data, dict) else {})
+        if not isinstance(data, dict):
+            raise EndpointError(f"endpoint alias file {path} must be an object")
+        if "endpoints" in data:
+            entries = data["endpoints"]
+        else:
+            entries = {k: v for k, v in data.items() if k != "default_alias"}
         if not isinstance(entries, dict):
             raise EndpointError(f"endpoint alias file {path} must be an object")
         merged.update(entries)
+        raw_default = data.get("default_alias")
+        if isinstance(raw_default, str) and raw_default.strip():
+            default_alias = raw_default.strip()
+            if "default" not in entries and default_alias in merged:
+                merged["default"] = merged[default_alias]
+        elif "default" in entries and default_alias is None:
+            default_alias = "default"
+    if default_alias is None and "default" in merged:
+        default_alias = "default"
+    return merged, default_alias
+
+
+def _read_endpoint_aliases() -> dict[str, Any]:
+    merged, _ = _read_endpoint_aliases_and_default()
     return merged
 
 
@@ -232,8 +257,15 @@ def _direct_endpoint(payload: dict[str, Any], *, caller_fields: set[str]) -> End
     if isinstance(payload.get("port"), bool) or not (1 <= port <= 65535):
         raise _field_error(f"endpoint port must be in 1..65535, got {payload['port']!r}",
                            "port", caller_fields)
-    root = str(payload.get("root") or DEFAULT_ROOT)
-    cwd = str(payload["cwd"]) if payload.get("cwd") else None
+    raw_container = payload.get("container")
+    container_workdir: str | None = None
+    if isinstance(raw_container, dict):
+        raw_workdir = raw_container.get("workdir")
+        if isinstance(raw_workdir, str) and raw_workdir.strip():
+            container_workdir = raw_workdir.strip()
+        raw_container = str(raw_container.get("id") or raw_container.get("name") or "").strip() or None
+    root = str(payload.get("root") or container_workdir or DEFAULT_ROOT)
+    cwd = str(payload["cwd"]) if payload.get("cwd") else container_workdir
     if not root.startswith("/"):
         raise _field_error(f"endpoint root must be an absolute path, got {root!r}",
                            "root", caller_fields)
@@ -242,9 +274,6 @@ def _direct_endpoint(payload: dict[str, Any], *, caller_fields: set[str]) -> End
         raise _field_error(f"endpoint cwd must be an absolute path, got {effective_cwd!r}",
                            "cwd", caller_fields)
     runtime_env_file = payload.get("runtime_env_file", DEFAULT_RUNTIME_ENV_FILE)
-    raw_container = payload.get("container")
-    if isinstance(raw_container, dict):
-        raw_container = str(raw_container.get("id") or raw_container.get("name") or "").strip() or None
     return Endpoint(
         host=str(payload["host"]),
         port=port,
@@ -509,6 +538,13 @@ def resolve_endpoint(payload: dict[str, Any]) -> Endpoint:
         endpoint = _endpoint_from_resolver(entry, payload)
         if endpoint is not None:
             return endpoint
+    if not has_selector(payload):
+        aliases, default_alias = _read_endpoint_aliases_and_default()
+        if default_alias and default_alias in aliases and isinstance(aliases[default_alias], dict):
+            overrides = {k: v for k, v in payload.items() if v is not None}
+            merged = {**aliases[default_alias], **overrides}
+            merged["alias"] = default_alias
+            return _direct_endpoint(merged, caller_fields=set(overrides))
     known = ", ".join(selector_fields())
     resolvers = ", ".join(entry.name for entry in registered_resolvers()) or "none"
     raise caller_error(

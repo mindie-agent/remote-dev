@@ -1,4 +1,12 @@
-"""Atomic local publication, including transient Windows file sharing locks."""
+"""
+[Role] Atomic local file replacement and non-clobbering publication (`atomic.py`).
+[Invariants]
+- Uses `os.replace()` for atomic overwrites and hard-link publication (`os.link` + `os.unlink`) when `overwrite=False` so existing files are never silently clobbered.
+[Timeouts & Locks]
+- Retries transient Windows delete-sharing `PermissionError` (`winerror` 5, 32, 33) for up to `0.5s` (`20ms` sleep).
+[Side-Effect Policy]
+- Mutates only the explicitly passed `source` and `destination` local filesystem paths.
+"""
 from __future__ import annotations
 
 import errno

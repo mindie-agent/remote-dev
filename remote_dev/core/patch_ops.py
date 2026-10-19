@@ -1,3 +1,13 @@
+"""
+[Role] Remote Codex `apply_patch` and unified-diff atomic transaction engine (`patch_ops.py`).
+[Invariants]
+- Evaluates multi-file patches in an in-memory virtual overlay first; only commits when every hunk and path check succeeds.
+- Snapshots touched files prior to commit and rolls back to `before_state` if any file replacement fails mid-commit.
+[Timeouts & Locks]
+- Serialized per endpoint via `@serialize_mutation` with caller-supplied `timeout_ms`.
+[Side-Effect Policy]
+- Atomically writes/deletes target files on the remote endpoint and saves patch audit records under `state/endpoints/<id>/patches/`.
+"""
 from __future__ import annotations
 
 from remote_dev.observability import observed_tool
@@ -469,7 +479,7 @@ def _apply_unified_patch(
             f"cat > \"$tmp\" <<'{delimiter}'",
             patch,
             delimiter,
-            "python3 - \"$tmp_before\" " + shlex.quote(endpoint.root) + " " + shlex.quote(cwd) + " " + path_args + " <<'REMOTE_DEV_BEFORE'",
+            "python3 -I - \"$tmp_before\" " + shlex.quote(endpoint.root) + " " + shlex.quote(cwd) + " " + path_args + " <<'REMOTE_DEV_BEFORE'",
             "import hashlib, json, pathlib, sys",
             "def fail(status, error):",
             "    print(f'REMOTE_DEV_PATCH_PREFLIGHT {status}: {error}', file=sys.stderr)",
@@ -504,7 +514,7 @@ def _apply_unified_patch(
             "  exit 73",
             "fi",
             "git apply \"$tmp\"",
-            "python3 - \"$tmp_before\" \"$tmp_stat\" " + path_args + " <<'REMOTE_DEV_CHANGED'",
+            "python3 -I - \"$tmp_before\" \"$tmp_stat\" " + path_args + " <<'REMOTE_DEV_CHANGED'",
             "import hashlib, json, pathlib, sys",
             "before=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))",
             "diffstat=pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')",

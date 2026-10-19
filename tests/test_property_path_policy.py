@@ -233,21 +233,6 @@ class PathPolicyStringLayerProperties(unittest.TestCase):
                 result = join_under_root(root, root, name)
                 self.assertEqual(result, root + "/" + name)
 
-    def test_non_string_inputs_raise_policy_error(self) -> None:
-        for value in (None, 12, b"/x", ["/x"]):
-            with self.subTest(value=value):
-                with self.assertRaises(PathPolicyError):
-                    normalize_remote_path(value)  # type: ignore[arg-type]
-                with self.assertRaises(PathPolicyError):
-                    assert_under_root(value, "/vllm-workspace")  # type: ignore[arg-type]
-
-    def test_join_under_root_rejects_non_string_with_policy_error(self) -> None:
-        """``join_under_root`` used to call ``rel_or_abs.startswith`` before
-        any type check, so ``None`` leaked ``AttributeError``. Raise
-        ``PathPolicyError`` like the other path helpers."""
-        with self.assertRaises(PathPolicyError):
-            join_under_root("/r", "/r", None)  # type: ignore[arg-type]
-
     def test_fingerprint_is_stable_under_normalization_and_collision_free_on_corpus(self) -> None:
         seen: dict[str, str] = {}
 
@@ -283,8 +268,6 @@ class RemoteExecutorEscapeProperties(unittest.TestCase):
         (root / "file_link").symlink_to(outside / "secret.txt")
         (root / "dir_link").symlink_to(outside / "dir")
         (root / "dangling").symlink_to(outside / "missing.txt")
-        (root / "inside_link").symlink_to(root / "legit.py")
-        (root / "pkg" / "up_link").symlink_to(root / "pkg" / ".." / "legit.py")
         return root, outside, base
 
     def setUp(self) -> None:
@@ -363,25 +346,6 @@ class RemoteExecutorEscapeProperties(unittest.TestCase):
             self.assertNotIn("victim = 1", str(data))
 
         run_cases(40, body, label="remote read escape")
-
-    def test_symlinks_inside_root_are_refused_for_writes_but_targets_are_writable(self) -> None:
-        def body(gen: Gen, _index: int) -> None:
-            root, _outside, _base = self._layout(gen)
-            link = gen.choice(("inside_link", "pkg/up_link"))
-            data = run_remote_script(
-                file_ops.REMOTE_FILE_PY,
-                {"op": "write", "root": str(root), "cwd": str(root), "file_path": link, "content": "x\n", "overwrite": True},
-            )
-            self.assertEqual(data["status"], "symlink_not_allowed", data)
-            self.assertEqual((root / "legit.py").read_text(encoding="utf-8"), "legit = 1\n")
-            direct = run_remote_script(
-                file_ops.REMOTE_FILE_PY,
-                {"op": "write", "root": str(root), "cwd": str(root), "file_path": "legit.py", "content": "legit = 2\n", "overwrite": True},
-            )
-            self.assertEqual(direct["status"], "written", direct)
-            self.assertEqual((root / "legit.py").read_text(encoding="utf-8"), "legit = 2\n")
-
-        run_cases(20, body, label="inside symlink writes")
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ When using AI coding agents like Claude Code, Codex, Kimi Code, or Cursor to wor
 
 `remote-dev` gives your agent **remote twins (`remote.*`)** of the local tools it already knows (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `apply_patch`, etc.). Just pass the target `host` and `port` (or a short `alias`), and your agent can work directly on a remote Linux machine or inside a running Docker container:
 
-- **19 Remote Tools Matching Local Habits**: Available both as a single stdio MCP server (`remote-dev server`) and as one-to-one CLI subcommands (`remote-dev <subcommand>`).
+- **18 Canonical Remote Tools (+ 40+ 6-Harness Native Aliases) Matching Local Habits**: Available both as a single stdio MCP server (`remote-dev server`) and as one-to-one CLI subcommands (`remote-dev <subcommand>`).
 - **Work Inside Existing Docker Containers with Zero Setup**: Pass `container="<name-or-id>"` on any SSH host endpoint to read, edit, patch, and run commands directly inside a running container — no container SSH daemon or extra agent install required.
 - **Pooled SSH Connections + Dedicated Control Lane**: Reuses persistent binary SSH RPC connections across macOS, Linux, and native Windows. Two dedicated control workers (`job_status` / `job_tail` / `job_stop` / `job_stdin`) ensure you can always check logs or stop a runaway task even when all regular execution slots are busy.
 - **Safe by Design — No Guessing, No Blind Retries**: Targets are always resolved from explicit arguments (never guessed from your local folder). Files read in the current session are protected against accidental concurrent overwrites. If a connection drops mid-flight and `remote-dev` cannot tell whether a command already ran, it reports `uncertain` instead of blindly re-running it.

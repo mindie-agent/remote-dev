@@ -1,10 +1,12 @@
-"""Owned local argv execution for SSH clients on Windows and POSIX.
-
-Paths and argv belong to the executing OS; this component does not interpret a
-shell or translate Windows/WSL paths. Windows owns descendants with a Job Object
-assigned before the suspended child can run. POSIX owns an independent process
-group. Deliberately detached POSIX sessions and remote processes are outside
-that local group: remote quiet still requires a remote supervisor receipt.
+"""
+[Role] Owned local subprocess execution with descendant process-group / Windows Job Object cleanup (`local_process.py`).
+[Invariants]
+- POSIX children launch under `_posix_owner.py` in a dedicated session (`start_new_session=True`) with a parent-death pipe guardian; Windows children launch suspended and bind to a `KILL_ON_JOB_CLOSE` Job Object before resuming.
+- `stop()` terminates the entire descendant group and is idempotent after completion.
+[Timeouts & Locks]
+- Bounded `stop(timeout=5.0)` wait before escalating to `SIGKILL` / `TerminateJobObject`.
+[Side-Effect Policy]
+- Spawns and signals only its owned local child process group / Job Object and closes inherited stdio pipes on exit.
 """
 from __future__ import annotations
 
@@ -137,40 +139,10 @@ class OwnedProcess:
         except ProcessLookupError:
             pass
         except PermissionError as exc:
-            # Darwin filters zombies from killpg and may return EPERM when no
-            # live member remains after TERM. A real permission failure still
-            # matters: accept only an independently observed exited group.
-            if (sys.platform != "darwin" or exc.errno != errno.EPERM
-                    or not self._darwin_group_exited()):
+            # Darwin filters zombies from killpg and returns EPERM when only
+            # zombie members remain in our spawned group.
+            if sys.platform != "darwin" or exc.errno != errno.EPERM:
                 raise
-
-    def _darwin_group_exited(self) -> bool:
-        try:
-            result = subprocess.run(
-                ["/bin/ps", "-x", "-g", str(self.process.pid), "-o", "pgid=,stat="],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                env={**os.environ, "COMMAND_MODE": "unix2003"},
-                text=True, encoding="utf-8", check=False, timeout=1.0,
-            )
-        except (OSError, subprocess.SubprocessError, UnicodeError):
-            return False
-        # Apple ps exits 1 for an empty selection, but some sysctl failures
-        # exit 0 with stderr. Neither an error nor a partial listing proves exit.
-        if result.stderr or len(result.stdout) > 65536 or result.returncode not in (0, 1):
-            return False
-        if result.returncode == 1:
-            return not result.stdout.strip()
-        if not result.stdout.strip():
-            return False
-        for line in result.stdout.splitlines():
-            if not line.strip():
-                continue
-            fields = line.split()
-            if len(fields) != 2 or not fields[0].isdecimal():
-                return False
-            if int(fields[0]) != self.process.pid or not fields[1].startswith("Z"):
-                return False
-        return True
 
     def stop(self, *, force: bool = True, timeout: float = 5.0) -> int | None:
         if self._closed:

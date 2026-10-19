@@ -1,3 +1,13 @@
+"""
+[Role] Remote endpoint probing (`remote.probe`) and context snapshot persistence (`remote.context_snapshot`) (`context_snapshot.py`).
+[Invariants]
+- Gathers read-only host/git/Python facts or delegates `diagnose_connection=True` to `diagnostics.diagnose_ssh`.
+- Preserves probe results with `operation_completed=True` even if local snapshot persistence fails.
+[Timeouts & Locks]
+- Bounded by caller `timeout_ms` on the remote probe or two-stage SSH diagnostic.
+[Side-Effect Policy]
+- Writes `context-<timestamp>.json` and `latest.json` atomically under `state/endpoints/<id>/context/`.
+"""
 from __future__ import annotations
 
 from remote_dev.observability import observed_tool
@@ -99,7 +109,8 @@ def remote_probe(endpoint: Endpoint, *, timeout_ms: int | None = None, diagnose_
         snapshot = write_context_snapshot(endpoint, {"connection": diagnosis})
         result = make_result(tool="remote.probe", target=endpoint.to_result_target(),
                              outcome="failed" if diagnosis["status"] == "unavailable" else "success",
-                             status=diagnosis["status"], summary="Read-only SSH connection diagnostic.",
+                             status=diagnosis["status"],
+                             summary=diagnosis.get("summary") or "Read-only SSH connection diagnostic.",
                              refs=snapshot["refs"], next=diagnosis["next"], extra={"connection": diagnosis})
         return {"text": result["summary"], "result": result}
     started = utc_now_iso()

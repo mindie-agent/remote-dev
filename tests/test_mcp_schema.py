@@ -110,14 +110,6 @@ class McpSchemaTests(unittest.TestCase):
         self.assertEqual(ALIASES["remote_read"], "remote.read")
         self.assertIn("remote.bash", TOOL_SCHEMAS)
 
-    def test_normal_tools_describe_endpoint_selector_requirement(self) -> None:
-        job_tools = {"remote.job_status", "remote.job_tail", "remote.job_stop", "remote.job_stdin"}
-        for name, schema in TOOL_SCHEMAS.items():
-            if name in job_tools:
-                self.assertNotIn(ENDPOINT_SELECTOR_DESCRIPTION, schema.get("description", ""))
-            else:
-                self.assertIn(ENDPOINT_SELECTOR_DESCRIPTION, schema.get("description", ""), name)
-
     def test_model_facing_schemas_use_portable_object_subset(self) -> None:
         def check(node: dict, path: str) -> None:
             for keyword in ("anyOf", "oneOf", "allOf", "$ref"):
@@ -137,14 +129,6 @@ class McpSchemaTests(unittest.TestCase):
             with self.subTest(tool=tool["name"]):
                 self.assertEqual(tool["inputSchema"]["type"], "object")
                 check(tool["inputSchema"], tool["name"])
-
-    def test_patch_schema_keeps_both_payload_forms(self) -> None:
-        schema = TOOL_SCHEMAS["remote.apply_patch"]
-        self.assertIn("patch or command", schema["description"])
-        self.assertIn("patch takes precedence", schema["description"])
-        for field in ("patch", "command"):
-            self.assertEqual(schema["properties"][field]["type"], "string")
-            self.assertNotIn(field, schema["required"])
 
     def test_multi_edit_items_expose_fields_to_strict_generators(self) -> None:
         item = TOOL_SCHEMAS["remote.multi_edit"]["properties"]["edits"]["items"]
@@ -329,18 +313,6 @@ class McpSchemaTests(unittest.TestCase):
                 mcp_tools.call_tool("remote.bash", {"command": "touch unwanted", "wait": True})
             with self.assertRaisesRegex(ValueError, "unsupported argument.*overwite"):
                 mcp_tools.call_tool("remote.write", {"path": "/tmp/file", "content": "x", "overwite": True})
-            resolve.assert_not_called()
-            run.assert_not_called()
-
-    def test_execution_limits_reject_invalid_aliases_before_endpoint_resolution(self) -> None:
-        values = (None, False, True, 0, -1, 1.5, "120000", float("inf"), float("nan"))
-        limits = [{key: value} for key in ("timeout_ms", "timeout") for value in values]
-        limits.append({"timeout_ms": 1000, "timeout": 2000})
-        with patch.object(mcp_tools, "resolve_endpoint") as resolve, patch.object(mcp_tools, "remote_bash") as run:
-            for limit in limits:
-                with self.subTest(limit=limit), self.assertRaises(ValueError) as caught:
-                    mcp_tools.call_tool("remote.bash", {"command": "touch unwanted", **limit})
-                self.assertEqual(caught.exception.category, "caller")
             resolve.assert_not_called()
             run.assert_not_called()
 

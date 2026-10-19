@@ -12,11 +12,11 @@ flowchart TB
         Coord["mindie-coordinator / Domain Workflow Skills"]
     end
 
-    subgraph LayerA["Layer A: Remote Developer Tool Surface (19 Symmetric Tools)"]
+    subgraph LayerA["Layer A: Remote Developer Tool Surface (18 Canonical Tools + 40+ 6-Harness Aliases)"]
         FileTools["Files & Patches: read / write / edit / multi_edit / apply_patch"]
         SearchTools["Search & Listing: glob / grep / ls"]
         JobTools["Commands & Jobs: bash / job_status / job_tail / job_stop / job_stdin"]
-        SyncTools["Artifact Sync & Probing: artifact_pull / artifact_push / probe / context_snapshot"]
+        SyncTools["Artifact Sync & Probing: artifact_manifest / artifact_pull / artifact_push / probe / context_snapshot"]
     end
 
     subgraph LayerB["Layer B: Shared Substrate (remote_dev.core & processes)"]
@@ -37,7 +37,7 @@ flowchart TB
 
 ### 1. Layer A: Remote Developer Tool Surface
 
-Exposes 19 tools over both the stdio MCP server (`remote-dev server`) and the CLI (`remote-dev <subcommand>`):
+Exposes 18 canonical tools (plus 40+ 6-Harness aliases across Codex, Claude Code, Cursor, Kimi Code, DSH, and Antigravity) over both the stdio MCP server (`remote-dev server`) and the CLI (`remote-dev <subcommand>`):
 - **Read, Write & Patch**: `remote.read`, `remote.write`, `remote.edit`, `remote.multi_edit`, `remote.apply_patch`
 - **Search & Browse**: `remote.glob`, `remote.grep`, `remote.ls`
 - **Run & Control Processes**: `remote.bash`, `remote.job_status`, `remote.job_tail`, `remote.job_stop`, `remote.job_stdin`
@@ -46,7 +46,7 @@ Exposes 19 tools over both the stdio MCP server (`remote-dev server`) and the CL
 ### 2. Layer B: Shared Substrate
 
 Handles connection management, container routing, and safety guarantees under the hood:
-- **Explicit Target Resolution** (`remote_dev.core.endpoint`): Resolves targets strictly from explicit arguments (`host` / `port` / `alias` or registered plugin selectors) — never guessing from your local working directory.
+- **Explicit Target Resolution** (`remote_dev.core.endpoint`): Resolves targets from explicit arguments (`host` / `port` / `alias` or registered plugin selectors) or configured `default_alias` in `endpoints.json` / `~/.mindie-coordinator/endpoints.json` — never guessing from your local working directory.
 - **Zero-Daemon Docker Container Execution** (`remote_dev.core.container_endpoint`): When you pass a container name or short ID, `remote-dev` resolves it to the running **full 64-character container ID** via the host's RPC channel and pins that full ID for all job records, read ledgers, and pooled connections. Even if someone recreates a container with the same name later, existing records never get mixed up.
 - **Pooled Binary SSH RPC with Dedicated Control Lanes** (`remote_dev.core.rpc_transport`): Reuses persistent SSH connections on macOS, Linux, and native Windows. Both the MCP server and the remote RPC pool allocate **8 regular workers (32 slots)** and **2 reserved control workers (8 slots)** so `job_status`, `job_tail`, `job_stop`, and `job_stdin` always respond immediately even when regular workers are saturated.
 - **No Blind Retries on Uncertain Outcomes**: If a connection drops mid-flight and `remote-dev` cannot confirm whether the remote operation ran, it reports `uncertain` instead of automatically replaying a potentially mutating command.
@@ -73,7 +73,7 @@ Coordinators (like `mindie-coordinator`) and workflow skills live in their own r
 
 ## MCP Transport & Resource URIs
 
-The MCP server supports standard stdio `Content-Length` JSON-RPC framing as well as newline-delimited JSON-RPC. In addition to the 19 tools, it exposes read-only MCP resources:
+The MCP server supports standard stdio `Content-Length` JSON-RPC framing as well as newline-delimited JSON-RPC. In addition to the 18 canonical tools (and 40+ 6-Harness aliases), it exposes read-only MCP resources:
 
 - `remote://endpoints`
 - `remote://endpoint/<endpoint-id>/context/latest`

@@ -21,6 +21,7 @@ from remote_dev.processes import worker_source
 
 
 def load_worker():
+    os.environ.setdefault("REMOTE_DEV_STOP_GRACE_SECONDS", "0.1")
     path = Path(__file__).resolve().parents[1] / "remote_dev" / "processes" / "worker.py"
     spec = importlib.util.spec_from_file_location("remote_dev_process_worker", path)
     module = importlib.util.module_from_spec(spec)
@@ -47,7 +48,7 @@ class ProcessWorkerTests(unittest.TestCase):
                 status = self.call(identifier, "stop", force=True)
                 if status.get("quiet"):
                     break
-                time.sleep(0.02)
+                time.sleep(0.01)
         self.temp.cleanup()
 
     def call(self, identifier, action, **args):
@@ -67,11 +68,11 @@ class ProcessWorkerTests(unittest.TestCase):
 
     def until(self, identifier, condition):
         status = None
-        for _ in range(100):
+        for _ in range(300):
             status = self.call(identifier, "status")
             if condition(status):
                 return status
-            time.sleep(0.05)
+            time.sleep(0.01)
         self.fail("process worker did not reach the expected bounded state: " + json.dumps(status))
 
     def test_waiting_gate_is_idempotent_and_command_does_not_run_early(self):
@@ -128,8 +129,8 @@ class ProcessWorkerTests(unittest.TestCase):
         self.assertEqual(before["receipt"]["pid"], after["receipt"]["pid"])
 
     def test_explicit_prepared_deadline_expires_without_running_command(self):
-        identifier, prepared = self.prepare("p", "touch should-not-run", prepared_timeout_seconds=1)
-        self.assertEqual(prepared["receipt"]["prepared_timeout_seconds"], 1)
+        identifier, prepared = self.prepare("p", "touch should-not-run", prepared_timeout_seconds=0.2)
+        self.assertEqual(prepared["receipt"]["prepared_timeout_seconds"], 0.2)
         result = self.until(identifier, lambda row: row["quiet"])
         self.assertEqual(result["state"], "cancelled")
         self.assertEqual(result["result"]["reason"], "start gate not opened")
@@ -139,7 +140,7 @@ class ProcessWorkerTests(unittest.TestCase):
 
     def test_prepared_wait_does_not_consume_command_runtime_timeout(self):
         identifier, _ = self.prepare("q", "printf ran > completed", timeout=0.2, prepared_timeout_seconds=2)
-        time.sleep(0.4)
+        time.sleep(0.3)
         self.assertEqual(self.call(identifier, "status")["state"], "prepared")
         self.go(identifier)
         self.assertEqual(self.until(identifier, lambda row: row["quiet"])["state"], "succeeded")
@@ -170,12 +171,12 @@ class ProcessWorkerTests(unittest.TestCase):
         self.assertFalse(status["quiet"])
 
     def test_timeout_is_not_reported_as_a_success_or_manual_cancel(self):
-        identifier, _ = self.prepare("a", "sleep 60", timeout=1)
+        identifier, _ = self.prepare("a", "sleep 60", timeout=0.2)
         self.go(identifier)
         self.assertEqual(self.until(identifier, lambda row: row["quiet"])["state"], "timeout")
 
     def test_background_descendant_cannot_outlive_the_bounded_execution_unobserved(self):
-        identifier, _ = self.prepare("a", "sleep 60 &", timeout=1)
+        identifier, _ = self.prepare("a", "sleep 60 &", timeout=0.2)
         self.go(identifier)
         observed = self.until(identifier, lambda row: row["quiet"])
         self.assertEqual(observed["state"], "timeout")
@@ -386,6 +387,35 @@ class ProcessWorkerTests(unittest.TestCase):
             if not any(row[name + "_bytes_remaining"] for name in collected):
                 break
         self.assertEqual(collected, dict(stdout='\ufffd' * 9 + '你好', stderr='世界'))
+
+    def test_sigterm_ignored_child_is_killed_after_grace_and_drained(self):
+        from unittest import mock
+
+        code = (
+            "import os, pathlib, signal, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "pathlib.Path('sigterm-ignored.pid').write_text(str(os.getpid())); "
+            "time.sleep(60)"
+        )
+        command = shlex.quote(sys.executable) + " -u -c " + shlex.quote(code)
+        with mock.patch.dict(os.environ, {"REMOTE_DEV_STOP_GRACE_SECONDS": "0.1"}):
+            identifier, _ = self.prepare("k", command, timeout=60)
+            self.go(identifier)
+            self.until(identifier, lambda row: (self.root / "sigterm-ignored.pid").exists())
+            child_pid = int((self.root / "sigterm-ignored.pid").read_text())
+            self.assertIsNotNone(self.worker.process_identity(child_pid))
+
+            started = time.monotonic()
+            self.call(identifier, "stop", force=False)
+            terminal = self.until(identifier, lambda row: row["quiet"])
+            elapsed = time.monotonic() - started
+
+        self.assertGreaterEqual(elapsed, 0.08)
+        self.assertLess(elapsed, 2.0)
+        self.assertIsNone(self.worker.process_identity(child_pid))
+        self.assertEqual(terminal["state"], "cancelled")
+        self.assertTrue(terminal["quiet"])
+        self.assertTrue(terminal["result"]["descendants_drained"])
 
 
 

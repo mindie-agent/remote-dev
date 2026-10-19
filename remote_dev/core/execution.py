@@ -1,4 +1,12 @@
-"""Caller-owned execution limits; absence never means a default deadline."""
+"""
+[Role] Caller-supplied execution timeout validation and alias normalization (`execution.py`).
+[Invariants]
+- Absence of `timeout_ms`/`timeout` means no default wall-clock cutoff; when supplied, values must be positive integers and agree across aliases.
+[Timeouts & Locks]
+- Pure validation prior to endpoint resolution or remote dispatch.
+[Side-Effect Policy]
+- Side-effect-free argument validation.
+"""
 from .errors import caller_error
 
 

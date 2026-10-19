@@ -1,3 +1,13 @@
+"""
+[Role] Remote workspace search operations (`remote.glob` and `remote.grep`) (`search_ops.py`).
+[Invariants]
+- Enforces `join_under_root` containment and bounded line/match pagination (`MAX_GREP_MATCHES`, `MAX_LINE_CHARS`).
+- Uses `rg` when available on the remote endpoint and falls back to POSIX `grep -E` with explicit capability/regex translation checks.
+[Timeouts & Locks]
+- Read-only RPC execution bounded by caller `timeout_ms`; subprocess streams in `command_lines` terminate cleanly on early pagination exit.
+[Side-Effect Policy]
+- Pure remote read/search operations; mutates no local or remote files.
+"""
 from __future__ import annotations
 
 from remote_dev.observability import observed_tool
@@ -233,8 +243,12 @@ def command_lines(cmd, max_chars=32768):
             if ended:
                 yield prefix, length > max_chars
                 prefix, length = "", 0
-        code = proc.wait()
-        reader.join()
+        try:
+            code = proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = proc.wait(timeout=5.0)
+        reader.join(timeout=1.0)
         if code not in (0, 1):
             fail("failed", tail.decode("utf-8", "replace"))
     finally:
@@ -244,8 +258,9 @@ def command_lines(cmd, max_chars=32768):
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
-        reader.join()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=5.0)
+        reader.join(timeout=1.0)
         output.close()
         proc.stderr.close()
 

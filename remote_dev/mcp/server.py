@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+[Role] Stdio JSON-RPC 2.0 MCP server supporting both `Content-Length` framed and newline-delimited messages (`mcp/server.py`).
+[Invariants]
+- Isolates protocol stdio via `protocol_streams()` at startup and routes `notifications/cancelled` to active request cancellation events.
+- Separates general tool execution (`max_workers=8`, `capacity=32`) from short job-control calls (`max_workers=2`, `capacity=8`) so polling/stopping a job never queues behind long tool calls.
+[Timeouts & Locks]
+- Protects wire writes with `_OUTPUT_LOCK` and closes all pooled SSH RPC connections in `finally` on server shutdown.
+[Side-Effect Policy]
+- Reads JSON-RPC requests from stdin, dispatches `mcp/tools.py`, and writes JSON-RPC responses to the reserved protocol stdout descriptor.
+"""
 from __future__ import annotations
 
 import json

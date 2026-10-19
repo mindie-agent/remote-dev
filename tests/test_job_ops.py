@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -128,6 +129,91 @@ class RemoteJobControlTests(unittest.TestCase):
                 result = job_ops.remote_job_stop(self.endpoint, job_id=self.job_id, force=True)["result"]
         self.assertEqual(result["outcome"], "failed")
         self.assertEqual(result["status"], "running")
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX SIGTERM/SIGKILL escalation")
+    def test_stop_sigterm_ignored_subprocess_waits_for_sigkill_and_returns_cancelled(self) -> None:
+        import signal
+        import subprocess
+        import sys
+        import threading
+        import time
+
+        self.assertGreaterEqual(job_ops._default_stop_drain_seconds(), 5.0)
+        with mock.patch.dict(os.environ, {"REMOTE_DEV_STOP_GRACE_SECONDS": "0.12", "REMOTE_DEV_STOP_DRAIN_SECONDS": "1.5"}):
+            self.assertAlmostEqual(job_ops._stop_drain_seconds(), 1.5)
+            ready_file = Path(self.temp.name) / "sigterm_ignored.ready"
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib, signal, time; "
+                        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                        f"pathlib.Path({str(ready_file)!r}).write_text('ready'); "
+                        "time.sleep(30)"
+                    ),
+                ]
+            )
+            self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+            deadline = time.monotonic() + 2.0
+            while not ready_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready_file.exists())
+
+            state_lock = threading.Lock()
+            current = _supervisor(
+                state="running",
+                quiet=False,
+                processes=[{"pid": proc.pid}],
+                result=None,
+            )
+
+            def reap_after_grace() -> None:
+                grace = float(os.environ["REMOTE_DEV_STOP_GRACE_SECONDS"])
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+                time.sleep(grace)
+                # Process ignored SIGTERM, so it must still be alive before SIGKILL escalation.
+                still_alive_after_grace = proc.poll() is None
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                proc.wait(timeout=2.0)
+                with state_lock:
+                    current.update(
+                        state="cancelled",
+                        quiet=True,
+                        processes=[],
+                        result={
+                            "state": "cancelled",
+                            "exit_code": proc.returncode,
+                            "descendants_drained": still_alive_after_grace and proc.poll() is not None,
+                        },
+                    )
+
+            def fake_control(_endpoint, _job_id, action, **_params):
+                if action == "stop":
+                    threading.Thread(target=reap_after_grace, daemon=True).start()
+                with state_lock:
+                    return dict(current)
+
+            started = time.monotonic()
+            with mock.patch.object(job_ops, "control", side_effect=fake_control):
+                payload = job_ops.remote_job_stop(self.endpoint, job_id=self.job_id, force=False)
+            elapsed = time.monotonic() - started
+
+        result = payload["result"]
+        self.assertGreaterEqual(elapsed, 0.12)
+        self.assertLess(elapsed, 1.5)
+        self.assertIsNotNone(proc.poll())
+        self.assertEqual(result["outcome"], "cancelled")
+        self.assertEqual(result["status"], "cancelled")
+        self.assertTrue(result["descendants_drained"])
+        self.assertTrue(result["quiet"])
+        self.assertTrue(result["remote_status"]["result"]["descendants_drained"])
 
     def test_other_task_job_is_rejected_before_remote_control(self) -> None:
         original = self.record_path.read_bytes()
@@ -321,6 +407,7 @@ class StartRemoteJobTests(unittest.TestCase):
         self.assertNotIn("Exit code:", payload["result"]["summary"])
 
 
+@unittest.skipUnless(sys.platform == "linux", "exercises the Linux remote process worker")
 class WorkerExchangeAndSubreaperStatusTests(unittest.TestCase):
     def setUp(self) -> None:
         from remote_dev.processes import worker as worker_module

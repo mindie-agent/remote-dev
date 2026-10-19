@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -99,6 +99,88 @@ class RemoteEditTests(unittest.TestCase):
         finally:
             state_store.substrate_root = original_state_root  # type: ignore[assignment]
             file_ops.run_remote_python = original_runner  # type: ignore[assignment]
+
+    def test_call_tool_edit_allows_empty_new_string_across_all_harness_aliases(self) -> None:
+        import json
+        import subprocess
+        from unittest import mock
+        import remote_dev.mcp.tools as mcp_tools
+
+        def local_remote_python(_endpoint, script, payload, **_kwargs):
+            # The client always addresses a POSIX remote; only this transport
+            # fixture maps that workspace onto the current OS's scratch directory.
+            local_payload = {
+                **payload,
+                "root": str(root),
+                "cwd": str(root),
+                "file_path": str(root / PurePosixPath(payload["file_path"]).relative_to("/workspace")),
+            }
+            proc = subprocess.run(
+                [sys.executable, "-I", "-c", script],
+                input=json.dumps(local_payload),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise AssertionError(f"remote script failed: {proc.stderr}\n{proc.stdout}")
+            data = json.loads(proc.stdout.strip().splitlines()[-1])
+            for key in ("path", "resolved_path"):
+                relative = Path(data["file"][key]).relative_to(root)
+                data["file"][key] = str(PurePosixPath("/workspace") / relative.as_posix())
+            return data
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            endpoint_args = {"host": "192.0.2.10", "port": 22, "root": "/workspace", "cwd": "/workspace"}
+            cases = [
+                (
+                    "remote.edit",
+                    lambda p: {"file_path": str(p), "old_string": "delete_me = 1\n", "new_string": ""},
+                ),
+                (
+                    "remote_Edit",
+                    lambda p: {"file_path": str(p), "old_string": "delete_me = 1\n", "new_string": ""},
+                ),
+                (
+                    "remote_StrReplaceFile",
+                    lambda p: {"path": str(p), "old_str": "delete_me = 1\n", "new_str": ""},
+                ),
+                (
+                    "remote_replace_file_content",
+                    lambda p: {
+                        "TargetFile": str(p),
+                        "TargetContent": "delete_me = 1\n",
+                        "ReplacementContent": "",
+                        "StartLine": 1,
+                        "EndLine": 3,
+                    },
+                ),
+            ]
+            with mock.patch.object(state_store, "substrate_root", return_value=root / "state"), mock.patch.object(
+                file_ops, "run_remote_python", side_effect=local_remote_python
+            ):
+                for idx, (tool_name, make_args) in enumerate(cases):
+                    with self.subTest(tool_name=tool_name):
+                        target = root / f"sample_{idx}.py"
+                        target.write_bytes(b"keep_top = 0\ndelete_me = 1\nkeep_bottom = 2\n")
+                        remote_target = PurePosixPath("/workspace") / target.name
+                        res = mcp_tools.call_tool(tool_name, {**endpoint_args, **make_args(remote_target)})
+                        self.assertEqual(res["result"]["outcome"], "success", res)
+                        self.assertEqual(res["result"]["status"], "edited", res)
+                        self.assertEqual(res["result"]["file"]["path"], str(remote_target))
+                        self.assertEqual(target.read_text(encoding="utf-8"), "keep_top = 0\nkeep_bottom = 2\n")
+
+    def test_call_tool_edit_still_rejects_missing_or_non_string_new_string(self) -> None:
+        import remote_dev.mcp.tools as mcp_tools
+
+        endpoint_args = {"host": "192.0.2.10", "port": 22, "file_path": "/tmp/a.py", "old_string": "a"}
+        with self.assertRaisesRegex((KeyError, ValueError), "new_string"):
+            mcp_tools.call_tool("remote.edit", endpoint_args)
+        with self.assertRaisesRegex(ValueError, "new_string"):
+            mcp_tools.call_tool("remote.edit", {**endpoint_args, "new_string": None})
+        with self.assertRaisesRegex(ValueError, "new_string"):
+            mcp_tools.call_tool("remote.edit", {**endpoint_args, "new_string": 123})
 
 
 if __name__ == "__main__":

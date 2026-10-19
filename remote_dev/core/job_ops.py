@@ -1,3 +1,14 @@
+"""
+[Role] Remote background job lifecycle and interactive session orchestration (`job_ops.py`).
+[Invariants]
+- Enforces `STOP_DRAIN_SECONDS >= STOP_GRACE_SECONDS + 3.0` (`max(5.0, grace + 3.0)`) so `remote.job_stop` waits long enough for the remote supervisor's SIGTERM drain + SIGKILL escalation.
+- Persists the local job record before launching the remote job and never replays an uncertain launch or acknowledged `stdin` write.
+- Preserves acknowledged remote execution outcomes when local cursor/log commit fails (`_recording_failure`).
+[Timeouts & Locks]
+- Uses `record_lock(path)` around local cursor and log offset updates (`_save_output`), releasing the lock during long `yield_time_ms > 250` polls so concurrent `stdin` or `stop` calls do not block.
+[Side-Effect Policy]
+- Writes local `<job_id>.json` and `.stdout.log`/`.stderr.log` under `state/endpoints/<id>/jobs/` and drives remote `processes/worker.py` via `processes.control`.
+"""
 from __future__ import annotations
 
 from remote_dev.observability import current_tool, observed_tool
@@ -6,6 +17,7 @@ import re
 import json
 import copy
 from dataclasses import asdict
+import os
 import shlex
 import time
 import uuid
@@ -27,7 +39,26 @@ from remote_dev.core.errors import error_details
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,95}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RESERVED_ENV_PREFIX = "REMOTE_DEV_JOB_"
-STOP_DRAIN_SECONDS = 2.0
+
+
+def _default_stop_drain_seconds() -> float:
+    override = os.environ.get("REMOTE_DEV_STOP_DRAIN_SECONDS")
+    if override is not None:
+        return float(override)
+    grace = float(os.environ.get("REMOTE_DEV_STOP_GRACE_SECONDS", "2.0"))
+    return max(5.0, grace + 3.0)
+
+
+_INITIAL_STOP_DRAIN_SECONDS = _default_stop_drain_seconds()
+STOP_DRAIN_SECONDS = _INITIAL_STOP_DRAIN_SECONDS
+
+
+def _stop_drain_seconds() -> float:
+    if STOP_DRAIN_SECONDS != _INITIAL_STOP_DRAIN_SECONDS:
+        return float(STOP_DRAIN_SECONDS)
+    return _default_stop_drain_seconds()
+
+
 MAX_YIELD_MS = 300000
 MAX_INCREMENTAL_READ_BYTES = 32768
 UNKNOWN_JOB_STATES = frozenset({"unknown", "uncertain", "lost", "lost_outcome"})
@@ -535,7 +566,7 @@ def remote_job_stop(endpoint: Endpoint | None, *, job_id: str, force: bool = Fal
     start = time.monotonic()
     try:
         supervisor = control(endpoint, job_id, "stop", force=force)
-        deadline = time.monotonic() + STOP_DRAIN_SECONDS
+        deadline = time.monotonic() + _stop_drain_seconds()
         while not supervisor.get("quiet") and time.monotonic() < deadline:
             time.sleep(0.05)
             supervisor = control(endpoint, job_id, "status")
@@ -560,6 +591,7 @@ def remote_job_stop(endpoint: Endpoint | None, *, job_id: str, force: bool = Fal
         outcome, status = "success", state
     else:
         outcome, status = "failed", state
+    descendants_drained = bool((supervisor.get("result") or {}).get("descendants_drained"))
     result = make_result(
         tool="remote.job_stop",
         target=endpoint.to_result_target(),
@@ -568,6 +600,11 @@ def remote_job_stop(endpoint: Endpoint | None, *, job_id: str, force: bool = Fal
         summary=f"Remote job {job_id} {status}.",
         started_at=started,
         duration_ms=_duration_ms(start),
-        extra={"job_id": job_id, "quiet": quiet, "remote_status": supervisor},
+        extra={
+            "job_id": job_id,
+            "quiet": quiet,
+            "descendants_drained": descendants_drained,
+            "remote_status": supervisor,
+        },
     )
     return {"text": f"Remote job {job_id}: {status}\n", "result": result}

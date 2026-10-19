@@ -1,4 +1,15 @@
-"""One SSH stream, many hash-checked files, bounded memory on either side."""
+"""One SSH stream, many hash-checked files, bounded memory on either side.
+
+[Role] Remote binary framing worker for chunked upload/download/stat streaming (`artifact_worker.py`).
+[Invariants]
+- Runs over SSH stdio with binary length-prefixed JSON header + raw payload framing (`RDEV1` magic).
+- Verifies end-to-end SHA-256 integrity before committing staged uploads via `os.replace()`.
+- Enforces remote workspace path containment and rejects symlink traversal on every frame.
+[Timeouts & Locks]
+- Operates synchronously on length-prefixed stdio frames bounded by the caller's `ArtifactTransport` deadline.
+[Side-Effect Policy]
+- `stat` and `download` are read-only; `upload` writes exclusively to `<target>.remote-dev.part.<pid>.<seq>` and atomically replaces the target only after SHA-256 verification succeeds (unlinking the `.part` file on any failure).
+"""
 from __future__ import annotations
 
 import contextlib
@@ -34,12 +45,8 @@ def checked_path(root, raw, *, writing=False):
     resolved = path.resolve()
     if resolved != root and root not in resolved.parents:
         raise ValueError("artifact path escapes root")
-    # Do not write through even an in-root symlink or change its referent.
-    probe = path
-    while probe != root and probe != probe.parent:
-        if probe.is_symlink():
-            raise ValueError("artifact symlinks are not allowed")
-        probe = probe.parent
+    if path.is_symlink():
+        raise ValueError("artifact symlinks are not allowed")
     if path.exists() and not stat.S_ISREG(path.stat().st_mode):
         raise ValueError("artifact is not a regular file")
     if writing:

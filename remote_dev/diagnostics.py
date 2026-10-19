@@ -1,4 +1,13 @@
-"""Explicit connection diagnostics; never replay a caller's business command."""
+"""
+[Role] Read-only two-stage SSH connection diagnostic (`diagnose_ssh`) and HTTP connection sanitizer (`diagnostics.py`).
+[Invariants]
+- Never replays a caller's business command; runs only the fixed read-only `CONNECTION_PROBE_SCRIPT` under `python3 -I`.
+- Isolates Stage 1 (shared ControlMaster mux, `60%` budget) and Stage 2 (independent connection `ssh_mux=False`, `>= 40%` / `2000ms` floor budget) so a wedged mux socket cannot starve the independent fallback probe.
+[Timeouts & Locks]
+- Enforces `_stage_budgets_ms` per-stage deadlines and strips credentials/query strings from HTTP diagnostic URLs.
+[Side-Effect Policy]
+- Read-only SSH connection probes; zero remote or local file mutations.
+"""
 from __future__ import annotations
 
 import json
@@ -16,7 +25,7 @@ from remote_dev.core.execution import timeout_value
 
 # One fixed read-only request gathers related facts without model imports.
 # This protocol is not a wrapper around an arbitrary caller command.
-CONNECTION_PROBE_SCRIPT = """python3 - <<'REMOTE_DEV_PROBE'
+CONNECTION_PROBE_SCRIPT = """python3 -I - <<'REMOTE_DEV_PROBE'
 import json, os, platform, sys, time
 started = time.perf_counter()
 facts = {"system": platform.system(), "cwd": os.getcwd(), "python": sys.version.split()[0]}
@@ -44,16 +53,33 @@ def ssh_details(endpoint, timeout_ms=None) -> dict:
             "timeout_ms": timeout_ms}
 
 
+def _stage_budgets_ms(endpoint, timeout_ms: int | None) -> tuple[int | None, int | None]:
+    if timeout_ms is None or not _uses_shared_mux(endpoint):
+        return timeout_ms, None
+    stage1 = max(1, int(timeout_ms * 0.6))
+    if timeout_ms >= 4000:
+        stage2_floor = max(2000, timeout_ms - stage1)
+    else:
+        stage2_floor = max(1, timeout_ms - stage1)
+    return stage1, stage2_floor
+
+
 @pinned_endpoint
 def diagnose_ssh(endpoint, *, timeout_ms=None) -> dict:
     timeout_value(timeout_ms)
     deadline = None if timeout_ms is None else time.monotonic() + timeout_ms / 1000
+    stage1_budget, stage2_floor = _stage_budgets_ms(endpoint, timeout_ms)
     probes = []
     for target in (endpoint, replace(endpoint, ssh_mux=False)):
         if probes and (probes[0]["ok"] or not _uses_shared_mux(endpoint)):
             break
-        budget = (timeout_ms if not probes or deadline is None else
-                  math.ceil((deadline - time.monotonic()) * 1000))
+        if not probes:
+            budget = stage1_budget
+        elif deadline is None:
+            budget = None
+        else:
+            remaining = math.ceil((deadline - time.monotonic()) * 1000)
+            budget = max(stage2_floor or 1, remaining)
         if budget is not None and budget <= 0:
             break
         result = run_script(target, CONNECTION_PROBE_SCRIPT, timeout_ms=budget, trace_connection=True)
@@ -73,8 +99,16 @@ def diagnose_ssh(endpoint, *, timeout_ms=None) -> dict:
                        "timings": timings, "facts": payload.get("facts", {}),
                        "stderr": result.stderr[-1000:]})
     recovered = len(probes) == 2 and probes[1]["ok"]
+    status = "independent_connection_works" if recovered else "ok" if probes[0]["ok"] else "unavailable"
+    summary = (
+        "SSH succeeded only after bypassing ControlMaster."
+        if recovered
+        else "SSH connection probe succeeded."
+        if probes[0]["ok"]
+        else "SSH connection probe failed."
+    )
     return {"probes": probes, "business_command_replayed": False,
-            "status": "independent_connection_works" if recovered else "ok" if probes[0]["ok"] else "unavailable",
+            "status": status, "summary": summary,
             "next": {"ssh_mux": False} if recovered else None}
 
 

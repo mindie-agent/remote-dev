@@ -1,3 +1,13 @@
+"""
+[Role] SSH command builder, ControlMaster policy, attached stream runner, and port-forward transport (`ssh_transport.py`).
+[Invariants]
+- Places all SSH options before `--` and uses `-l <user> -p <port> -- <host>` so user/host values cannot be parsed as OpenSSH flags.
+- Refuses shared `ControlMaster` multiplexing on attached streams (`run_stream`) and `-N -L` port forwards (`open_local_forward`), because OpenSSH mux silently exits `rc=0` while tearing down tunnels.
+[Timeouts & Locks]
+- Enforces caller `timeout_ms` both remotely (`timeout --preserve-status`) and locally (`STREAM_SELECT_SLICE_SECONDS = 0.1` + `OwnedProcess.stop()`).
+[Side-Effect Policy]
+- Lazily prepares `~/.ssh/remote-dev-mux` (`0o700`) once per process when multiplexing is active; spawns local SSH processes via `OwnedProcess`.
+"""
 from __future__ import annotations
 
 import codecs
@@ -999,7 +1009,12 @@ def _read_attached(
                 # grandchildren can close stdout/stderr while the child still
                 # has work left.
                 if proc.poll() is not None:
-                    returncode = proc.wait()
+                    try:
+                        returncode = proc.wait(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        with contextlib.suppress(OSError):
+                            proc.kill()
+                        returncode = proc.wait(timeout=5.0)
                     return RemoteCompleted(
                         returncode,
                         captured_stdout() if capture else "",
@@ -1082,7 +1097,12 @@ def _read_attached(
                 )
                 open_fds.discard(fd)
                 close_channel(channel)
-            returncode = proc.wait()
+            try:
+                returncode = proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                returncode = proc.wait(timeout=5.0)
             return RemoteCompleted(
                 returncode,
                 captured_stdout() if capture else "",

@@ -1,7 +1,12 @@
-"""Resolve an explicit Docker coordinate without preparing its environment.
-
-Names are fresh selections; full IDs are immutable coordinates. No name cache,
-daemon, automatic repair or retry of a submitted operation belongs here.
+"""
+[Role] Docker container selector validation and full-ID pinning (`container_endpoint.py`).
+[Invariants]
+- Resolves a container name once at operation entry (`pin_container_endpoint`) to a 64-hex-char immutable container ID (`FULL_CONTAINER_ID`), refusing stopped containers or shell metacharacters.
+- Never falls back to a container name if a previously pinned container ID disappears.
+[Timeouts & Locks]
+- Honours caller `timeout_ms` during the `docker inspect` RPC lookup.
+[Side-Effect Policy]
+- Read-only `docker inspect` on the remote host; never starts, restarts, or mutates containers.
 """
 from __future__ import annotations
 

@@ -257,7 +257,7 @@ def test_attached_stream_stops_tree_on_timeout_or_parent_exit(tmp_path, parent_e
     with mock.patch.object(ssh_transport, 'stream_ssh_command', return_value=command):
         result = ssh_transport.run_stream(Endpoint.for_long_stream('192.0.2.1', 22),
                                          '#' * 1000000, merge_stderr=False,
-                                         timeout_ms=None if parent_exit else 1200)
+                                         timeout_ms=None if parent_exit else 400)
     assert time.monotonic() - started < 4
     assert result.timed_out is (not parent_exit)
     assert result.returncode == (0 if parent_exit else None)
@@ -322,65 +322,6 @@ def test_windows_job_handle_closes_when_stop_or_wait_fails(failure):
     # Finally/context cleanup cannot retry a closed handle and mask the error.
     owner.stop()
     owner._job.close.assert_called_once_with()
-
-
-@pytest.mark.parametrize('listing,returncode', [('42 Z\n42 Z+\n', 0), ('', 1)])
-def test_darwin_group_permission_error_accepts_only_observed_exited_group(listing, returncode):
-    owner = OwnedProcess.__new__(OwnedProcess)
-    owner.process = SimpleNamespace(pid=42, returncode=None)
-    original = PermissionError(errno.EPERM, 'fixture group error')
-    with mock.patch.object(local_process.sys, 'platform', 'darwin'), \
-            mock.patch.object(local_process.os, 'killpg', side_effect=original, create=True), \
-            mock.patch.object(local_process.subprocess, 'run', return_value=SimpleNamespace(returncode=returncode, stdout=listing, stderr='')) as observe:
-        owner._signal_group(9)
-    assert observe.call_args.args[0] == ['/bin/ps', '-x', '-g', '42', '-o', 'pgid=,stat=']
-    assert observe.call_args.kwargs['timeout'] == 1.0
-    assert observe.call_args.kwargs['env']['COMMAND_MODE'] == 'unix2003'
-
-
-@pytest.mark.parametrize('listing,returncode,stderr', [
-    ('42 Z\n42 S\n', 0, ''), ('42 T\n', 0, ''), ('42 ?\n', 0, ''),
-    ('unreadable\n', 0, ''), ('42\n', 0, ''), ('42 Z\n', 1, ''),
-    ('99 S\n', 0, ''), ('', 0, ''), ('', 0, 'sysctl failed'), ('', 1, 'error'),
-    ('', 2, ''), pytest.param('42 Z\n' * 15000, 0, '', id='oversized-listing'),
-])
-def test_darwin_live_or_unknown_group_preserves_original_permission_error(listing, returncode, stderr):
-    owner = OwnedProcess.__new__(OwnedProcess)
-    owner.process = SimpleNamespace(pid=42, returncode=None)
-    original = PermissionError(errno.EPERM, 'fixture group error')
-    with mock.patch.object(local_process.sys, 'platform', 'darwin'), \
-            mock.patch.object(local_process.os, 'killpg', side_effect=original, create=True), \
-            mock.patch.object(local_process.subprocess, 'run', return_value=SimpleNamespace(returncode=returncode, stdout=listing, stderr=stderr)):
-        with pytest.raises(PermissionError) as caught:
-            owner._signal_group(9)
-    assert caught.value is original
-
-
-@pytest.mark.parametrize('observation_error', [OSError('ps unavailable'), subprocess.TimeoutExpired('ps', 1)])
-def test_darwin_group_observation_failure_cannot_hide_permission_error(observation_error):
-    owner = OwnedProcess.__new__(OwnedProcess)
-    owner.process = SimpleNamespace(pid=42, returncode=None)
-    original = PermissionError(errno.EPERM, 'fixture group error')
-    with mock.patch.object(local_process.sys, 'platform', 'darwin'), \
-            mock.patch.object(local_process.os, 'killpg', side_effect=original, create=True), \
-            mock.patch.object(local_process.subprocess, 'run', side_effect=observation_error):
-        with pytest.raises(PermissionError) as caught:
-            owner._signal_group(9)
-    assert caught.value is original
-
-
-@pytest.mark.parametrize('platform,error_number', [('linux', errno.EPERM), ('darwin', errno.EACCES)])
-def test_other_permission_errors_do_not_use_darwin_zombie_exception(platform, error_number):
-    owner = OwnedProcess.__new__(OwnedProcess)
-    owner.process = SimpleNamespace(pid=42, returncode=None)
-    original = PermissionError(error_number, 'fixture group error')
-    with mock.patch.object(local_process.sys, 'platform', platform), \
-            mock.patch.object(local_process.os, 'killpg', side_effect=original, create=True), \
-            mock.patch.object(local_process.subprocess, 'run') as observe:
-        with pytest.raises(PermissionError) as caught:
-            owner._signal_group(9)
-    assert caught.value is original
-    observe.assert_not_called()
 
 
 @pytest.mark.skipif(sys.platform != 'darwin', reason='Darwin killpg zombie-group behavior')

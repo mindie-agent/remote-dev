@@ -1,3 +1,13 @@
+"""
+[Role] Remote artifact manifest generation and hash-verified pull/push orchestration (`artifact_ops.py`).
+[Invariants]
+- Rejects symlinks and path traversal (`..` or symlink parents escaping `local_dir` or `endpoint.root`) before creating directories or transferring bytes.
+- Skips hash-identical files during `remote_artifact_pull` and refuses to overwrite differing local files unless `overwrite=True`.
+[Timeouts & Locks]
+- Serializes transfers per endpoint via `@serialize_mutation` and forwards `timeout_ms` to `ArtifactStream`.
+[Side-Effect Policy]
+- Records manifests under `state/endpoints/<id>/artifacts/<artifact_id>/manifest.json` (never polluting the user's `local_dir` with tool metadata).
+"""
 from __future__ import annotations
 
 from remote_dev.observability import observed_tool

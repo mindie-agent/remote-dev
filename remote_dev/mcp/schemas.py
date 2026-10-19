@@ -1,3 +1,13 @@
+"""
+[Role] JSON Schema definitions and 6-Harness tool/parameter alias tables (`mcp/schemas.py`).
+[Invariants]
+- Defines `TOOL_SCHEMAS` for all 18 canonical `remote.*` tools, `ALIASES` (portable `remote_*` wire names), `HARNESS_TOOL_ALIASES` (40 native tool habits across 6 Harnesses), and `PARAM_ALIASES`.
+- Keeps aliasable required parameters enforced in `mcp/tools.py` so provider-side JSON Schema validators never reject valid alias-only calls.
+[Timeouts & Locks]
+- Pure in-memory schema and argument normalization (`normalize_arguments`).
+[Side-Effect Policy]
+- Side-effect-free dictionary transformation.
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -303,6 +313,38 @@ HARNESS_TOOL_ALIASES: dict[str, str] = {
     "remote_grep_search": "remote.grep",
     "remote.list_dir": "remote.ls",
     "remote_list_dir": "remote.ls",
+    "remote.Read": "remote.read",
+    "remote_Read": "remote.read",
+    "remote.ReadFile": "remote.read",
+    "remote_ReadFile": "remote.read",
+    "remote.Write": "remote.write",
+    "remote_Write": "remote.write",
+    "remote.WriteFile": "remote.write",
+    "remote_WriteFile": "remote.write",
+    "remote.Edit": "remote.edit",
+    "remote_Edit": "remote.edit",
+    "remote.StrReplaceFile": "remote.edit",
+    "remote_StrReplaceFile": "remote.edit",
+    "remote.MultiEdit": "remote.multi_edit",
+    "remote_MultiEdit": "remote.multi_edit",
+    "remote.Bash": "remote.bash",
+    "remote_Bash": "remote.bash",
+    "remote.Shell": "remote.bash",
+    "remote_Shell": "remote.bash",
+    "remote.Glob": "remote.glob",
+    "remote_Glob": "remote.glob",
+    "remote.Grep": "remote.grep",
+    "remote_Grep": "remote.grep",
+    "remote.LS": "remote.ls",
+    "remote_LS": "remote.ls",
+    "remote.BashOutput": "remote.job_status",
+    "remote_BashOutput": "remote.job_status",
+    "remote.TaskOutput": "remote.job_status",
+    "remote_TaskOutput": "remote.job_status",
+    "remote.KillShell": "remote.job_stop",
+    "remote_KillShell": "remote.job_stop",
+    "remote.TaskStop": "remote.job_stop",
+    "remote_TaskStop": "remote.job_stop",
 }
 
 # Thin client-native parameter aliases folded into the canonical fields by

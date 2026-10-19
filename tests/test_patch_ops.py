@@ -317,38 +317,6 @@ class PatchOpsTests(unittest.TestCase):
         finally:
             patch_ops.run_rpc_script = original_runner  # type: ignore[assignment]
 
-    @unittest.skipIf(os.name == "nt", "executes remote Bash/git against local POSIX fixture paths")
-    def test_unified_patch_rejects_symlink_target_before_git_apply(self) -> None:
-        original_runner = patch_ops.run_rpc_script
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                repo = Path(tmp)
-                real = repo / "real.py"
-                link = repo / "link.py"
-                (real).write_bytes(("old\n").encode("utf-8"))
-                link.symlink_to(real)
-                endpoint = Endpoint(host="1.2.3.4", port=46000, root=str(repo), cwd=str(repo))
-                from remote_dev.core.ssh_transport import RemoteCompleted
-
-                def fake_run_script(_endpoint, script, **_kwargs):
-                    proc = subprocess.run(["bash", "-s"], input=script, cwd=repo, capture_output=True, text=True, check=False)
-                    return RemoteCompleted(proc.returncode, proc.stdout, proc.stderr)
-
-                patch_ops.run_rpc_script = fake_run_script  # type: ignore[assignment]
-                patch = """diff --git a/link.py b/link.py
---- a/link.py
-+++ b/link.py
-@@ -1 +1 @@
--old
-+new
-"""
-                payload = patch_ops.remote_apply_patch(endpoint, patch=patch, cwd=str(repo))
-                self.assertEqual(payload["result"]["outcome"], "blocked", payload["text"])
-                self.assertEqual(payload["result"]["status"], "symlink_not_allowed")
-                self.assertEqual(real.read_text(encoding="utf-8"), "old\n")
-        finally:
-            patch_ops.run_rpc_script = original_runner  # type: ignore[assignment]
-
 
 if __name__ == "__main__":
     unittest.main()

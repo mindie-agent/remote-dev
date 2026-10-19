@@ -1,3 +1,13 @@
+"""
+[Role] Unified CLI entry point (`remote-dev <tool>`) for all 18 remote development tools (`cli.py`).
+[Invariants]
+- Shares the exact same `TOOL_SCHEMAS`, `normalize_arguments`, and `mcp.tools.call_tool` execution path as the MCP server.
+- Emits deterministic UTF-8 `remote-dev.result.v1` JSON to stdout and exits `0` on `success`/`cancelled` or `1` on failure.
+[Timeouts & Locks]
+- Passes `--timeout-ms` and `--connect-timeout-ms` directly to the canonical tool dispatcher.
+[Side-Effect Policy]
+- Parses CLI flags / `--input-json` and delegates execution to `mcp.tools.call_tool`.
+"""
 from __future__ import annotations
 
 import argparse

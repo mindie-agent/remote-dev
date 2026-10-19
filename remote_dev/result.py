@@ -1,3 +1,13 @@
+"""
+[Role] Canonical `remote-dev.result.v1` envelope builder and failure text formatter (`result.py`).
+[Invariants]
+- Every tool response conforms to `RESULT_SCHEMA_VERSION = "remote-dev.result.v1"` with explicit `outcome` (`success`, `needs_input`, `blocked`, `failed`, `timeout`, `cancelled`).
+- `recording_failure` preserves `execution_outcome` and `operation_completed` when a remote operation succeeded but local receipt recording failed.
+[Timeouts & Locks]
+- Pure in-memory formatting bounded by `MAX_FAILURE_FIELD_CHARS = 4000` and `MAX_FAILURE_TEXT_CHARS = 8000`.
+[Side-Effect Policy]
+- Side-effect-free dictionary and string construction.
+"""
 from __future__ import annotations
 
 import json

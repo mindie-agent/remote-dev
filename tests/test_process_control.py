@@ -37,7 +37,7 @@ class ProcessControlClientTests(unittest.TestCase):
             payload = control(self.endpoint, "job-abc123", "prepare",
                               spec={"command": "true", "cwd": "/srv/app", "env": {}, "timeout_seconds": 10})
         self.assertEqual(payload, response)
-        self.assertIsNone(execute.call_args.kwargs["timeout_ms"])
+        self.assertEqual(execute.call_args.kwargs["timeout_ms"], 30000)
         endpoint, kind, source, body = execute.call_args.args
         self.assertIs(endpoint, self.endpoint)
         self.assertEqual(kind, "control")
@@ -45,6 +45,13 @@ class ProcessControlClientTests(unittest.TestCase):
         self.assertEqual(body["action"], "prepare")
         self.assertEqual(body["root"], "/srv/app")
         self.assertIn("PR_SET_CHILD_SUBREAPER", source)
+
+    def test_observation_budget_does_not_bound_durable_job_lifetime(self) -> None:
+        spec = {"command": "train", "cwd": "/srv/app", "env": {}, "timeout_seconds": None}
+        with mock.patch.object(control_mod, "rpc_request", return_value={"state": "running"}) as execute:
+            control(self.endpoint, "job-long-lived", "launch", spec=spec, yield_time_ms=120000)
+        self.assertEqual(execute.call_args.kwargs["timeout_ms"], 150000)
+        self.assertIsNone(execute.call_args.args[3]["spec"]["timeout_seconds"])
 
     def test_control_accepts_an_ordinary_host_port_mapping(self) -> None:
         with mock.patch.object(control_mod, "rpc_request", return_value={"state": "absent", "quiet": True}) as execute:

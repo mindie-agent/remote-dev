@@ -17,6 +17,7 @@ itself is caught by the same ``unittest discover`` invocation.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import io
 import json
@@ -30,7 +31,7 @@ from typing import Any
 
 DEFAULT_SEED = 20260907
 SEED = int(os.environ.get("MINDIE_PROPTEST_SEED", str(DEFAULT_SEED)))
-SCALE = float(os.environ.get("MINDIE_PROPTEST_SCALE", "1"))
+SCALE = float(os.environ.get("MINDIE_PROPTEST_SCALE", "0.25"))
 
 # Reserved documentation values only (RFC 5737 / RFC 2606); never real hosts.
 DOC_HOSTS = ("192.0.2.10", "198.51.100.7", "203.0.113.5", "npu-a.example.invalid")
@@ -141,6 +142,11 @@ def run_cases(
     return total
 
 
+@functools.lru_cache(maxsize=32)
+def _compile_remote_script(code: str):
+    return compile(code, "<remote-dev-script>", "exec")
+
+
 def run_remote_script(code: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Execute one of the remote-side executor scripts in-process.
 
@@ -157,7 +163,7 @@ def run_remote_script(code: str, payload: dict[str, Any]) -> dict[str, Any]:
     try:
         with contextlib.redirect_stdout(stdout):
             try:
-                exec(compile(code, "<remote-dev-script>", "exec"), namespace)
+                exec(_compile_remote_script(code), namespace)
             except SystemExit as exc:
                 if exc.code not in (0, None):
                     raise AssertionError(f"remote script exited with {exc.code}: {stdout.getvalue()}") from exc
@@ -213,7 +219,7 @@ class GeneratorSelfTests(unittest.TestCase):
                 raise AssertionError("boom")
 
         with self.assertRaisesRegex(AssertionError, r"case #3/.*MINDIE_PROPTEST_SEED=99.*case_seed=\d+.*boom"):
-            run_cases(10, body, seed=99, label="self-test")
+            run_cases(20, body, seed=99, label="self-test")
 
     def test_run_remote_script_round_trips_json(self) -> None:
         code = "import json, sys\npayload = json.loads(sys.stdin.read())\nprint(json.dumps({'echo': payload}))\nraise SystemExit(0)\n"

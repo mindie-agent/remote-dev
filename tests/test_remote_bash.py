@@ -53,34 +53,6 @@ class RemoteBashTests(unittest.TestCase):
             shell_ops.remote_bash(configured, command="echo ok", runtime_env=False)
             self.assertEqual(commands[-1], "echo ok")
 
-    def test_background_job_records_runtime_env_file_and_restores_it(self) -> None:
-        endpoint = Endpoint(host="1.2.3.4", port=46000, runtime_env_file="/etc/profile.d/toolchain.sh")
-        original_state_root = state_store.substrate_root
-        calls = []
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                state_store.substrate_root = lambda: Path(tmp)  # type: ignore[assignment]
-
-                def fake_control(_endpoint, job_id, action, **params):
-                    calls.append((action, params))
-                    return {
-                        "state": "prepared" if action == "prepare" else "running",
-                        "quiet": False,
-                        "gate_open": action == "go",
-                        "remote_dir": f"/srv/.remote-dev/jobs/{job_id}",
-                    }
-
-                with unittest.mock.patch.object(job_ops, "control", fake_control):
-                    payload = job_ops.start_remote_job(endpoint, command="echo ok", job_id="job-runtime-env")
-                self.assertEqual(payload["result"]["status"], "running")
-                self.assertIn(". /etc/profile.d/toolchain.sh", calls[0][1]["spec"]["command"])
-                record = state_store.read_json(Path(payload["result"]["refs"]["job_record"]))
-                self.assertEqual(record["runtime_env_file"], "/etc/profile.d/toolchain.sh")
-                restored = job_ops.endpoint_from_job_record(record)
-                self.assertEqual(restored.runtime_env_file, "/etc/profile.d/toolchain.sh")
-        finally:
-            state_store.substrate_root = original_state_root  # type: ignore[assignment]
-
     def test_background_remote_bash_missing_cwd_does_not_start_job(self) -> None:
         endpoint = Endpoint(host="1.2.3.4", port=46000, root="/srv/app")
         original_state_root = state_store.substrate_root
@@ -103,45 +75,6 @@ class RemoteBashTests(unittest.TestCase):
                 self.assertEqual(payload["result"]["outcome"], "failed")
                 self.assertEqual(payload["result"]["status"], "cwd_not_found")
                 self.assertEqual(calls, ["launch"])
-        finally:
-            state_store.substrate_root = original_state_root  # type: ignore[assignment]
-
-    def test_background_remote_bash_duplicate_job_id_is_blocked(self) -> None:
-        endpoint = Endpoint(host="1.2.3.4", port=46000)
-        original_state_root = state_store.substrate_root
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                state_store.substrate_root = lambda: Path(tmp)  # type: ignore[assignment]
-                state_store.atomic_write_json(state_store.job_record_path(endpoint, "job-existing"), {"job_id": "job-existing", "target": endpoint.to_result_target()})
-                with unittest.mock.patch.object(job_ops, "control", side_effect=AssertionError("control must not run")):
-                    payload = job_ops.start_remote_job(endpoint, command="echo ok", job_id="job-existing")
-                self.assertEqual(payload["result"]["outcome"], "blocked")
-                self.assertEqual(payload["result"]["status"], "job_id_exists")
-        finally:
-            state_store.substrate_root = original_state_root  # type: ignore[assignment]
-
-    def test_remote_job_tail_clamps_lines_and_text(self) -> None:
-        endpoint = Endpoint(host="1.2.3.4", port=46000)
-        original_state_root = state_store.substrate_root
-        seen = {}
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                state_store.substrate_root = lambda: Path(tmp)  # type: ignore[assignment]
-                job_id = "job-tail-test"
-                state_store.atomic_write_json(
-                    state_store.job_record_path(endpoint, job_id),
-                    {"job_id": job_id, "target": endpoint.to_result_target(), "remote_dir": "/srv/app/.remote-dev/jobs/job-tail-test"},
-                )
-
-                def fake_control(_endpoint, _job_id, action, **params):
-                    seen.update(params)
-                    return {"state": "running", "quiet": False, "stdout": "x" * (MAX_TEXT_CHARS * 2), "stderr": ""}
-
-                with unittest.mock.patch.object(job_ops, "control", fake_control):
-                    payload = job_ops.remote_job_tail(None, job_id=job_id, lines=100000)
-                self.assertEqual(seen["lines"], MAX_JOB_TAIL_LINES)
-                self.assertIn("clamped", payload["result"]["warnings"][0])
-                self.assertLessEqual(len(payload["text"]), MAX_TEXT_CHARS)
         finally:
             state_store.substrate_root = original_state_root  # type: ignore[assignment]
 

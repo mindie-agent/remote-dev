@@ -1,3 +1,13 @@
+"""
+[Role] MCP tool dispatcher, 6-Harness tool/parameter alias router, and `remote://` resource reader (`mcp/tools.py`).
+[Invariants]
+- Exposes 18 canonical `remote.*` tools (`remote_read`..`remote_probe`) and routes 40 native Harness tool aliases (Claude Code, Codex, Kimi, Cursor, Antigravity, DSH) via `canonical_name` and `normalize_arguments`.
+- Validates required fields and `execution_timeout` before endpoint resolution or any external side effect.
+[Timeouts & Locks]
+- Forwards validated `timeout_ms` to all underlying `core.*_ops` implementations.
+[Side-Effect Policy]
+- Dispatches tool calls to `core.*_ops` and serves read-only `remote://` state resources.
+"""
 from __future__ import annotations
 
 import json
@@ -195,10 +205,28 @@ def read_resource(uri: str) -> dict[str, Any]:
 
 
 def canonical_name(name: str) -> str:
-    return ALIASES.get(name, HARNESS_TOOL_ALIASES.get(name, name))
+    if name in ALIASES:
+        return ALIASES[name]
+    if name in HARNESS_TOOL_ALIASES:
+        return HARNESS_TOOL_ALIASES[name]
+    low = name.lower()
+    if low in ALIASES:
+        return ALIASES[low]
+    if low in HARNESS_TOOL_ALIASES:
+        return HARNESS_TOOL_ALIASES[low]
+    import re
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()
+    return ALIASES.get(snake, HARNESS_TOOL_ALIASES.get(snake, name))
 
 
-def _require(args: dict[str, Any], key: str, tool: str, alias_hint: str = "") -> Any:
+def _require(
+    args: dict[str, Any],
+    key: str,
+    tool: str,
+    alias_hint: str = "",
+    *,
+    allow_empty: bool = False,
+) -> Any:
     """Server-side required-field check.
 
     Fields with client-native aliases stay out of the wire schema's
@@ -207,7 +235,15 @@ def _require(args: dict[str, Any], key: str, tool: str, alias_hint: str = "") ->
     instead, with an actionable message.
     """
     value = args.get(key)
-    if value is None or (isinstance(value, str) and not value):
+    if key not in args or value is None:
+        hint = f" (alias: {alias_hint})" if alias_hint else ""
+        raise caller_error(f"{tool} requires {key}{hint}")
+    if allow_empty:
+        if not isinstance(value, str):
+            hint = f" (alias: {alias_hint})" if alias_hint else ""
+            raise caller_error(f"{tool} requires {key} to be a string{hint}")
+        return value
+    if isinstance(value, str) and not value:
         hint = f" (alias: {alias_hint})" if alias_hint else ""
         raise caller_error(f"{tool} requires {key}{hint}")
     return value
@@ -288,7 +324,7 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             endpoint,
             file_path=str(_require(args, "file_path", name, "path")),
             old_string=str(_require(args, "old_string", name)),
-            new_string=str(_require(args, "new_string", name)),
+            new_string=_require(args, "new_string", name, allow_empty=True),
             replace_all=bool(args.get("replace_all", False)),
             start_line=int(args["start_line"]) if args.get("start_line") is not None else None,
             end_line=int(args["end_line"]) if args.get("end_line") is not None else None,

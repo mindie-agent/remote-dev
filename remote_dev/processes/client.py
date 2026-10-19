@@ -1,10 +1,13 @@
-"""Client boundary for generic remote process supervision.
-
-``remote_dev.processes.control(endpoint, job_id, action, **parameters)`` is
-the package contract. Coordinator and ordinary background jobs share this
-path. The Linux worker is shipped once per pooled SSH stdio connection;
-subsequent requests carry JSON payloads and a code digest. The local client does
-not invoke Bash or PowerShell to quote that payload.
+"""
+[Role] Client boundary for remote background process supervision (`processes/client.py`).
+[Invariants]
+- Ships `processes/worker.py` over the pooled SSH JSON-RPC channel (`rpc_transport.request`) keyed by SHA-256 code digest (`lru_cache` loaded).
+- Validates that every supervisor reply is a JSON object containing an explicit `state` field.
+[Timeouts & Locks]
+- Control RPCs have a 30s connection/control budget plus any requested output
+  observation window. Durable job deadlines remain in the supervisor spec.
+[Side-Effect Policy]
+- Dispatches process-control RPCs to the remote endpoint's `.remote-dev/jobs/<job_id>` directory.
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ from remote_dev.core.rpc_transport import request as rpc_request
 
 ACTIONS = frozenset({"prepare", "go", "status", "tail", "stop", "stdin", "launch", "exchange"})
 WORKER_RELATIVE = Path(__file__).with_name("worker.py")
+CONTROL_TIMEOUT_MS = 30000
 
 @lru_cache(maxsize=1)
 def worker_source() -> str:
@@ -64,8 +68,14 @@ def control(endpoint: Endpoint | Mapping[str, Any], job_id: str, action: str, **
     target = _as_endpoint(endpoint)
     request = {"root": target.root, "job_id": job_id, "action": action, **parameters,
                "diagnostics_context": current_context()}
+    # launch/exchange observe output for at most five minutes, independently
+    # of how long the detached job may run after this request returns.
+    observation_ms = (
+        max(0, min(300000, int(parameters.get("yield_time_ms") or 0)))
+        if action in {"launch", "exchange"} else 0
+    )
     data = rpc_request(target, "control", worker_source(), request,
-                       timeout_ms=None)
+                       timeout_ms=CONTROL_TIMEOUT_MS + observation_ms)
     if not isinstance(data, dict):
         raise RemoteExecutionError("process control returned a non-object")
     if "state" not in data:

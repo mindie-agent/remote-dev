@@ -12,11 +12,11 @@ flowchart TB
         Coord["mindie-coordinator / 业务工作流 Skill"]
     end
 
-    subgraph LayerA["Layer A：远端开发工具面（19 个对称工具）"]
+    subgraph LayerA["Layer A：远端开发工具面（18 个核心工具 + 40+ 6-Harness 别名）"]
         FileTools["文件与补丁：read / write / edit / multi_edit / apply_patch"]
         SearchTools["搜索与目录：glob / grep / ls"]
         JobTools["命令与后台作业：bash / job_status / job_tail / job_stop / job_stdin"]
-        SyncTools["产物传输与探测：artifact_pull / artifact_push / probe / context_snapshot"]
+        SyncTools["产物传输与探测：artifact_manifest / artifact_pull / artifact_push / probe / context_snapshot"]
     end
 
     subgraph LayerB["Layer B：共享执行底座（remote_dev.core & processes）"]
@@ -35,7 +35,7 @@ flowchart TB
 
 ## 三层架构是怎么分工的？
 
-### 1. 工具表面层（Layer A：面向 Agent 的 19 个工具）
+### 1. 工具表面层（Layer A：面向 Agent 的 18 个核心工具 + 40+ 6-Harness 别名）
 
 把 Agent 最熟悉的操作一对一暴露为 MCP 工具和 CLI 子命令：
 - **读写与改代码**：`remote.read`、`remote.write`、`remote.edit`、`remote.multi_edit`、`remote.apply_patch`
@@ -46,7 +46,7 @@ flowchart TB
 ### 2. 共享执行底座（Layer B：脏活累活全包揽）
 
 所有工具共享同一套底层通信与安全保护能力：
-- **明确的目标机器解析**（`remote_dev.core.endpoint`）：只认显式传入的 `host` / `port` / `alias` 或自定义插件选择器，绝不瞎猜。
+- **明确的目标机器解析**（`remote_dev.core.endpoint`）：只认显式传入的 `host` / `port` / `alias`、自定义插件选择器或 `endpoints.json` / `~/.mindie-coordinator/endpoints.json` 中的 `default_alias`，绝不从本地工作目录瞎猜。
 - **远端 Docker 容器直通**（`remote_dev.core.container_endpoint`）：当你传入容器名字或短 ID 时，底座会先通过宿主机查出正在运行的**完整 64 位容器 ID** 并将其锁定。后续读写文件、记账、复用连接全都认准这个完整 ID，哪怕外面有人删了重建同名容器，也不会串台。
 - **SSH 二进制连接池与控制通道隔离**（`remote_dev.core.rpc_transport`）：在 Windows、macOS 和 Linux 上复用长连接。MCP Server 和远端 RPC 都专门划分了 **8 个常规工作通道（32 槽位）** 和 **2 个独立控制通道（8 槽位）**——这样即使常规通道全在跑耗时操作，`job_status`、`job_tail`、`job_stop` 依然能走控制通道立刻响应。
 - **网络断开绝不盲目重试**：如果请求发出去后连接突然中断、无法确认远端到底执行了没有，底座会直接返回“结果不确定（`uncertain`）”，绝不偷偷重跑命令。
@@ -73,7 +73,7 @@ flowchart TB
 
 ## MCP 传输协议与资源 URI
 
-MCP Server（`remote-dev server`）同时支持标准的 `Content-Length` JSON-RPC 帧协议和按行分隔的 JSON-RPC 消息。除 19 个工具外，还暴露了只读 MCP 资源供客户端按 URI 订阅查看：
+MCP Server（`remote-dev server`）同时支持标准的 `Content-Length` JSON-RPC 帧协议和按行分隔的 JSON-RPC 消息。除 18 个核心工具（及 40+ 个 6-Harness 别名）外，还暴露了只读 MCP 资源供客户端按 URI 订阅查看：
 
 - `remote://endpoints`：已知远端端点列表
 - `remote://endpoint/<endpoint-id>/context/latest`：端点最新环境快照
