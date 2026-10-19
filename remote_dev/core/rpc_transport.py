@@ -18,6 +18,7 @@ import contextlib
 import itertools
 import hashlib
 import json
+import math
 import queue
 import shlex
 import subprocess
@@ -34,6 +35,8 @@ from .local_process import OwnedProcess
 from mindie_diagnostics import get_recorder, current_context
 from remote_dev.observability import observed_operation, current_tool
 from .container_endpoint import pin_container_endpoint
+
+CONTROL_CANCEL_GRACE_SECONDS = 20.0
 
 
 def _worker_command(source):
@@ -227,7 +230,11 @@ class RpcConnection:
                     cancel_sent = True
                     # Cancellation ends business execution. This bound only
                     # waits for its acknowledgement and never starts a retry.
-                    deadline = time.monotonic() + 5
+                    # The supervisor may need its 15s process-family drain
+                    # before acknowledging cancellation; retain 5s for reply.
+                    deadline = time.monotonic() + (
+                        CONTROL_CANCEL_GRACE_SECONDS if kind == "control" else 5.0
+                    )
                 try:
                     value = waiter.get(timeout=min(0.05, remaining))
                 except queue.Empty:
@@ -409,6 +416,8 @@ def _acquire(endpoint, key, *, deadline=None):
 @observed_operation(lambda endpoint, kind, source, payload, **kwargs: "rpc." + kind, level="DEBUG")
 def request(endpoint, kind, source, payload, *, timeout_ms=None):
     timeout_value(timeout_ms)
+    started = time.monotonic()
+    acquire_deadline = None if timeout_ms is None else started + (timeout_ms / 1000.0)
     # The transport has no working-tree state: each operation carries its own
     # root/cwd, and the worker resolves job paths within that request's root.
     # Share the authenticated SSH channel across roots within one fixed
@@ -418,13 +427,19 @@ def request(endpoint, kind, source, payload, *, timeout_ms=None):
     endpoint = pin_container_endpoint(endpoint, timeout_ms=timeout_ms)
     key = (endpoint.host, endpoint.port, endpoint.user, endpoint.identity_file,
            endpoint.connect_timeout_ms, endpoint.container)
-    started = time.monotonic()
-    acquire_deadline = None if timeout_ms is None else started + (timeout_ms / 1000.0)
     with get_recorder("remote-dev").operation("rpc.pool.acquire", level="DEBUG"):
         entry = _acquire(endpoint, key, deadline=acquire_deadline)
     acquired = time.monotonic()
     try:
-        result = entry.connection.request(kind, source, payload, timeout_ms)
+        remaining_ms = timeout_ms
+        if kind == "control" and acquire_deadline is not None:
+            remaining_ms = math.ceil((acquire_deadline - acquired) * 1000)
+            if remaining_ms <= 0:
+                raise RemoteExecutionError(
+                    "SSH RPC pool acquisition exhausted the control deadline; request was not sent",
+                    category="rpc_timeout", submission_state="not_sent", retryable=True,
+                )
+        result = entry.connection.request(kind, source, payload, remaining_ms)
         if isinstance(result, dict):
             result["transport"]["pool_wait_ms"] = round((acquired-started)*1000)
             with _pool_lock:

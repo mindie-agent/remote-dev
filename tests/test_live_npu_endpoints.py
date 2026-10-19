@@ -19,11 +19,14 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from remote_dev.core import rpc_transport, ssh_transport
 from remote_dev.core.endpoint import Endpoint, resolve_endpoint
 from remote_dev.mcp.tools import call_tool
 
 LIVE_ENABLED = os.environ.get("REMOTE_DEV_LIVE_NPU") == "1"
+pytestmark = pytest.mark.live_npu
 
 LIVE_TARGETS = (
     {

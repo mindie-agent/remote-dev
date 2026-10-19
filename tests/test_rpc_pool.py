@@ -156,3 +156,38 @@ def test_lru_uses_completion_order_when_clock_ticks_are_equal(pool):
         invoke(replace(first, host="third.example"))
         assert entries[second.host].closed
         assert not entries[first.host].closed
+
+
+def test_connection_acquisition_cannot_restart_control_budget(pool):
+    endpoint = Endpoint(host="slow.example", port=22)
+    clock = [10.0]
+    connection = Connection(endpoint)
+    connection.request = mock.Mock(wraps=connection.request)
+
+    def construct(target):
+        clock[0] += 0.075
+        return connection
+
+    pool.side_effect = construct
+    with mock.patch.object(rpc.time, "monotonic", side_effect=lambda: clock[0]):
+        invoke(endpoint, timeout_ms=100)
+    assert connection.request.call_args.args[-1] <= 26
+
+
+def test_expired_acquisition_does_not_submit_or_cancel_an_operation(pool):
+    endpoint = Endpoint(host="slow.example", port=22)
+    clock = [10.0]
+    connection = Connection(endpoint)
+    connection.request = mock.Mock(wraps=connection.request)
+
+    def construct(target):
+        clock[0] += 0.2
+        return connection
+
+    pool.side_effect = construct
+    with mock.patch.object(rpc.time, "monotonic", side_effect=lambda: clock[0]):
+        with pytest.raises(RemoteExecutionError) as caught:
+            invoke(endpoint, timeout_ms=100)
+    assert caught.value.submission_state == "not_sent"
+    connection.request.assert_not_called()
+    assert invoke(endpoint)["host"] == endpoint.host

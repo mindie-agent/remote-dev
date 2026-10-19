@@ -15,6 +15,7 @@ from local_ssh import local_python_ssh
 from remote_dev.core.cancellation import request_context
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core.errors import RemoteExecutionError
+from remote_dev.processes import client as process_client
 
 PYTHON_ECHO = """import json,sys,time
 p=json.load(sys.stdin)
@@ -237,3 +238,15 @@ print(json.dumps({'status':'ok'}))
         self.assertEqual(recovered["state"], "succeeded")
         self.assertEqual(recovered["value"], "after-timeout")
         self.assertEqual(recovered["calls"], 1)
+
+    def test_process_control_bounds_a_hung_handshake_before_job_submission(self):
+        hung_cmd = "python3 -I -u -c 'import time; time.sleep(30)'"
+        started = time.monotonic()
+        with mock.patch.object(rpc_transport, "_worker_command", return_value=hung_cmd), \
+                mock.patch.object(process_client, "CONTROL_TIMEOUT_MS", 100):
+            with self.assertRaises(RemoteExecutionError) as caught:
+                process_client.control(self.endpoint, "job-never-sent", "status")
+        self.assertLess(time.monotonic() - started, 1.2)
+        self.assertEqual(caught.exception.submission_state, "not_sent")
+        self.assertIn("handshake timed out", str(caught.exception))
+        self.assertEqual(self.request({"value": "recovered"})["value"], "recovered")

@@ -64,3 +64,4 @@ allow-direct-references = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
+markers = ["live_npu: live SSH integration tests against real Ascend NPU hosts"]
