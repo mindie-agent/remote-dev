@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remote-dev"
-version = "0.10.0"
+version = "0.10.1"
 description = "Remote development substrate: SSH-backed twins of local agent tools"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "Qi Mao" }]
 dependencies = [
-  "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@7da7f66d119098e0515f8f37bfd5e7cf8cc32fee",
+  "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@1b5a0eeb79d498c39002fc1853271c17e0f26e66",
 ]
 classifiers = [
   "Programming Language :: Python :: 3",
