@@ -664,7 +664,7 @@ class SixHarnessParityTests(unittest.TestCase):
 
     def test_antigravity_and_cursor_read_line_ranges_and_content_offset(self) -> None:
         sample = self.tree / "sample.py"
-        sample.write_text("".join(f"line_{i}\n" for i in range(1, 21)), encoding="utf-8")
+        sample.write_bytes("".join(f"line_{i}\n" for i in range(1, 21)).encode("utf-8"))
 
         # Antigravity StartLine + EndLine (1-indexed inclusive)
         args = normalize_arguments(
@@ -701,20 +701,23 @@ class SixHarnessParityTests(unittest.TestCase):
         self.assertEqual(end_only["file"]["line_start"], 1)
         self.assertEqual(end_only["file"]["line_end"], 3)
 
-        # ContentOffset byte offset
-        byte_offset = len("line_1\nline_2\n".encode("utf-8"))
-        offset_read = run_file_op({
-            "op": "read",
-            "root": str(self.tree),
-            "cwd": str(self.tree),
-            "file_path": str(sample),
-            "content_offset": byte_offset,
-            "limit": 2,
-        })
-        self.assertEqual(offset_read["status"], "partial")
-        self.assertEqual(offset_read["file"]["line_start"], 3)
-        self.assertIn("3 | line_3", offset_read["file"]["content"])
-        self.assertTrue(offset_read["file"]["sha256"])
+        # Byte offsets refer to the remote file's bytes, including its newlines.
+        for newline in (b"\n", b"\r\n"):
+            with self.subTest(newline=newline):
+                sample.write_bytes(b"".join(f"line_{i}".encode() + newline for i in range(1, 21)))
+                byte_offset = len(b"line_1" + newline + b"line_2" + newline)
+                offset_read = run_file_op({
+                    "op": "read",
+                    "root": str(self.tree),
+                    "cwd": str(self.tree),
+                    "file_path": str(sample),
+                    "content_offset": byte_offset,
+                    "limit": 2,
+                })
+                self.assertEqual(offset_read["status"], "partial")
+                self.assertEqual(offset_read["file"]["line_start"], 3)
+                self.assertIn("3 | line_3", offset_read["file"]["content"])
+                self.assertTrue(offset_read["file"]["sha256"])
 
     def test_outline_and_code_item_inspection(self) -> None:
         code_file = self.tree / "module.py"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -107,9 +107,17 @@ class RemoteEditTests(unittest.TestCase):
         import remote_dev.mcp.tools as mcp_tools
 
         def local_remote_python(_endpoint, script, payload, **_kwargs):
+            # The client always addresses a POSIX remote; only this transport
+            # fixture maps that workspace onto the current OS's scratch directory.
+            local_payload = {
+                **payload,
+                "root": str(root),
+                "cwd": str(root),
+                "file_path": str(root / PurePosixPath(payload["file_path"]).relative_to("/workspace")),
+            }
             proc = subprocess.run(
                 [sys.executable, "-I", "-c", script],
-                input=json.dumps(payload),
+                input=json.dumps(local_payload),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -120,7 +128,7 @@ class RemoteEditTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            endpoint_args = {"host": "192.0.2.10", "port": 22, "root": str(root), "cwd": str(root)}
+            endpoint_args = {"host": "192.0.2.10", "port": 22, "root": "/workspace", "cwd": "/workspace"}
             cases = [
                 (
                     "remote.edit",
@@ -151,8 +159,9 @@ class RemoteEditTests(unittest.TestCase):
                 for idx, (tool_name, make_args) in enumerate(cases):
                     with self.subTest(tool_name=tool_name):
                         target = root / f"sample_{idx}.py"
-                        target.write_text("keep_top = 0\ndelete_me = 1\nkeep_bottom = 2\n", encoding="utf-8")
-                        res = mcp_tools.call_tool(tool_name, {**endpoint_args, **make_args(target)})
+                        target.write_bytes(b"keep_top = 0\ndelete_me = 1\nkeep_bottom = 2\n")
+                        remote_target = PurePosixPath("/workspace") / target.name
+                        res = mcp_tools.call_tool(tool_name, {**endpoint_args, **make_args(remote_target)})
                         self.assertEqual(res["result"]["outcome"], "success", res)
                         self.assertEqual(res["result"]["status"], "edited", res)
                         self.assertEqual(target.read_text(encoding="utf-8"), "keep_top = 0\nkeep_bottom = 2\n")

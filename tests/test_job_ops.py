@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -129,6 +130,7 @@ class RemoteJobControlTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "failed")
         self.assertEqual(result["status"], "running")
 
+    @unittest.skipUnless(os.name == "posix", "requires POSIX SIGTERM/SIGKILL escalation")
     def test_stop_sigterm_ignored_subprocess_waits_for_sigkill_and_returns_cancelled(self) -> None:
         import signal
         import subprocess
@@ -405,6 +407,7 @@ class StartRemoteJobTests(unittest.TestCase):
         self.assertNotIn("Exit code:", payload["result"]["summary"])
 
 
+@unittest.skipUnless(sys.platform == "linux", "exercises the Linux remote process worker")
 class WorkerExchangeAndSubreaperStatusTests(unittest.TestCase):
     def setUp(self) -> None:
         from remote_dev.processes import worker as worker_module
