@@ -124,7 +124,11 @@ class RemoteEditTests(unittest.TestCase):
             )
             if proc.returncode != 0:
                 raise AssertionError(f"remote script failed: {proc.stderr}\n{proc.stdout}")
-            return json.loads(proc.stdout.strip().splitlines()[-1])
+            data = json.loads(proc.stdout.strip().splitlines()[-1])
+            for key in ("path", "resolved_path"):
+                relative = Path(data["file"][key]).relative_to(root)
+                data["file"][key] = str(PurePosixPath("/workspace") / relative.as_posix())
+            return data
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -164,6 +168,7 @@ class RemoteEditTests(unittest.TestCase):
                         res = mcp_tools.call_tool(tool_name, {**endpoint_args, **make_args(remote_target)})
                         self.assertEqual(res["result"]["outcome"], "success", res)
                         self.assertEqual(res["result"]["status"], "edited", res)
+                        self.assertEqual(res["result"]["file"]["path"], str(remote_target))
                         self.assertEqual(target.read_text(encoding="utf-8"), "keep_top = 0\nkeep_bottom = 2\n")
 
     def test_call_tool_edit_still_rejects_missing_or_non_string_new_string(self) -> None:
