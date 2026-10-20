@@ -432,6 +432,22 @@ def signal_processes(processes, sig, *, exclude=None):
                 os.kill(process["pid"], sig)
 
 
+def resolve_runtime_root(request, *, absent_is_result):
+    """Resolve the runtime root without creating it.
+
+    A FileNotFoundError is the same authoritative fact the worker already
+    reports for an absent job directory. It may become the explicit absent
+    result only for the caller actions that this worker already treats as
+    observation/stop controls. Every other resolution failure stays visible.
+    """
+    try:
+        return Path(request["root"]).resolve(strict=True)
+    except FileNotFoundError:
+        if absent_is_result:
+            return None
+        raise
+
+
 def cancel_and_drain(request, source):
     status = control_job({**request, "action": "stop"}, source)
     deadline = time.monotonic() + max(5.0, _stop_grace_seconds() + 3.0)
@@ -468,12 +484,18 @@ def control_job(request, source, cancel_event=None):
         return observation
     if action == "exchange":
         reply = {"accepted": True, "written": 0, "written_chars": 0}
-        if request.get("data") or request.get("eof"):
+        has_input = bool(request.get("data") or request.get("eof"))
+        if has_input:
             reply = control_job({**request, "action": "stdin"}, source)
-        root = Path(request["root"]).resolve(strict=True)
         identifier = request["job_id"]
         if not JOB_ID_RE.fullmatch(identifier):
             raise ValueError("invalid job id")
+        # Input-free exchange is an output/quiet observation and may report an
+        # absent root. An exchange carrying data/eof has already gone through
+        # the strict stdin path, so a vanished root stays visible.
+        root = resolve_runtime_root(request, absent_is_result=not has_input)
+        if root is None:
+            return {"state": "absent", "quiet": True}
         directory = root / JOBS_DIRNAME / "jobs" / identifier
         if root not in directory.resolve().parents:
             raise ValueError("job directory escapes the runtime root")
@@ -520,14 +542,19 @@ def control_job(request, source, cancel_event=None):
             reply["cancellation_requested"] = True
         observation = control_job({**request, "action": "tail"}, source)
         return {**reply, **observation}
-    root = Path(request["root"]).resolve(strict=True)
     identifier = request["job_id"]
     if not JOB_ID_RE.fullmatch(identifier):
         raise ValueError("invalid job id")
+    # Observation/stop controls already report an absent job directory as
+    # {state: absent, quiet: true}; an authoritatively absent runtime root is
+    # the same fact and must not require the root to be created. prepare, go,
+    # stdin, and launch keep strict resolution and surface the failure.
+    root = resolve_runtime_root(request, absent_is_result=action in {"status", "stop", "tail"})
+    if root is None:
+        return {"state": "absent", "quiet": True}
     directory = root / JOBS_DIRNAME / "jobs" / identifier
     if root not in directory.resolve().parents:
         raise ValueError("job directory escapes the runtime root")
-    action = request["action"]
     if not directory.exists() and action != "prepare":
         return {"state": "absent", "quiet": True}
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)

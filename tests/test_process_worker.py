@@ -16,6 +16,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from remote_dev.processes import worker_source
 
@@ -421,6 +422,76 @@ class ProcessWorkerTests(unittest.TestCase):
         self.assertTrue(terminal["quiet"])
         self.assertTrue(terminal["result"]["descendants_drained"])
 
+
+
+@unittest.skipIf(sys.platform == "win32", "Linux worker is not a native Windows module")
+class MissingRuntimeRootTests(unittest.TestCase):
+    """A root proven absent is the same absent job directory, nothing more."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.worker = load_worker()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.source = worker_source()
+        self.job_id = "job-0123456789abcdef"
+        self.missing_root = Path(self.temp.name) / "authoritatively-missing-root"
+        self.assertFalse(self.missing_root.exists())
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def call(self, action, root=None, **args):
+        return self.worker.control_job(
+            {"root": str(root or self.missing_root), "job_id": self.job_id, "action": action, **args},
+            self.source,
+        )
+
+    def assert_absent_without_creation(self, action, **args):
+        self.assertEqual(self.call(action, **args), {"state": "absent", "quiet": True})
+        self.assertFalse(self.missing_root.exists())
+
+    def test_observation_and_stop_controls_report_an_absent_root(self):
+        for action, args in (("status", {}), ("stop", {"force": True}), ("tail", {"lines": 3})):
+            with self.subTest(action=action):
+                self.assert_absent_without_creation(action, **args)
+        self.assert_absent_without_creation(
+            "exchange", stdout_offset=0, stderr_offset=0, yield_time_ms=0)
+
+    def test_input_and_lifecycle_actions_stay_strict_and_create_nothing(self):
+        spec = {"cwd": str(self.missing_root), "command": "touch forbidden", "env": {},
+                "timeout_seconds": 10}
+        cases = (
+            ("exchange", {"data": "hello", "stdout_offset": 0, "stderr_offset": 0, "yield_time_ms": 0}),
+            ("exchange", {"eof": True, "stdout_offset": 0, "stderr_offset": 0, "yield_time_ms": 0}),
+            ("stdin", {"data": "", "eof": False}),
+            ("prepare", {"spec": spec}),
+            ("go", {"authorization": {"token": "test"}}),
+            ("launch", {"spec": spec, "authorization": {"token": "test"}, "yield_time_ms": 0}),
+        )
+        for action, args in cases:
+            with self.subTest(action=action):
+                with self.assertRaises(FileNotFoundError):
+                    self.call(action, **args)
+                self.assertFalse(self.missing_root.exists())
+                self.assertFalse((self.missing_root / "forbidden").exists())
+
+    def test_non_file_not_found_resolution_failures_remain_visible(self):
+        blocker = Path(self.temp.name) / "regular-file"
+        blocker.write_text("not a directory")
+        blocked_root = blocker / "child"
+        for action, args in (("status", {}), ("stop", {}), ("tail", {}),
+                             ("exchange", {"yield_time_ms": 0})):
+            with self.subTest(action=action):
+                with self.assertRaises(NotADirectoryError):
+                    self.call(action, root=blocked_root, **args)
+        with mock.patch.object(Path, "resolve", side_effect=PermissionError("permission denied")):
+            for action, args in (("status", {}), ("stop", {}), ("tail", {}),
+                                 ("exchange", {"yield_time_ms": 0})):
+                with self.subTest(action=action, failure="PermissionError"):
+                    with self.assertRaises(PermissionError):
+                        self.call(action, **args)
 
 
 @unittest.skipIf(sys.platform == "win32", "Linux worker is not a native Windows module")
