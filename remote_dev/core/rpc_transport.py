@@ -432,11 +432,11 @@ def request(endpoint, kind, source, payload, *, timeout_ms=None):
     acquired = time.monotonic()
     try:
         remaining_ms = timeout_ms
-        if kind == "control" and acquire_deadline is not None:
+        if acquire_deadline is not None:
             remaining_ms = math.ceil((acquire_deadline - acquired) * 1000)
             if remaining_ms <= 0:
                 raise RemoteExecutionError(
-                    "SSH RPC pool acquisition exhausted the control deadline; request was not sent",
+                    "SSH RPC pool acquisition exhausted the request deadline; request was not sent",
                     category="rpc_timeout", submission_state="not_sent", retryable=True,
                 )
         result = entry.connection.request(kind, source, payload, remaining_ms)

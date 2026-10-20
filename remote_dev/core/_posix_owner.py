@@ -1,8 +1,13 @@
 """Private POSIX argv supervisor; caller pipe EOF ends the owned group.
 
-Run as an isolated interpreter, never imported into a threaded caller. The
-guardian is forked here before the target starts and stays in the same group
-after the target exits. Detached sessions deliberately have separate owners.
+[Role] Isolated POSIX process-group guardian (`_posix_owner.py`).
+[Invariants]
+- Run as an isolated interpreter, never imported into a threaded caller.
+- Forks the guardian before the target starts and stays in the same process group until caller pipe EOF.
+[Timeouts & Locks]
+- Blocks on `select.select([owner_pipe])` until caller EOF, then sends `SIGTERM`, waits `0.2s`, and escalates to `SIGKILL`.
+[Side-Effect Policy]
+- Signals only its owned process group (`-group`) and closes inherited file descriptors.
 """
 from __future__ import annotations
 

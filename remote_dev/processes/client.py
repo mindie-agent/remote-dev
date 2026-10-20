@@ -42,7 +42,8 @@ def _as_endpoint(endpoint: Endpoint | Mapping[str, Any]) -> Endpoint:
     raise TypeError("endpoint must be an Endpoint or mapping")
 
 
-def control(endpoint: Endpoint | Mapping[str, Any], job_id: str, action: str, **parameters: Any) -> dict[str, Any]:
+def control(endpoint: Endpoint | Mapping[str, Any], job_id: str, action: str,
+            *, timeout_ms: int | None = None, **parameters: Any) -> dict[str, Any]:
     """Run one generic process-control action on an explicit endpoint.
 
     ``endpoint`` is an :class:`~remote_dev.core.endpoint.Endpoint` or an
@@ -75,7 +76,8 @@ def control(endpoint: Endpoint | Mapping[str, Any], job_id: str, action: str, **
         if action in {"launch", "exchange"} else 0
     )
     data = rpc_request(target, "control", worker_source(), request,
-                       timeout_ms=CONTROL_TIMEOUT_MS + observation_ms)
+                       timeout_ms=(CONTROL_TIMEOUT_MS if timeout_ms is None
+                                   else max(1, int(timeout_ms))) + observation_ms)
     if not isinstance(data, dict):
         raise RemoteExecutionError("process control returned a non-object")
     if "state" not in data:

@@ -1,3 +1,12 @@
+"""
+[Role] Bounded text preview and head/tail truncation helpers (`preview.py`).
+[Invariants]
+- Enforces `MAX_TEXT_CHARS`, `MAX_READ_LINES`, `MAX_JOB_TAIL_LINES`, `MAX_GREP_MATCHES`, and `MAX_LINE_CHARS` caps on tool responses.
+[Timeouts & Locks]
+- Pure in-memory string slicing; zero subprocesses, zero locks, and zero I/O.
+[Side-Effect Policy]
+- Pure functions; mutates no local or remote state.
+"""
 from __future__ import annotations
 
 MAX_TEXT_CHARS = 12000

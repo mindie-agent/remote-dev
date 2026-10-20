@@ -56,11 +56,11 @@ def ssh_details(endpoint, timeout_ms=None) -> dict:
 def _stage_budgets_ms(endpoint, timeout_ms: int | None) -> tuple[int | None, int | None]:
     if timeout_ms is None or not _uses_shared_mux(endpoint):
         return timeout_ms, None
-    stage1 = max(1, int(timeout_ms * 0.6))
-    if timeout_ms >= 4000:
-        stage2_floor = max(2000, timeout_ms - stage1)
-    else:
-        stage2_floor = max(1, timeout_ms - stage1)
+    cleanup = max(1, int(timeout_ms * 0.05))
+    stage1 = max(1, int(timeout_ms * 0.55))
+    stage2_floor = max(1, timeout_ms - stage1 - cleanup)
+    if timeout_ms >= 5000:
+        stage2_floor = max(2000, stage2_floor)
     return stage1, stage2_floor
 
 
@@ -78,7 +78,8 @@ def diagnose_ssh(endpoint, *, timeout_ms=None) -> dict:
         elif deadline is None:
             budget = None
         else:
-            remaining = math.ceil((deadline - time.monotonic()) * 1000)
+            cleanup = max(1, int(timeout_ms * 0.05)) if timeout_ms is not None else 0
+            remaining = max(1, math.ceil((deadline - time.monotonic()) * 1000) - cleanup)
             budget = max(stage2_floor or 1, remaining)
         if budget is not None and budget <= 0:
             break

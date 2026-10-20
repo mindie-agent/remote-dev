@@ -569,7 +569,8 @@ def remote_job_stop(endpoint: Endpoint | None, *, job_id: str, force: bool = Fal
         deadline = time.monotonic() + _stop_drain_seconds()
         while not supervisor.get("quiet") and time.monotonic() < deadline:
             time.sleep(0.05)
-            supervisor = control(endpoint, job_id, "status")
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            supervisor = control(endpoint, job_id, "status", timeout_ms=min(5000, remaining_ms))
     except (RemoteExecutionError, ValueError, RuntimeError, OSError) as exc:
         result = make_result(
             tool="remote.job_stop",

@@ -3,11 +3,11 @@
 [Role] Remote asynchronous background job daemon & process-group supervisor (`worker.py`).
 [Invariants]
 - Runs on the remote target host under `python -I` isolated startup to prevent `cwd` stdlib shadowing.
-- Enforces `STOP_DRAIN_SECONDS >= STOP_GRACE_SECONDS + 3.0` (`15.0 >= 10.0 + 3.0`) so SIGTERM drain completes before outer SIGKILL escalation.
+- `cancel_and_drain()` waits `max(5.0, STOP_GRACE_SECONDS + 3.0)` after `SIGTERM` before returning an uncertain observation.
 - Persists atomic `status.json` transitions via `.tmp.<pid>` + `os.replace()`.
 [Timeouts & Locks]
 - Uses non-blocking `fcntl.flock` on `worker.lock` to guarantee a single active supervisor per job directory.
-- Bounded `STOP_GRACE_SECONDS = 10.0` before escalating process-group termination to SIGKILL.
+- `STOP_GRACE_SECONDS` defaults to `2.0` (`REMOTE_DEV_STOP_GRACE_SECONDS` may override it); the process group is escalated to `SIGKILL` after that window.
 [Side-Effect Policy]
 - Writes `status.json`, `stdout.log`, `stderr.log`, and `worker.lock` exclusively inside the assigned remote job directory; signals only the target child process group.
 """

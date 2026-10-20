@@ -47,7 +47,7 @@ def test_explicit_probe_deadline_splits_stage_budgets_and_preserves_remaining_ti
         RemoteCompleted(0, json.dumps({"marker": "remote-dev-connection-ok"}), ""),
     ]) as run, patch("remote_dev.diagnostics.time.monotonic", side_effect=[10.0, 10.25]):
         result = diagnose_ssh(endpoint, timeout_ms=7200000)
-    assert [call.kwargs["timeout_ms"] for call in run.call_args_list] == [4320000, 7199750]
+    assert [call.kwargs["timeout_ms"] for call in run.call_args_list] == [3960000, 6839750]
     assert result["status"] == "independent_connection_works"
     assert result["summary"] == "SSH succeeded only after bypassing ControlMaster."
     assert result["next"] == {"ssh_mux": False}
@@ -63,10 +63,10 @@ def test_stage1_mux_timeout_still_runs_stage2_with_reserved_budget(tmp_path, mon
     with patch("remote_dev.diagnostics.run_script", side_effect=[
         RemoteCompleted(None, "", "ControlMaster socket hung", timed_out=True),
         RemoteCompleted(0, json.dumps({"marker": "remote-dev-connection-ok"}), "", timed_out=False),
-    ]) as run, patch("remote_dev.diagnostics.time.monotonic", side_effect=[10.0, 13.0]):
+    ]) as run, patch("remote_dev.diagnostics.time.monotonic", side_effect=[10.0, 12.75]):
         diag = diagnose_ssh(endpoint, timeout_ms=5000)
     assert run.call_count == 2
-    assert [call.kwargs["timeout_ms"] for call in run.call_args_list] == [3000, 2000]
+    assert [call.kwargs["timeout_ms"] for call in run.call_args_list] == [2750, 2000]
     assert run.call_args_list[0].args[0].ssh_mux is True
     assert run.call_args_list[1].args[0].ssh_mux is False
     assert diag["status"] == "independent_connection_works"
