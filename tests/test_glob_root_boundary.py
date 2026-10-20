@@ -9,6 +9,12 @@ import pytest
 from remote_dev.core.search_ops import REMOTE_SEARCH_PY
 
 
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="executes the remote POSIX search worker against local filesystem paths",
+)
+
+
 def search(root, base, pattern, **options):
     result = subprocess.run(
         [sys.executable, "-I", "-c", REMOTE_SEARCH_PY],
