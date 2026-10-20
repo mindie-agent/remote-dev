@@ -95,8 +95,12 @@ class ProcessWorkerTests(unittest.TestCase):
         second = self.call(identifier, "prepare", spec=spec, diagnostics_context={"trace_id": "c" * 32})
         self.assertEqual(first["receipt"]["pid"], second["receipt"]["pid"])
         self.assertEqual(second["receipt"]["diagnostics_context"], {"trace_id": "a" * 32, "operation_id": "b" * 32})
+        before_go = time.time()
         self.go(identifier)
         result = self.until(identifier, lambda row: row["quiet"])["result"]
+        self.assertLessEqual(before_go, result["started_at"])
+        self.assertLessEqual(result["started_at"], result["finished_at"])
+        self.assertLessEqual(result["finished_at"], time.time())
         self.assertTrue(result["descendants_drained"])
         self.assertEqual((self.root / "counted").read_text(), "once")
         self.assertGreater(result["timings"]["descendant_drain_ms"], 50)

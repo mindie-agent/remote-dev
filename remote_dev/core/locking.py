@@ -3,7 +3,7 @@
 [Invariants]
 - Combines an in-process `threading.RLock` with an OS file lock (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows) so threads and processes share one serialization boundary.
 [Timeouts & Locks]
-- Polls non-blocking lock acquisition every `20ms` (`0.02s`) while checking `current_event()` so cancelled requests abort immediately without deadlocking.
+- Polls OS locks every 20ms, bounds thread acquisition by the remaining caller deadline, and checks cancellation before admission. Timeout/cancellation never enters the protected mutation.
 [Side-Effect Policy]
 - Creates `.lock` files under `state_root() / "locks"` or adjacent to target record paths.
 """
@@ -26,16 +26,25 @@ _locks = weakref.WeakValueDictionary()
 
 
 @contextlib.contextmanager
-def record_lock(path: Path):
+def record_lock(path: Path, *, timeout_seconds: float | None = None):
     started = time.monotonic()
-    key = os.path.normcase(str(path.resolve()))
-    with _guard:
-        lock = _locks.setdefault(key, threading.RLock())
-    while not lock.acquire(timeout=0.05):
+    deadline = None if timeout_seconds is None else started + timeout_seconds
+    def waiting():
         event = current_event()
         if event is not None and event.is_set():
             raise RemoteExecutionError("request cancelled before acquiring record lock")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("timed out waiting for record lock")
+    key = os.path.normcase(str(path.resolve()))
+    with _guard:
+        lock = _locks.setdefault(key, threading.RLock())
+    while True:
+        waiting()
+        remaining = 0.05 if deadline is None else max(0.0, min(0.05, deadline - time.monotonic()))
+        if lock.acquire(timeout=remaining):
+            break
     try:
+        waiting()
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_name(path.name + ".lock")
         with lock_path.open("a+b") as handle:
@@ -48,13 +57,12 @@ def record_lock(path: Path):
                 # LK_LOCK has a fixed retry limit. An explicit nonblocking
                 # loop permits a long poll without losing the lock contract.
                 while True:
+                    waiting()
                     try:
                         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                         break
                     except OSError:
-                        event = current_event()
-                        if event is not None and event.is_set():
-                            raise RemoteExecutionError("request cancelled before acquiring record lock")
+                        waiting()
                         time.sleep(0.02)
                 try:
                     get_recorder("remote-dev").event("DEBUG", "lock.acquired", elapsed_ms=round((time.monotonic() - started) * 1000, 3))
@@ -65,13 +73,12 @@ def record_lock(path: Path):
             else:
                 import fcntl
                 while True:
+                    waiting()
                     try:
                         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         break
                     except BlockingIOError:
-                        event = current_event()
-                        if event is not None and event.is_set():
-                            raise RemoteExecutionError("request cancelled before acquiring record lock")
+                        waiting()
                         time.sleep(0.02)
                 try:
                     get_recorder("remote-dev").event("DEBUG", "lock.acquired", elapsed_ms=round((time.monotonic() - started) * 1000, 3))

@@ -292,6 +292,7 @@ def worker(directory):
         pipe_r, pipe_w = os.pipe()
         os.set_blocking(pipe_w, False)
     command_started = time.monotonic()
+    command_started_at = time.time()
     with (directory / "stdout.log").open("ab") as stdout, (directory / "stderr.log").open("ab") as stderr:
         environment = {**os.environ, **spec["env"]}
         if tty:
@@ -412,7 +413,8 @@ def worker(directory):
     command_finished = time.monotonic()
     shell_exit_observed = shell_exit_observed if shell_exit_observed is not None else command_finished
     result = {"state": terminal or ("succeeded" if code == 0 else "failed"),
-              "exit_code": code, "descendants_drained": True, "finished_at": time.time(),
+              "exit_code": code, "descendants_drained": True,
+              "started_at": command_started_at, "finished_at": time.time(),
               "timings": {"clock_domain": "remote-supervisor:" + boot_id() + ":" + str(os.getpid()),
                           "spawn_ms": round((spawned_at - command_started) * 1000, 3),
                           "shell_ms": round((shell_exit_observed - spawned_at) * 1000, 3),
