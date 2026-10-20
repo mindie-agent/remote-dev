@@ -58,6 +58,49 @@ def resolve_path(raw):
         fail("path_outside_root", f"remote path is outside root: {resolved} not under {root}")
     return p, resolved
 
+def bounded_glob(base, pattern):
+    # Expand one path component at a time: a final-result check alone lets
+    # recursive glob scan an escaping directory before its matches are checked.
+    start = ""
+    directory_only = pattern.endswith("/")
+    if os.path.isabs(pattern):
+        absolute = pathlib.Path(pattern)
+        for allowed in (pathlib.Path(payload["root"]), root):
+            try:
+                absolute.relative_to(allowed)
+            except ValueError:
+                continue
+            pattern = pattern[len(str(allowed).rstrip("/")):].lstrip("/")
+            start = str(allowed)
+            break
+        else:
+            fail("path_outside_root", "absolute glob pattern is outside root")
+    parts = [part for part in pattern.split("/") if part]
+
+    def walk(directory, remaining, ancestors):
+        _, resolved = resolve_path(base / directory)
+        if not remaining:
+            if not directory_only or (base / directory).is_dir():
+                yield directory + ("/" if directory_only and directory else "")
+            return
+        part, rest = remaining[0], remaining[1:]
+        if part == "**":
+            yield from walk(directory, rest, ancestors)
+            for child in glob_mod.iglob(os.path.join(glob_mod.escape(directory), "*")):
+                _, real_child = resolve_path(base / child)
+                if (base / child).is_dir():
+                    if real_child not in ancestors:
+                        yield from walk(child, remaining, ancestors | {resolved})
+                elif not rest and not directory_only:
+                    yield child
+            return
+        for child in glob_mod.iglob(os.path.join(glob_mod.escape(directory), part)):
+            resolve_path(base / child)
+            if not rest or (base / child).is_dir():
+                yield from walk(child, rest, ancestors)
+
+    yield from walk(start, parts, set())
+
 def git_root(start):
     cur = start.resolve()
     for candidate in [cur, *cur.parents]:
@@ -318,7 +361,7 @@ if op == "glob":
     seen = 0
     # One-shot helper: chdir so glob(pattern, recursive=True) works on Python 3.9 (no root_dir).
     os.chdir(str(base))
-    for item in glob_mod.iglob(eff_pattern, recursive=True):
+    for item in bounded_glob(base, eff_pattern):
         rel_norm = item.replace("\\", "/").lstrip("./")
         if not rel_norm:
             continue
