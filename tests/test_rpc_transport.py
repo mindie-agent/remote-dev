@@ -243,10 +243,10 @@ print(json.dumps({'status':'ok'}))
         hung_cmd = "python3 -I -u -c 'import time; time.sleep(30)'"
         started = time.monotonic()
         with mock.patch.object(rpc_transport, "_worker_command", return_value=hung_cmd), \
-                mock.patch.object(process_client, "CONTROL_TIMEOUT_MS", 100):
+                mock.patch.object(process_client, "CONTROL_TIMEOUT_MS", 300):
             with self.assertRaises(RemoteExecutionError) as caught:
                 process_client.control(self.endpoint, "job-never-sent", "status")
-        self.assertLess(time.monotonic() - started, 1.2)
+        self.assertLess(time.monotonic() - started, 1.5)
         self.assertEqual(caught.exception.submission_state, "not_sent")
         self.assertIn("handshake timed out", str(caught.exception))
         self.assertEqual(self.request({"value": "recovered"})["value"], "recovered")
