@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+[Role] Codex hook adapter that emits structured remote-transport guard decisions (`codex_remote_guard.py`).
+[Invariants]
+- Always writes one JSON response; exits `2` only when the decision is blocked.
+- Decision policy is delegated to `guard_common`; no duplicate per-harness rules.
+[Timeouts & Locks]
+- Reads one hook payload from stdin synchronously; no locks or network calls.
+[Side-Effect Policy]
+- Process-local stdin/stdout only; never edits files or invokes remote commands.
+"""
 from __future__ import annotations
 
 import json

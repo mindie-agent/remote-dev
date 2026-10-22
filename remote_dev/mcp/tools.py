@@ -20,7 +20,7 @@ from remote_dev.core.artifact_ops import remote_artifact_manifest, remote_artifa
 from remote_dev.core.context_snapshot import remote_context_snapshot, remote_probe
 from remote_dev.core.endpoint import has_selector, resolve_endpoint, selector_fields
 from remote_dev.core.file_ops import remote_edit, remote_ls, remote_multi_edit, remote_read, remote_write
-from remote_dev.core.job_ops import endpoint_from_job_record, remote_job_stdin, require_job_id, remote_job_status, remote_job_stop, remote_job_tail
+from remote_dev.core.job_ops import endpoint_from_job_record, remote_job_output, remote_job_stdin, require_job_id, remote_job_status, remote_job_stop, remote_job_tail
 from remote_dev.core.patch_ops import remote_apply_patch
 from remote_dev.core.search_ops import remote_glob, remote_grep
 from remote_dev.core.shell_ops import remote_bash
@@ -54,6 +54,7 @@ def list_tools() -> list[dict[str, Any]]:
         "remote.apply_patch": "Apply a Codex apply_patch payload or unified diff on a remote endpoint.",
         "remote.job_status": "Check a remote background job through the shared process supervisor.",
         "remote.job_tail": "Tail remote background job logs through the shared process supervisor.",
+        "remote.job_output": "Read remote background job output through the shared process supervisor.",
         "remote.job_stop": "Stop a remote background job through the shared process supervisor.",
         "remote.job_stdin": "Write to a remote session's stdin (Codex write_stdin habit), with optional EOF and output polling.",
         "remote.artifact_manifest": "Build a remote artifact sha256 manifest.",
@@ -278,7 +279,7 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     endpoint = None
     # Job tools can locate their endpoint from the local job record, so they
     # only resolve when the caller supplied an explicit selector.
-    if name not in {"remote.job_status", "remote.job_tail", "remote.job_stop", "remote.job_stdin"} or has_selector(args):
+    if name not in {"remote.job_status", "remote.job_tail", "remote.job_output", "remote.job_stop", "remote.job_stdin"} or has_selector(args):
         endpoint = resolve_endpoint(args)
     job_action = str(args.get("action") or "status").strip().lower() if name == "remote.job_status" else "status"
     if name.startswith("remote.job_") and not (name == "remote.job_status" and job_action == "list"):
@@ -418,10 +419,29 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
                 chars=args.get("chars") if args.get("chars") is None else str(args.get("chars")),
             )
         if job_action == "tail":
-            return remote_job_tail(endpoint, job_id=str(args["job_id"]), lines=int(args.get("lines") or 80))
+            return remote_job_tail(
+                endpoint,
+                job_id=str(args["job_id"]),
+                lines=int(args.get("lines") or 80),
+                yield_time_ms=args.get("yield_time_ms"),
+            )
         return remote_job_status(endpoint, job_id=str(args["job_id"]))
     if name == "remote.job_tail":
-        return remote_job_tail(endpoint, job_id=str(args["job_id"]), lines=int(args.get("lines") or 80), stream=str(args.get("stream") or "both"))
+        return remote_job_tail(
+            endpoint,
+            job_id=str(args["job_id"]),
+            lines=int(args.get("lines") or 80),
+            stream=str(args.get("stream") or "both"),
+            yield_time_ms=args.get("yield_time_ms"),
+        )
+    if name == "remote.job_output":
+        return remote_job_output(
+            endpoint,
+            job_id=str(args["job_id"]),
+            lines=int(args.get("lines") or 200),
+            stream=str(args.get("stream") or "both"),
+            yield_time_ms=args.get("yield_time_ms"),
+        )
     if name == "remote.job_stop":
         return remote_job_stop(endpoint, job_id=str(args["job_id"]), force=bool(args.get("force", False)))
     if name == "remote.job_stdin":

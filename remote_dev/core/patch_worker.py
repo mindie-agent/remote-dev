@@ -130,6 +130,8 @@ def restore(before_state):
     for directory in reversed(created_dirs):
         try:
             directory.rmdir()
+        except TimeoutError:
+            raise
         except OSError:
             pass
     return {"restored": restored, "failed": failed}

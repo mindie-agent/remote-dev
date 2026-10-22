@@ -99,13 +99,21 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
                 raise ValueError("tools/call arguments must be an object")
             with bind_context((params.get("_meta") or {}).get("mindie_diagnostics") or {}):
                 payload = call_tool(name, arguments)
-            payload["result"]["runtime"] = runtime_status(LOADED_RUNTIME)
+            details = payload.get("result", {})
+            details["runtime"] = runtime_status(LOADED_RUNTIME)
+            # A local receipt failure after a succeeded remote operation must
+            # not turn the remote result into an MCP error. Report the
+            # execution outcome, keeping the recording_failure diagnostic in
+            # structuredContent.
+            error_outcome = details.get("outcome")
+            if details.get("status") == "local_recording_failed" and details.get("operation_completed") is True:
+                error_outcome = details.get("execution_outcome", error_outcome)
             result(
                 request_id,
                 {
                     "content": [{"type": "text", "text": tool_text(payload)}],
-                    "structuredContent": payload.get("result", {}),
-                    "isError": payload.get("result", {}).get("outcome") not in {"success", "cancelled"},
+                    "structuredContent": details,
+                    "isError": error_outcome not in {"success", "cancelled"},
                 },
                 framed=framed,
             )
@@ -148,7 +156,7 @@ class Dispatcher:
         arguments = params.get("arguments") or {}
         name = params.get("name")
         name = canonical_name(name) if isinstance(name, str) else None
-        short_control = name in {"remote.job_status", "remote.job_tail", "remote.job_stop"}
+        short_control = name in {"remote.job_status", "remote.job_tail", "remote.job_output", "remote.job_stop"}
         if name == "remote.job_stdin":
             delay = arguments.get("yield_time_ms")
             if delay is None:

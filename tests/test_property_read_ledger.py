@@ -53,7 +53,7 @@ class LedgerHarness:
         self.root.mkdir()
         self.state = base / "state"
         patchers = [
-            mock.patch.object(state_store, "substrate_root", return_value=self.state),
+            mock.patch.object(state_store, "state_root", return_value=self.state),
             mock.patch.object(file_ops, "run_remote_python", side_effect=lambda _endpoint, code, payload, **_kw: run_remote_script(code, payload)),
             mock.patch.dict(os.environ, {}, clear=False),
         ]

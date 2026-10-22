@@ -495,6 +495,8 @@ def main() -> None:
                     entries.append(entry)
                     if kind == "directory" and not child.is_symlink() and depth < max_depth and len(entries) <= limit:
                         scan_dir(child, depth + 1, rel_name + "/")
+                except TimeoutError:
+                    raise
                 except OSError as exc:
                     entries.append({"name": rel_name, "path": str(child), "type": "error", "error": str(exc)})
 

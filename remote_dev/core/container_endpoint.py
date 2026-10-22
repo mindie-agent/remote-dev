@@ -25,7 +25,7 @@ _INSPECT = r'''
 import json, subprocess, sys
 request = json.load(sys.stdin)
 result = subprocess.run(['docker', 'inspect', '--type', 'container', '--format', '{{json .}}', request['container']],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
 if result.returncode:
     sys.stderr.write(result.stderr)
     raise SystemExit(result.returncode)

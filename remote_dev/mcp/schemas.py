@@ -232,7 +232,30 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         ["job_id"],
         endpoint_selector=False,
     ),
-    "remote.job_tail": schema({"job_id": {"type": "string"}, "lines": {"type": "integer", "maximum": 500}, "stream": {"type": "string", "enum": ["stdout", "stderr", "both"]}}, ["job_id"], endpoint_selector=False),
+    "remote.job_tail": schema(
+        {
+            "job_id": {"type": "string"},
+            "lines": {"type": "integer", "maximum": 500},
+            "stream": {"type": "string", "enum": ["stdout", "stderr", "both"]},
+            "yield_time_ms": {"type": "integer", "description": "Optional poll wait in milliseconds (DSH/Codex job_output/write_stdin habit)."},
+            "max_output_tokens": {"type": "integer", "description": "Optional output token cap (DSH/Codex habit)."},
+            "timeout_ms": {"type": "integer", "description": "Optional timeout in milliseconds."},
+        },
+        ["job_id"],
+        endpoint_selector=False,
+    ),
+    "remote.job_output": schema(
+        {
+            "job_id": {"type": "string"},
+            "lines": {"type": "integer", "maximum": 500},
+            "stream": {"type": "string", "enum": ["stdout", "stderr", "both"]},
+            "yield_time_ms": {"type": "integer", "description": "Optional poll wait in milliseconds (DSH/Codex job_output/write_stdin habit)."},
+            "max_output_tokens": {"type": "integer", "description": "Optional output token cap (DSH/Codex habit)."},
+            "timeout_ms": {"type": "integer", "description": "Optional timeout in milliseconds."},
+        },
+        ["job_id"],
+        endpoint_selector=False,
+    ),
     "remote.job_stop": schema({"job_id": {"type": "string"}, "force": {"type": "boolean"}}, ["job_id"], endpoint_selector=False),
     "remote.job_stdin": schema(
         {
@@ -253,7 +276,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "remote.probe": schema({"modules": {"type": "array", "items": {"type": "string"}, "description": "Explicit module imports to check; default empty."}, "diagnose_connection": {"type": "boolean", "default": False, "description": "Compare SSH connections with a fixed read-only probe; never replays a business command."}}),
 }
 
-for _job_name in ("remote.job_status", "remote.job_tail", "remote.job_stop", "remote.job_stdin"):
+for _job_name in ("remote.job_status", "remote.job_tail", "remote.job_output", "remote.job_stop", "remote.job_stdin"):
     TOOL_SCHEMAS[_job_name]["properties"]["session_id"] = {"type": "string", "description": "Alias of job_id returned by remote.bash."}
     TOOL_SCHEMAS[_job_name]["required"] = []
     TOOL_SCHEMAS[_job_name]["description"] = "job_id or session_id is required; checked by the server."
@@ -337,6 +360,8 @@ HARNESS_TOOL_ALIASES: dict[str, str] = {
     "remote_Grep": "remote.grep",
     "remote.LS": "remote.ls",
     "remote_LS": "remote.ls",
+    "remote.JobOutput": "remote.job_output",
+    "remote_JobOutput": "remote.job_output",
     "remote.BashOutput": "remote.job_status",
     "remote_BashOutput": "remote.job_status",
     "remote.TaskOutput": "remote.job_status",
@@ -507,6 +532,12 @@ PARAM_ALIASES: dict[str, dict[str, str]] = {
         "stdin": "chars",
     },
     "remote.job_tail": {
+        "TaskId": "job_id",
+        "task_id": "job_id",
+        "bash_id": "job_id",
+        "shell_id": "job_id",
+    },
+    "remote.job_output": {
         "TaskId": "job_id",
         "task_id": "job_id",
         "bash_id": "job_id",

@@ -1,11 +1,11 @@
 """
 [Role] Cross-platform hardware specification probing (`HostHardwareSpec`), workload resource expectation normalization (`WorkloadExpectation`), and spec-driven local vs. remote placement (`host_spec.py`).
 [Invariants]
-- Probing works identically across Windows (`os.name == "nt"`), macOS (`sys.platform == "darwin"`), and Linux (`sys.platform.startswith("linux")`) with zero subprocesses.
+- Probing works identically across Windows (`os.name == "nt"`), macOS (`sys.platform == "darwin"`), and Linux (`sys.platform.startswith("linux")`) with zero subprocess launches.
 - Placement compares `WorkloadExpectation` (`cpu_cores`, `memory_mb`, `vram_mb`/`hbm_mb`, `npu_count`) purely against candidate `HostHardwareSpec` headroom (`mem_usable_mb`, `cpu_cores`, `vram_free_mb`, `free_npus`); never rejects local execution based on OS platform name.
 - Worker concurrency is bounded by both usable CPU cores and usable memory (`max(1, min(usable_cpu_cores, mem_usable_mb // max(1, per_worker_memory_mb)))`).
 [Timeouts & Locks]
-- Pure in-memory / kernel syscall (`GlobalMemoryStatusEx`, `/proc/meminfo`, `sysconf`/`sysctl`) probing and placement evaluation; zero subprocesses, zero network I/O, zero locks.
+- Pure in-memory / kernel syscall (`GlobalMemoryStatusEx`, `/proc/meminfo`, `sysconf`/`sysctl`) probing and placement evaluation; zero subprocess launches, zero network I/O, zero locks.
 [Side-Effect Policy]
 - Strictly read-only local kernel memory/CPU queries and pure functional data transformations.
 """
@@ -18,6 +18,7 @@ import math
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import time
 from typing import Any
@@ -119,6 +120,8 @@ def _probe_macos_memory_mb() -> tuple[int, int]:
     try:
         pages, page_size = int(os.sysconf("SC_PHYS_PAGES")), int(os.sysconf("SC_PAGE_SIZE"))
         total_bytes = max(0, pages * page_size)
+    except TimeoutError:
+        raise
     except (AttributeError, ValueError, OSError):
         pass
     total_mb = total_bytes // (1024 * 1024)
@@ -132,7 +135,9 @@ def _probe_macos_memory_mb() -> tuple[int, int]:
                 reclaimable_pages += int(val.value)
         if reclaimable_pages > 0:
             return total_mb, min(total_mb, (reclaimable_pages * page_size) // (1024 * 1024))
-    except Exception:
+    except TimeoutError:
+        raise
+    except (subprocess.SubprocessError, OSError, ValueError):
         pass
     return total_mb, int(total_mb * 0.65)
 
@@ -157,7 +162,9 @@ def _pid_alive(pid: int) -> bool:
                 return False
             ctypes.windll.kernel32.CloseHandle(handle)
             return True
-        except Exception:
+        except TimeoutError:
+            raise
+        except (OSError, ValueError):
             return False
     try:
         os.kill(int(pid), 0)
@@ -166,6 +173,8 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    except TimeoutError:
+        raise
     except OSError:
         return False
 
@@ -199,8 +208,10 @@ def active_local_reserved_mb(pool_db_path: Path | None = None, *, exclude_pid: i
                 for row_id, pid, mem_mb in rows
                 if row_id not in set(dead_ids) and (exclude_pid is None or int(pid) != int(exclude_pid))
             )
-    except sqlite3.Error:
-        return 0
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return 0
+        raise
 
 
 @contextlib.contextmanager
@@ -249,20 +260,25 @@ def probe_local_hardware_spec(*, desktop_reserve_ratio: float = 0.20, min_deskto
     if hasattr(os, "getloadavg"):
         try:
             load_1m = max(0.0, float(os.getloadavg()[0]))
+        except TimeoutError:
+            raise
         except OSError:
             load_1m = 0.0
     elif os_family == "linux":
         try:
             load_1m = max(0.0, float(Path("/proc/loadavg").read_text(encoding="utf-8").split()[0]))
+        except TimeoutError:
+            raise
         except (OSError, ValueError, IndexError):
             load_1m = 0.0
 
+    mem_total_mb = mem_available_mb = 0
     try:
         import psutil  # type: ignore[import-not-found]
 
         vm = psutil.virtual_memory()
         mem_total_mb, mem_available_mb = int(vm.total // (1024 * 1024)), int(vm.available // (1024 * 1024))
-    except Exception:
+    except ImportError:
         try:
             if os_family == "windows":
                 mem_total_mb, mem_available_mb = _probe_windows_memory_mb()
@@ -270,8 +286,12 @@ def probe_local_hardware_spec(*, desktop_reserve_ratio: float = 0.20, min_deskto
                 mem_total_mb, mem_available_mb = _probe_macos_memory_mb()
             else:
                 mem_total_mb, mem_available_mb = _parse_linux_meminfo(Path("/proc/meminfo").read_text(encoding="utf-8"))
-        except Exception:
-            mem_total_mb, mem_available_mb = 8192, 4096
+        except TimeoutError:
+            raise
+        except (subprocess.SubprocessError, OSError, ValueError):
+            mem_total_mb = mem_available_mb = 0
+    if mem_total_mb <= 0:
+        raise RuntimeError("Failed to probe local host memory specification")
 
     usable_cpu_cores = round(max(1.0, float(cpu_cores) - load_1m), 2)
     mem_usable_mb = _compute_usable_memory_mb(

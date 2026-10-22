@@ -399,6 +399,8 @@ def _patch_result(
         ref_path = patch_dir / f"{result['invocation_id']}.json"
         atomic_write_json(ref_path, result)
         result["refs"]["metadata"] = str(ref_path)
+    except TimeoutError:
+        raise
     except (OSError, ValueError, RuntimeError) as exc:
         from remote_dev.result import recording_failure
         return recording_failure(payload, exc, stage="patch_receipt", operation_completed=status == "applied")

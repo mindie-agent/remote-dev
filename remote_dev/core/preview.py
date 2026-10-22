@@ -1,7 +1,8 @@
 """
-[Role] Bounded text preview and head/tail truncation helpers (`preview.py`).
+[Role] Bounded text preview, consecutive repeated-line folding, and head/tail truncation helpers (`preview.py`).
 [Invariants]
 - Enforces `MAX_TEXT_CHARS`, `MAX_READ_LINES`, `MAX_JOB_TAIL_LINES`, `MAX_GREP_MATCHES`, and `MAX_LINE_CHARS` caps on tool responses.
+- Folds runs of `> 2` identical consecutive log lines into `[previous line repeated N more times]` before head/tail slicing so verbose compiler/progress spam cannot evict diagnostic head/tail context, while full raw output remains intact in on-disk job logs.
 [Timeouts & Locks]
 - Pure in-memory string slicing; zero subprocesses, zero locks, and zero I/O.
 [Side-Effect Policy]
@@ -30,39 +31,71 @@ def _tail_slice(value: str, count: int) -> str:
     return value[-count:]
 
 
+def fold_repeated_lines(value: str) -> str:
+    """Collapse runs of >2 identical consecutive lines while preserving trailing newline."""
+    if "\n" not in value:
+        return value
+    trailing_newline = value.endswith("\n")
+    lines = value.splitlines()
+    deduped: list[str] = []
+    index = 0
+    total = len(lines)
+    while index < total:
+        next_index = index + 1
+        while next_index < total and lines[next_index] == lines[index]:
+            next_index += 1
+        repeats = next_index - index
+        deduped.append(lines[index])
+        if repeats > 2:
+            deduped.append(f"[previous line repeated {repeats - 1} more times]")
+        elif repeats == 2:
+            deduped.append(lines[index])
+        index = next_index
+    folded = "\n".join(deduped)
+    if trailing_newline and folded:
+        folded += "\n"
+    return folded
+
+
 def text_preview(
     value: str,
     *,
     head_chars: int = DEFAULT_HEAD_CHARS,
     tail_chars: int = DEFAULT_TAIL_CHARS,
+    fold_repeats: bool = True,
 ) -> dict[str, object]:
     byte_count = len(value.encode("utf-8", errors="replace"))
-    if len(value) <= head_chars + tail_chars:
+    compacted = fold_repeated_lines(value) if fold_repeats else value
+    repeated_lines_folded = compacted != value
+    if len(compacted) <= head_chars + tail_chars:
         return {
-            "text": value,
+            "text": compacted,
             "bytes": byte_count,
             "truncated": False,
+            "repeated_lines_folded": repeated_lines_folded,
             "head_chars": head_chars,
             "tail_chars": tail_chars,
         }
     return {
-        "head": value[:head_chars],
-        "tail": _tail_slice(value, tail_chars),
+        "head": compacted[:head_chars],
+        "tail": _tail_slice(compacted, tail_chars),
         "bytes": byte_count,
         "truncated": True,
+        "repeated_lines_folded": repeated_lines_folded,
         "head_chars": head_chars,
         "tail_chars": tail_chars,
     }
 
 
 def stdout_stderr_preview(stdout: str, stderr: str) -> dict[str, object]:
+    out_preview = text_preview(stdout)
+    err_preview = text_preview(stderr)
     return {
-        "stdout": text_preview(stdout),
-        "stderr": text_preview(stderr),
+        "stdout": out_preview,
+        "stderr": err_preview,
         "stdout_bytes": len(stdout.encode("utf-8", errors="replace")),
         "stderr_bytes": len(stderr.encode("utf-8", errors="replace")),
-        "truncated": len(stdout) > DEFAULT_HEAD_CHARS + DEFAULT_TAIL_CHARS
-        or len(stderr) > DEFAULT_HEAD_CHARS + DEFAULT_TAIL_CHARS,
+        "truncated": bool(out_preview["truncated"] or err_preview["truncated"]),
         "head_chars": DEFAULT_HEAD_CHARS,
         "tail_chars": DEFAULT_TAIL_CHARS,
     }
@@ -74,11 +107,12 @@ def tail_text(value: str, limit: int = DEFAULT_TAIL_CHARS) -> str:
     return value if len(value) <= limit else value[-limit:]
 
 
-def compact_text(value: str, *, limit: int = MAX_TEXT_CHARS) -> str:
-    if len(value) <= limit:
-        return value
+def compact_text(value: str, *, limit: int = MAX_TEXT_CHARS, fold_repeats: bool = True) -> str:
+    compacted = fold_repeated_lines(value) if fold_repeats else value
+    if len(compacted) <= limit:
+        return compacted
     marker = "\n<remote-dev text truncated; full output is available via refs/resources>\n"
     keep = max(0, limit - len(marker))
     head = keep // 2
     tail = keep - head
-    return value[:head] + marker + _tail_slice(value, tail)
+    return compacted[:head] + marker + _tail_slice(compacted, tail)

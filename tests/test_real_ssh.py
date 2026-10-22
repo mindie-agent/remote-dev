@@ -65,6 +65,8 @@ LogLevel ERROR
             try:
                 with socket.create_connection(('127.0.0.1', port), timeout=.1):
                     break
+            except TimeoutError:
+                raise
             except OSError:
                 assert time.monotonic() < deadline, 'sshd did not listen'
                 time.sleep(.02)

@@ -86,7 +86,7 @@ def main():
                                 timed_out = not cancelled.is_set()
                                 with contextlib.suppress(ProcessLookupError):
                                     os.killpg(proc.pid, signal.SIGKILL)
-                                stdout, stderr = proc.communicate()
+                                stdout, stderr = proc.communicate(timeout=5.0)
                                 break
                             try:
                                 stdout, stderr = proc.communicate(input=first_input, timeout=0.05)

@@ -1,14 +1,14 @@
-"""Optional remote runtime environment preamble.
-
-Some remote images ship a profile script that must be sourced before user
-commands (toolchain paths, accelerator SDK variables, ...). remote-dev does
-not know which one: the consumer names it through ``runtime_env_file`` on the
-endpoint payload, an endpoint alias, a resolver result, or the process-wide
-``REMOTE_DEV_RUNTIME_ENV_FILE`` default. When no file is configured the
-preamble is empty and ``runtime_env`` is a no-op. Initialization runs on every
-command in its Bash process. Functions, variables and shell options remain
-available to that command; a missing or failed script prevents execution.
 """
+[Role] Optional remote runtime environment preamble (`runtime_env.py`).
+[Invariants]
+- Emits no preamble unless `runtime_env_file` is configured and enabled.
+- Sources the configured file in the current Bash so functions, variables, and shell options survive; a missing or failed script aborts command execution.
+[Timeouts & Locks]
+- Pure argv/script construction; no locks and no process launch.
+[Side-Effect Policy]
+- Side-effect-free string construction; the caller executes the returned lines remotely.
+"""
+
 from __future__ import annotations
 
 import shlex

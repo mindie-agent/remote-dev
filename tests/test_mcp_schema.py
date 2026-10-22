@@ -37,6 +37,7 @@ class McpSchemaTests(unittest.TestCase):
             "remote.apply_patch",
             "remote.job_status",
             "remote.job_tail",
+            "remote.job_output",
             "remote.job_stop",
             "remote.job_stdin",
             "remote.artifact_manifest",
@@ -86,7 +87,7 @@ class McpSchemaTests(unittest.TestCase):
         # semantics and live in the consumer, not in this server.
         for name in TOOL_SCHEMAS:
             self.assertTrue(name.startswith("remote."), name)
-        self.assertEqual(len(TOOL_SCHEMAS), 18)
+        self.assertEqual(len(TOOL_SCHEMAS), 19)
 
     def test_endpoint_props_carry_no_consumer_selectors(self) -> None:
         for legacy in ("session_id", "session_file", "machine"):

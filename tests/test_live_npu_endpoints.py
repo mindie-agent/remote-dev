@@ -403,6 +403,8 @@ class _LiveSession:
             ]
             try:
                 subprocess.run(command, capture_output=True, timeout=5, check=False)
+            except TimeoutError:
+                raise
             except (OSError, subprocess.SubprocessError):
                 pass
 

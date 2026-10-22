@@ -126,6 +126,8 @@ def remote_read(
         try:
             ledger = write_read_ledger(endpoint, data["file"], client_context_id)
             refs["read_ledger"] = str(ledger)
+        except TimeoutError:
+            raise
         except (OSError, ValueError, RuntimeError) as exc:
             recording_error = exc
     file_info = data.get("file", {}) if isinstance(data.get("file"), dict) else {}
@@ -387,6 +389,8 @@ def _write_like_result(
     if status in {"written", "edited"} and file_info:
         try:
             refs["read_ledger"] = str(write_read_ledger(endpoint, file_info, client_context_id))
+        except TimeoutError:
+            raise
         except (OSError, ValueError, RuntimeError) as exc:
             recording_error = exc
     changed = []

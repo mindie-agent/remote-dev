@@ -159,6 +159,8 @@ def _safe_local_artifact_path(base: Path, relpath: str, *, create_parents: bool 
     if create_parents:
         try:
             candidate.parent.mkdir(parents=True, exist_ok=True)
+        except TimeoutError:
+            raise
         except OSError as exc:
             raise ValueError(f"artifact relpath is not a creatable path: {relpath}") from exc
     if candidate.is_symlink():
@@ -200,6 +202,8 @@ def remote_artifact_manifest(endpoint: Endpoint, *, remote_path: str, timeout_ms
         try:
             manifest_path = ensure_endpoint_state(endpoint) / "artifacts" / artifact_id / "manifest.json"
             atomic_write_json(manifest_path, data)
+        except TimeoutError:
+            raise
         except (OSError, ValueError, RuntimeError) as exc:
             recording_error = f"{type(exc).__name__}: {exc}"
             manifest_path = None
@@ -219,7 +223,9 @@ def remote_artifact_manifest(endpoint: Endpoint, *, remote_path: str, timeout_ms
         extra={"manifest": data, "error": data.get("error"), "error_details": data.get("error_details")},
     )
     if recording_error:
+        execution_outcome, execution_status = result["outcome"], result["status"]
         result.update(outcome="failed", status="local_recording_failed", operation_completed=True,
+                      execution_outcome=execution_outcome, execution_status=execution_status,
                       recording_error=recording_error,
                       summary="Remote artifact manifest was received, but local recording failed.")
         return {"text": result["summary"] + "\n" + recording_error + "\n", "result": result}
@@ -285,6 +291,8 @@ def remote_artifact_pull(endpoint: Endpoint, *, remote_path: str, local_dir: str
                     pulled.append({"relpath": item["relpath"], "local_path": str(path), "sha256": digest, "size": item["size"]})
     except FileExistsError as exc:
         return _pull_destination_exists(endpoint, started, start, evidence, [str(exc.filename or exc)])
+    except TimeoutError:
+        raise
     except (RemoteExecutionError, OSError, ValueError) as exc:
         return _transfer_failure(endpoint, "remote.artifact_pull", started, start, exc, evidence)
     # remote_artifact_manifest already wrote a uniquely named manifest under
@@ -320,6 +328,8 @@ def remote_artifact_push(endpoint: Endpoint, *, local_path: str, remote_path: st
                     digest = stream.push({**item, "path": remote_file}, Path(item["path"]))
                     pushed.append({"relpath": relpath, "local_path": item["path"], "remote_path": remote_file,
                                    "sha256": digest, "size": item["size"]})
+    except TimeoutError:
+        raise
     except (RemoteExecutionError, OSError, ValueError, PathPolicyError) as exc:
         if stream is not None and stream.commit_possible and not getattr(exc, "submission_state", None):
             uncertain = RemoteExecutionError(str(exc), submission_state="uncertain")

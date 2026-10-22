@@ -1,4 +1,14 @@
-"""Process-start package identity, distinct from mutable installation metadata."""
+"""
+[Role] Process-start package identity and loaded-vs-installed runtime status (`runtime.py`).
+[Invariants]
+- `installed_identity` reports `None` fields only when package metadata is genuinely unavailable; a metadata read failure is never a fake version.
+- `runtime_status` marks `restart_required` only when both loaded and installed versions are comparable and identity fields differ.
+[Timeouts & Locks]
+- Pure in-memory importlib metadata reads; no locks, subprocesses, or network calls.
+[Side-Effect Policy]
+- Read-only: never writes package metadata, cache files, or process state.
+"""
+
 from __future__ import annotations
 
 import json
@@ -15,6 +25,8 @@ def installed_identity(package: str) -> dict:
         return {"package": package, "version": dist.version,
                 "commit": direct.get("vcs_info", {}).get("commit_id"),
                 "location": str(Path(dist.locate_file("")).resolve())}
+    except TimeoutError:
+        raise
     except (metadata.PackageNotFoundError, ValueError, OSError):
         return {"package": package, "version": None, "commit": None, "location": None}
 

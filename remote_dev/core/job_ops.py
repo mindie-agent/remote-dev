@@ -304,7 +304,7 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
         warnings.append("The remote supervisor failed; its error is separate from command output.")
     text = summary + "\n"
     if result["session_id"]:
-        text += f"session_id: {job_id}\n"
+        text += f"session_id: {job_id} (poll with remote_job_status, remote_job_output, or remote_job_tail)\n"
     for warning in warnings:
         text += warning + "\n"
     for name, body in preview.items():
@@ -375,6 +375,8 @@ def start_remote_job(
                           yield_time_ms=_yield_ms(yield_time_ms, 10000))
             try:
                 _save_output(record, path, row)
+            except TimeoutError:
+                raise
             except (OSError, ValueError, RuntimeError) as error:
                 return _recording_failure(endpoint, record, path, row, error, tool="remote.bash", started=started, start=start, budget=budget)
             first_output = {name: str(row.get(name) or "") for name in ("stdout", "stderr")}
@@ -386,6 +388,8 @@ def start_remote_job(
                               wait_for_exit=True, yield_time_ms=1000)
                 try:
                     _save_output(record, path, row)
+                except TimeoutError:
+                    raise
                 except (OSError, ValueError, RuntimeError) as error:
                     return _recording_failure(endpoint, record, path, row, error, tool="remote.bash", started=started, start=start, budget=budget)
                 for name in ("stdout", "stderr"):
@@ -393,6 +397,8 @@ def start_remote_job(
                     first_output[name] += str(row.get(name) or "").encode("utf-8")[:left].decode("utf-8", "ignore")
             if wait:
                 row.update(first_output)
+        except TimeoutError:
+            raise
         except (RemoteExecutionError, ValueError, RuntimeError, OSError) as exc:
             outcome, status, summary = _classify_start_error(exc)
             failure = _start_failure(endpoint, cwd=cwd, started=started, start=start, job_id=job_id,
@@ -415,6 +421,8 @@ def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, An
     start = time.monotonic()
     try:
         supervisor = control(endpoint, job_id, "status")
+    except TimeoutError:
+        raise
     except (RemoteExecutionError, ValueError, RuntimeError, OSError) as exc:
         result = make_result(
             tool="remote.job_status",
@@ -441,9 +449,15 @@ def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, An
     return {"text": f"Remote job {job_id}: {status}\n", "result": result}
 
 
-@observed_tool("remote.job_tail")
-@pinned_endpoint
-def remote_job_tail(endpoint: Endpoint | None, *, job_id: str, lines: int = 80, stream: str = "both") -> dict[str, Any]:
+def _job_tail_impl(
+    endpoint: Endpoint | None,
+    *,
+    job_id: str,
+    lines: int = 80,
+    stream: str = "both",
+    yield_time_ms: int | None = None,
+    tool: str = "remote.job_tail",
+) -> dict[str, Any]:
     endpoint, record, _record_path = _load_record(endpoint, job_id)
     started = utc_now_iso()
     start = time.monotonic()
@@ -455,9 +469,24 @@ def remote_job_tail(endpoint: Endpoint | None, *, job_id: str, lines: int = 80, 
         lines = 1
     try:
         supervisor = control(endpoint, job_id, "tail", lines=lines)
+        if yield_time_ms is not None and int(yield_time_ms) > 0:
+            wait_sec = min(20.0, max(0.0, int(yield_time_ms) / 1000.0))
+            deadline = time.monotonic() + wait_sec
+            initial_out = (supervisor.get("stdout"), supervisor.get("stderr"))
+            while (
+                supervisor.get("state") in {"prepared", "running"}
+                and (supervisor.get("stdout"), supervisor.get("stderr")) == initial_out
+                and time.monotonic() < deadline
+            ):
+                time.sleep(min(1.0, max(0.05, deadline - time.monotonic())))
+                if time.monotonic() >= deadline:
+                    break
+                supervisor = control(endpoint, job_id, "tail", lines=lines)
+    except TimeoutError:
+        raise
     except (RemoteExecutionError, ValueError, RuntimeError, OSError) as exc:
         result = make_result(
-            tool="remote.job_tail",
+            tool=tool,
             target=endpoint.to_result_target(),
             outcome="failed",
             status="failed",
@@ -485,7 +514,7 @@ def remote_job_tail(endpoint: Endpoint | None, *, job_id: str, lines: int = 80, 
     text = compact_text("".join(sections), limit=MAX_TEXT_CHARS)
     failed = all_missing or supervisor.get("state") == "absent"
     result = make_result(
-        tool="remote.job_tail",
+        tool=tool,
         target=endpoint.to_result_target(),
         outcome="failed" if failed else "success",
         status="log_not_found" if all_missing else "ok",
@@ -497,6 +526,22 @@ def remote_job_tail(endpoint: Endpoint | None, *, job_id: str, lines: int = 80, 
         extra={"job_id": job_id, "lines": lines, "missing_logs": missing, "state": supervisor.get("state")},
     )
     return {"text": text, "result": result}
+
+
+@observed_tool("remote.job_tail")
+@pinned_endpoint
+def remote_job_tail(
+    endpoint: Endpoint | None, *, job_id: str, lines: int = 80, stream: str = "both", yield_time_ms: int | None = None
+) -> dict[str, Any]:
+    return _job_tail_impl(endpoint, job_id=job_id, lines=lines, stream=stream, yield_time_ms=yield_time_ms, tool="remote.job_tail")
+
+
+@observed_tool("remote.job_output")
+@pinned_endpoint
+def remote_job_output(
+    endpoint: Endpoint | None, *, job_id: str, lines: int = 200, stream: str = "both", yield_time_ms: int | None = None
+) -> dict[str, Any]:
+    return _job_tail_impl(endpoint, job_id=job_id, lines=lines, stream=stream, yield_time_ms=yield_time_ms, tool="remote.job_output")
 
 
 def _output_budget_bytes(max_output_tokens: int | None) -> int:
@@ -553,6 +598,8 @@ def remote_job_stdin(endpoint: Endpoint | None, *, job_id: str, chars: str | Non
                         row[key] = observed[key]
         try:
             _save_output(record, path, row)
+        except TimeoutError:
+            raise
         except (OSError, ValueError, RuntimeError) as error:
             return _recording_failure(endpoint, record, path, row, error, tool="remote.job_stdin", started=started, start=start, budget=budget)
     return _session_result(endpoint, record, path, row, tool="remote.job_stdin", started=started, start=start, budget=budget)
@@ -571,6 +618,8 @@ def remote_job_stop(endpoint: Endpoint | None, *, job_id: str, force: bool = Fal
             time.sleep(0.05)
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             supervisor = control(endpoint, job_id, "status", timeout_ms=min(5000, remaining_ms))
+    except TimeoutError:
+        raise
     except (RemoteExecutionError, ValueError, RuntimeError, OSError) as exc:
         result = make_result(
             tool="remote.job_stop",

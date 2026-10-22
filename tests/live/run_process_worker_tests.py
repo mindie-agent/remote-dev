@@ -91,6 +91,8 @@ def run_one(test_id: str) -> tuple[str, int, float, str, str]:
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", "replace")
         return test_id, 124, time.monotonic() - started, stdout, stderr + "\nTIMEOUT"
+    except TimeoutError:
+        raise
     except OSError as exc:
         return test_id, 127, time.monotonic() - started, "", f"{type(exc).__name__}: {exc}"
 

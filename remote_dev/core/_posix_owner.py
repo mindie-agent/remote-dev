@@ -37,6 +37,8 @@ def main() -> int:
             if descriptor != owner_pipe:
                 try:
                     os.close(descriptor)
+                except TimeoutError:
+                    raise
                 except OSError as exc:
                     if exc.errno != errno.EBADF:
                         raise
@@ -54,6 +56,8 @@ def main() -> int:
     os.close(owner_pipe)
     try:
         child = subprocess.Popen(command, pass_fds=inherited)
+    except TimeoutError:
+        raise
     except OSError as exc:
         os.write(notification, json.dumps({"started": False, "errno": exc.errno}).encode("ascii"))
         os.close(notification)

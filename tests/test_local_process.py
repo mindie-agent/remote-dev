@@ -5,6 +5,7 @@ import errno
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -333,7 +334,7 @@ def test_darwin_stop_reaps_a_group_leader_that_is_already_a_zombie():
         while time.monotonic() < deadline:
             # Do not poll/wait Popen here: keeping our exited child unreaped
             # makes the zombie-only group deterministic instead of a timing race.
-            status = subprocess.run(['/bin/ps', '-o', 'stat=', '-p', str(owner.process.pid)],
+            status = subprocess.run([shutil.which('ps') or '/bin/ps', '-o', 'stat=', '-p', str(owner.process.pid)],
                                     capture_output=True, text=True, check=True, timeout=1).stdout.strip()
             if status.startswith('Z'):
                 break

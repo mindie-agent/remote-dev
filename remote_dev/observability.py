@@ -27,7 +27,7 @@ _tool = contextvars.ContextVar("remote_dev_tool_operation", default=None)
 _REPORT_OPERATIONS = frozenset({
     "remote.read", "remote.write", "remote.edit", "remote.multi_edit", "remote.bash",
     "remote.glob", "remote.grep", "remote.ls", "remote.apply_patch", "remote.job_status",
-    "remote.job_tail", "remote.job_stop", "remote.job_stdin", "remote.artifact_manifest",
+    "remote.job_tail", "remote.job_output", "remote.job_stop", "remote.job_stdin", "remote.artifact_manifest",
     "remote.artifact_pull", "remote.artifact_push", "remote.context_snapshot",
     "remote.probe", "remote.python",
 })

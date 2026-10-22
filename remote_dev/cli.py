@@ -190,10 +190,10 @@ def build_parser(tool: str) -> argparse.ArgumentParser:
         parser.add_argument("--patch")
         parser.add_argument("--patch-file")
         parser.add_argument("--command")
-    elif tool in {"job_status", "job_tail", "job_stop", "job_stdin"}:
+    elif tool in {"job_status", "job_tail", "job_output", "job_stop", "job_stdin"}:
         parser.add_argument("--job-id", "--session-id", dest="job_id", required=False)
-        if tool == "job_tail":
-            parser.add_argument("--lines", type=int, default=80)
+        if tool in {"job_tail", "job_output"}:
+            parser.add_argument("--lines", type=int, default=200 if tool == "job_output" else 80)
             parser.add_argument("--stream", default="both", choices=["stdout", "stderr", "both"])
         if tool == "job_stdin":
             parser.add_argument("--chars", help="Bytes to write to the job's stdin; omit to only poll new output.")
@@ -247,7 +247,7 @@ def run_tool(tool: str, args: argparse.Namespace) -> dict[str, Any]:
     # them; otherwise an argparse default could shadow an explicit alias.
     explicit = normalize_arguments(f"remote.{tool}", load_input_json(args.input_json)) if args.input_json else {}
     data.update(explicit)
-    if tool not in {"job_status", "job_tail", "job_stdin", "job_stop"} or has_selector(data):
+    if tool not in {"job_status", "job_tail", "job_output", "job_stdin", "job_stop"} or has_selector(data):
         resolve_endpoint(data)
     from remote_dev.mcp.tools import call_tool
     return call_tool(f"remote.{tool}", data)

@@ -1,13 +1,19 @@
-"""Example consumer resolver plugin for remote-dev.
+"""
+[Role] Example consumer resolver plugin mapping a lab name to an endpoint (`resolver_plugin.py`).
+[Invariants]
+- Resolver callbacks return an `Endpoint` or fail explicitly; a missing lab file is a configuration error, never an implicit host default.
+- Consumer knowledge stays in this plugin; remote-dev only invokes the registered resolver.
+[Timeouts & Locks]
+- In-memory JSON lookup with no locks; callers own remote connection deadlines.
+[Side-Effect Policy]
+- Read-only local file lookup; no network calls, cache writes, or remote execution.
 
 Load it into the MCP server (or any CLI wrapper) with:
 
     REMOTE_DEV_RESOLVERS=/absolute/path/to/examples/resolver_plugin.py:setup
 
-The plugin owns every piece of consumer knowledge - here a tiny JSON file
-mapping a ``lab`` name to a host/port - and remote-dev only ever calls back
-into it. Replace the lookup with whatever your environment has: a machine
-inventory, a session registry, a worktree binding file, a coordinator API.
+Replace the tiny JSON lookup with a machine inventory, session registry, or
+coordinator API; remote-dev only calls back into the registered resolver.
 """
 from __future__ import annotations
 

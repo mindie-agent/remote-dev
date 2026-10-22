@@ -95,6 +95,8 @@ class RpcConnection:
                     return
                 self.error_tail.extend(chunk)
                 del self.error_tail[:-4000]
+        except TimeoutError:
+            raise
         except (OSError, ValueError):
             return
 
@@ -116,6 +118,8 @@ class RpcConnection:
                     waiter = self.pending.get(value.get("id"))
                 if waiter is not None:
                     waiter.put(value)
+        except TimeoutError:
+            raise
         except (OSError, ValueError) as exc:
             failure = f"SSH RPC protocol failed: {exc}; submitted operation outcome may be unknown"
         finally:
@@ -201,6 +205,8 @@ class RpcConnection:
                 self.sent_codes.move_to_end(code_key)
                 if len(self.sent_codes) > 32:
                     self.sent_codes.popitem(last=False)
+            except TimeoutError:
+                raise
             except (OSError, ValueError) as exc:
                 with self.state_lock:
                     self.pending.pop(identifier, None)

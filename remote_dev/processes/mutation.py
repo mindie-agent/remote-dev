@@ -41,6 +41,8 @@ def remote_mutation_lock(cancelled=None):
             try:
                 acquire()
                 break
+            except TimeoutError:
+                raise
             except (BlockingIOError, OSError):
                 time.sleep(0.02)
         try:

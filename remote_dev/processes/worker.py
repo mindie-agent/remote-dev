@@ -13,24 +13,8 @@
 """
 from __future__ import annotations
 
-import contextlib
-import ctypes
-import errno
-import fcntl
-import hashlib
-import json
-import math
-import os
-import pty
-import re
-import select
-import signal
-import subprocess
-import struct
-import sys
-import termios
-import time
-import uuid
+import contextlib, ctypes, errno, fcntl, hashlib, json, math, os, pty, re
+import select, signal, subprocess, struct, sys, termios, time, uuid
 from pathlib import Path
 
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,95}$")
@@ -38,33 +22,22 @@ ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 JOB_TOKEN_ENV = "REMOTE_DEV_JOB_TOKEN"
 JOB_ENV_PREFIX = "REMOTE_DEV_JOB_"
 JOBS_DIRNAME = ".remote-dev"
-# In-memory cap for stdin bytes accepted from the FIFO but not yet consumed by
-# the child pipe. Past the cap the worker stops draining the FIFO so a writer
-# blocks (or a nonblocking writer gets EAGAIN) instead of growing worker RAM.
+# Cap FIFO bytes buffered in worker RAM; past it we stop draining so writers block.
 STDIN_BUFFER_CAP = 262144
-# A nonblocking pipe write of at most PIPE_BUF bytes is all-or-nothing
-# (POSIX), which keeps every accepted stdin prefix on an exact byte count the
-# caller can map back to characters.
+# POSIX PIPE_BUF writes are atomic, keeping accepted stdin prefixes on exact bytes.
 STDIN_WRITE_CHUNK = getattr(select, "PIPE_BUF", 512)
 # States in which a job may still append to its logs.
 LIVE_JOB_STATES = frozenset({"prepared", "running", "uncertain"})
 _INITIAL_STOP_GRACE_SECONDS = float(os.environ.get("REMOTE_DEV_STOP_GRACE_SECONDS", "2.0"))
 STOP_GRACE_SECONDS = _INITIAL_STOP_GRACE_SECONDS
 
-
 def _stop_grace_seconds() -> float:
     if STOP_GRACE_SECONDS != _INITIAL_STOP_GRACE_SECONDS:
         return float(STOP_GRACE_SECONDS)
     return float(os.environ.get("REMOTE_DEV_STOP_GRACE_SECONDS", str(STOP_GRACE_SECONDS)))
 
-
 def _utf8_incomplete_tail(chunk):
-    """Bytes at the end of chunk that start but do not finish a UTF-8 sequence (0-3).
-
-    Only genuinely incomplete prefixes count; bytes that cannot extend into a
-    valid sequence return 0 so they flush as U+FFFD instead of stalling a read
-    cursor or a stdin write forever.
-    """
+    """Trailing bytes (0-3) of an unfinished UTF-8 sequence; invalid tails return 0."""
     size = len(chunk)
     for back in range(1, min(4, size) + 1):
         byte = chunk[size - back]
@@ -83,7 +56,6 @@ def _utf8_incomplete_tail(chunk):
         return back if back < needed else 0
     return 0
 
-
 def atomic_json(path, value):
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex)
     with temporary.open("x") as stream:
@@ -93,14 +65,11 @@ def atomic_json(path, value):
         os.fsync(stream.fileno())
     os.replace(temporary, path)
 
-
 def read_json(path):
     return json.loads(path.read_text()) if path.exists() else None
 
-
 def boot_id():
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-
 
 def process_identity(pid):
     try:
@@ -110,14 +79,8 @@ def process_identity(pid):
     except (FileNotFoundError, ProcessLookupError):
         return None
 
-
 def supervised_family(receipt):
-    """Walk the verified subreaper's kernel child lists, including all threads.
-
-    All job descendants remain below this live anchor, including setsid and
-    clean-environment daemons. A racing exit can postpone a signal to the next
-    drain pass; it cannot report quiet while the anchor remains alive.
-    """
+    """Walk the verified subreaper's kernel child lists, including all threads."""
     anchor = process_identity(receipt["pid"])
     if not anchor or anchor["state"] == "Z" or anchor["start_ticks"] != receipt["start_ticks"]:
         return None
@@ -142,14 +105,11 @@ def supervised_family(receipt):
             unknown.append(f"cannot observe children of {pid}")
     return list(found.values()), unknown
 
-
 def owned_processes(receipt):
     """Observe marker ownership and ancestry below the verified subreaper.
 
-    Ancestry also covers setsid/clean-environment daemon children. The worker
-    stays alive and adopts orphans until all descendants have been reaped.
-    An unowned member of the recorded process group is ambiguous, not free.
-    The random marker identifies processes; it is not an access credential.
+    Ancestry covers setsid/clean-environment daemons; unowned process-group
+    members are ambiguous, not free. The marker identifies, never authorizes.
     """
     if receipt["boot_id"] != boot_id():
         return [], ["boot identity changed"]
@@ -174,9 +134,7 @@ def owned_processes(receipt):
         except (FileNotFoundError, ProcessLookupError):
             continue
         except PermissionError:
-            # Other users' unrelated processes are not this job's family.
-            # Readable ancestry still identifies our descendants without env;
-            # unowned members of the claimed group become unknown below.
+            # Other users' processes are not family; readable ancestry still helps.
             if identity is None:
                 unknown.append(int(entry.name))
     anchor = identities.get(receipt["pid"])
@@ -191,16 +149,13 @@ def owned_processes(receipt):
     unknown.extend(pid for pid, row in identities.items() if row["pgid"] == receipt["pgid"] and pid not in tagged)
     return [identities[pid] for pid in sorted(tagged)], unknown
 
-
 def job_status(directory):
     receipt = read_json(directory / "receipt.json")
     if receipt is None:
         return {"state": "uncertain", "reason": "launch intent exists without a process receipt", "quiet": False}
     result = read_json(directory / "result.json")
-    # A verified subreaper's completion is a stronger fact than another /proc
-    # walk. It cannot publish this receipt until all descendants are reaped.
-    # The supervisor itself (receipt["pid"]) may still be exiting Python when
-    # result.json is first observed; do not mistake it for a running child.
+    # A verified subreaper completion is stronger than a /proc walk; its own
+    # receipt PID may still be exiting Python and is not a running child.
     if (result and result.get("descendants_drained") and
             receipt.get("supervision") == "subreaper" and receipt["boot_id"] == boot_id()):
         processes = []
@@ -247,19 +202,13 @@ def job_status(directory):
             "supervisor_error": read_json(directory / "supervisor-error.json"),
             "remote_dir": str(directory), "gate_open": bool(gate)}
 
-
 def worker(directory):
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(36, 1, 0, 0, 0) != 0:  # Linux PR_SET_CHILD_SUBREAPER
         raise OSError(ctypes.get_errno(), "cannot supervise orphan descendants")
     spec = read_json(directory / "spec.json")
-    # Interactive sessions: callers write to the on-disk FIFO through the
-    # "stdin" control action; this proxy forwards bytes into the child's
-    # pipe so stdin EOF stays under worker control (stdin-eof.json). A plain
-    # background job keeps DEVNULL stdin. The reader is attached before the
-    # readiness marker: prepare only returns after supervisor-ready.json, so a
-    # stdin write after prepare/go always finds a reader (opening a FIFO
-    # O_WRONLY|O_NONBLOCK without a reader fails with ENXIO).
+    # Interactive jobs proxy the on-disk FIFO into the child pipe, attaching the
+    # reader before supervisor-ready.json so a post-prepare write always finds it.
     tty = bool(spec.get("tty"))
     interactive = bool(spec.get("interactive")) or tty
     fifo_fd = None
@@ -334,6 +283,8 @@ def worker(directory):
                         chunk = os.read(master_fd, 65536)
                     except BlockingIOError:
                         break
+                    except TimeoutError:
+                        raise
                     except OSError as exc:
                         if exc.errno != errno.EIO:
                             raise
@@ -369,6 +320,8 @@ def worker(directory):
                         del pending_stdin[:written]
                     except BlockingIOError:
                         pass
+                    except TimeoutError:
+                        raise
                     except OSError as exc:
                         if exc.errno not in (errno.EPIPE, errno.EIO):
                             raise
@@ -421,7 +374,6 @@ def worker(directory):
                           "descendant_drain_ms": round((command_finished - shell_exit_observed) * 1000, 3)}}
     atomic_json(directory / "result.json", result)
 
-
 def signal_processes(processes, sig, *, exclude=None):
     for process in processes:
         if process["pid"] == exclude:
@@ -431,22 +383,14 @@ def signal_processes(processes, sig, *, exclude=None):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(process["pid"], sig)
 
-
 def resolve_runtime_root(request, *, absent_is_result):
-    """Resolve the runtime root without creating it.
-
-    A FileNotFoundError is the same authoritative fact the worker already
-    reports for an absent job directory. It may become the explicit absent
-    result only for the caller actions that this worker already treats as
-    observation/stop controls. Every other resolution failure stays visible.
-    """
+    """Resolve the runtime root without creating it; absent is a result only for observation."""
     try:
         return Path(request["root"]).resolve(strict=True)
     except FileNotFoundError:
         if absent_is_result:
             return None
         raise
-
 
 def cancel_and_drain(request, source):
     status = control_job({**request, "action": "stop"}, source)
@@ -456,13 +400,8 @@ def cancel_and_drain(request, source):
         status = control_job({**request, "action": "status"}, source)
     return status
 
-
 def control_job(request, source, cancel_event=None):
-    """One process authority for gated launches and native execute/poll calls.
-
-    launch and exchange combine existing actions on the remote side. They do
-    not hold the job mutation lock while waiting, so stop can interrupt them.
-    """
+    """One process authority for gated launches and native execute/poll calls."""
     action = request["action"]
     if action == "launch":
         if cancel_event is not None and cancel_event.is_set():
@@ -526,10 +465,7 @@ def control_job(request, source, cancel_event=None):
                     first_available_at = now
                 if last_output_change is None:
                     last_output_change = now
-                # Synchronous SDK capture already waits for completion. For
-                # non-blocking/interactive calls, give fast commands a brief
-                # completion/coalescing grace window before returning partial
-                # streaming output so short commands finish in one round trip.
+                # Synchronous capture waits for completion; otherwise coalesce short output.
                 if not request.get("wait_for_exit"):
                     grace_deadline = min(deadline, first_available_at + 0.5, last_output_change + 0.15)
                     if now >= grace_deadline:
@@ -545,10 +481,8 @@ def control_job(request, source, cancel_event=None):
     identifier = request["job_id"]
     if not JOB_ID_RE.fullmatch(identifier):
         raise ValueError("invalid job id")
-    # Observation/stop controls already report an absent job directory as
-    # {state: absent, quiet: true}; an authoritatively absent runtime root is
-    # the same fact and must not require the root to be created. prepare, go,
-    # stdin, and launch keep strict resolution and surface the failure.
+    # Observation/stop controls treat an absent root as absent; mutating actions
+    # keep strict resolution and surface the failure.
     root = resolve_runtime_root(request, absent_is_result=action in {"status", "stop", "tail"})
     if root is None:
         return {"state": "absent", "quiet": True}
@@ -634,9 +568,7 @@ def control_job(request, source, cancel_event=None):
                         raise RuntimeError(f"waiting supervisor exited with {process.returncode} before readiness: {detail}")
                     time.sleep(0.005)
             except BaseException as error:
-                # The job mutation lock still excludes go: no command has
-                # been activated. Reclaim our exact waiting child on failure,
-                # including failure to persist its receipt, without any TTL.
+                # The mutation lock still excludes go; reclaim our exact child on failure.
                 try:
                     if process.poll() is None:
                         process.terminate()
@@ -673,10 +605,8 @@ def control_job(request, source, cancel_event=None):
                 return status
             processes = status["processes"]
             atomic_json(directory / "stop.json", {"at": time.time(), "force": bool(request.get("force"))})
-            # Signal only PIDs whose marker and start ticks were just observed.
-            # Do not infer ownership from a PID alone or kill a whole container.
-            # Keep the subreaper alive while it drains the family and publishes
-            # completion. Killing it first would orphan clean-env descendants.
+            # Signal only PIDs whose marker/start ticks were just observed; keep
+            # the subreaper alive so it drains and publishes completion.
             signal_processes(processes, signal.SIGKILL if request.get("force") else signal.SIGTERM,
                              exclude=receipt["pid"] if receipt.get("supervision") == "subreaper" else None)
         elif action == "tail":
@@ -691,9 +621,7 @@ def control_job(request, source, cancel_event=None):
                 if path.exists():
                     offset_key = name + "_offset"
                     if request.get(offset_key) is not None:
-                        # Incremental read for interactive sessions: return only
-                        # bytes after the caller's cursor, plus the new cursor.
-                        # Repeated polls never replay earlier output.
+                        # Incremental read: bytes after the caller cursor only.
                         start_offset = max(0, int(request[offset_key]))
                         size = path.stat().st_size
                         with path.open("rb") as stream:
@@ -710,11 +638,8 @@ def control_job(request, source, cancel_event=None):
                             # complete the sequence, so flush the tail now.
                             hold = 0
                         if hold:
-                            # Hold back a UTF-8 character split by the byte
-                            # budget; the next poll re-reads and completes it
-                            # instead of corrupting the stream into U+FFFD. The
-                            # cursor advances past returned bytes only, so the
-                            # held bytes stay counted in bytes_remaining.
+                            # Hold back a split UTF-8 character; the next poll
+                            # re-reads it and bytes_remaining stays accurate.
                             chunk = chunk[:-hold]
                         if shared_budget:
                             # Invalid source bytes expand to three-byte U+FFFD.
@@ -756,14 +681,13 @@ def control_job(request, source, cancel_event=None):
                         "reason": "stdin is already closed (eof); start a new interactive job for more input"}
             written = 0
             if raw:
-                # Bounded partial acceptance: every write is at most
-                # STDIN_WRITE_CHUNK (<= PIPE_BUF) and ends on a UTF-8 character
-                # boundary, so a nonblocking write either lands completely or
-                # raises EAGAIN. The accepted prefix maps to an exact character
-                # count (written_chars) for retrying the remainder — a byte
-                # count cannot slice a Python/JSON string at character level.
+                # Each write is <= PIPE_BUF and ends on a UTF-8 boundary, so a
+                # nonblocking write lands completely or raises EAGAIN. The accepted
+                # prefix maps to an exact character count for retrying the rest.
                 try:
                     fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                except TimeoutError:
+                    raise
                 except OSError as exc:
                     if exc.errno != errno.ENXIO:
                         raise
@@ -803,13 +727,8 @@ def control_job(request, source, cancel_event=None):
             raise ValueError("unsupported job action")
         return job_status(directory)
 
-
 def run_supervisor(directory):
-    """Retain an internal failure and drain children before publishing it.
-
-    The supervisor's own evidence is separate from the command's stdout/stderr.
-    Failure to observe/reclaim descendants is uncertainty, never clean exit.
-    """
+    """Retain an internal failure and drain children before publishing it."""
     try:
         worker(directory)
     except BaseException as exc:
@@ -846,7 +765,6 @@ def run_supervisor(directory):
             sys.stderr.write("Supervisor cleanup/recording also failed:\n" + traceback.format_exc()[-8000:])
             sys.stderr.flush()
         raise SystemExit(1)
-
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("--worker", "supervise"):

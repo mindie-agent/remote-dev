@@ -1,3 +1,13 @@
+"""
+[Role] Endpoint-scoped read-ledger facade for SHA-256 optimistic-concurrency records (`read_ledger.py`).
+[Invariants]
+- Paths and records are always endpoint- and optional-client-context-scoped; a read never falls back to a global ledger.
+- Lookups return `None` for an absent record rather than synthesizing freshness.
+[Timeouts & Locks]
+- Delegates persistence, atomic replacement, and `record_lock` to `state_store`; no additional locks are held here.
+[Side-Effect Policy]
+- `record_read` writes one endpoint-scoped ledger record; `ledger_path`/`load_read` are read-only.
+"""
 from __future__ import annotations
 
 from pathlib import Path

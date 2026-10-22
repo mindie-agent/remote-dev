@@ -34,7 +34,7 @@ import sys
 payload = json.loads(sys.stdin.read())
 root = pathlib.Path(payload["root"])
 
-def run(cmd, timeout=None):
+def run(cmd, timeout=10):
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
         return {"returncode": proc.returncode, "stdout_tail": (proc.stdout or "")[-2000:], "stderr_tail": (proc.stderr or "")[-2000:]}
@@ -121,6 +121,8 @@ def remote_probe(endpoint: Endpoint, *, timeout_ms: int | None = None, diagnose_
     recording_error = None
     try:
         snapshot = write_context_snapshot(endpoint, summary, data) if status == "ok" else None
+    except TimeoutError:
+        raise
     except (OSError, ValueError, RuntimeError) as exc:
         snapshot = None
         recording_error = f"{type(exc).__name__}: {exc}"
@@ -148,7 +150,9 @@ def remote_probe(endpoint: Endpoint, *, timeout_ms: int | None = None, diagnose_
             python=summary.get("python", ""),
         )
     if recording_error:
+        execution_outcome, execution_status = result["outcome"], result["status"]
         result.update(outcome="failed", status="local_recording_failed", operation_completed=True,
+                      execution_outcome=execution_outcome, execution_status=execution_status,
                       recording_error=recording_error,
                       summary="Remote probe completed, but the local context snapshot could not be recorded.")
         text += result["summary"] + "\n" + recording_error + "\n"

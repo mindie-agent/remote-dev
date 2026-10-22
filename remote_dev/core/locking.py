@@ -61,6 +61,8 @@ def record_lock(path: Path, *, timeout_seconds: float | None = None):
                     try:
                         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                         break
+                    except TimeoutError:
+                        raise
                     except OSError:
                         waiting()
                         time.sleep(0.02)

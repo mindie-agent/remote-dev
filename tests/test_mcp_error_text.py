@@ -21,6 +21,41 @@ class McpErrorTextTests(unittest.TestCase):
         self.assertIn(detail, result["content"][0]["text"])
         self.assertEqual(result["structuredContent"]["error"], detail)
 
+    def test_succeeded_remote_result_survives_local_recording_failure(self) -> None:
+        payload = {
+            "text": "remote write completed\nlocal recording failed\n",
+            "result": {
+                "outcome": "failed",
+                "status": "local_recording_failed",
+                "operation_completed": True,
+                "execution_outcome": "success",
+                "execution_status": "written",
+                "local_recording": {"status": "failed", "error": "OSError: disk full"},
+            },
+        }
+        with patch.object(server, "call_tool", return_value=payload), \
+                patch.object(server, "runtime_status", return_value={}), patch.object(server, "send") as send:
+            server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "remote_write"}})
+        result = send.call_args.args[0]["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["structuredContent"]["local_recording"]["error"], "OSError: disk full")
+
+    def test_local_recording_failure_keeps_erroneous_execution_outcome_as_error(self) -> None:
+        payload = {
+            "text": "remote operation failed\n",
+            "result": {
+                "outcome": "failed",
+                "status": "local_recording_failed",
+                "operation_completed": True,
+                "execution_outcome": "failed",
+                "local_recording": {"status": "failed", "error": "OSError: disk full"},
+            },
+        }
+        with patch.object(server, "call_tool", return_value=payload), \
+                patch.object(server, "runtime_status", return_value={}), patch.object(server, "send") as send:
+            server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "remote_write"}})
+        self.assertTrue(send.call_args.args[0]["result"]["isError"])
+
     def test_failed_search_is_not_reported_as_zero_matches(self) -> None:
         detail = "grep fallback cannot honor --type py; install ripgrep (rg) or use --glob"
         with patch("remote_dev.core.search_ops.run_remote_python", return_value={"status": "rg_required", "error": detail}):

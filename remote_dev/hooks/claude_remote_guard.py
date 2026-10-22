@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+[Role] Claude Code hook adapter that blocks raw remote transports (`claude_remote_guard.py`).
+[Invariants]
+- A blocked decision exits `2` with the reason on stderr; allowed context is written to stdout exactly once.
+- Payload interpretation is delegated to `guard_common`; no tool-specific policy is duplicated here.
+[Timeouts & Locks]
+- Reads one hook payload from stdin synchronously; no locks or network calls.
+[Side-Effect Policy]
+- Process-local stdin/stdout/stderr only; never edits files or invokes remote commands.
+"""
 from __future__ import annotations
 
 import sys

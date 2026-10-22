@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+[Role] End-to-end scaffold validator for tools, schemas, aliases, resources, and CLI parity (`validate_remote_dev_scaffold.py`).
+[Invariants]
+- Reports every check with an explicit `ok`/`failed` status and bounded output tails; a failed child command is never reported as success.
+- Validates the installed package surface through the same dispatcher callers use.
+[Timeouts & Locks]
+- Every local subprocess is bounded by `timeout=60`; parallel checks are capped by the configured executor.
+[Side-Effect Policy]
+- Spawns read-only local validation commands and may create a temporary directory; never mutates remote endpoints.
+"""
 from __future__ import annotations
 
 import argparse
@@ -33,6 +43,7 @@ def run_command(name: str, argv: list[str]) -> dict[str, Any]:
         encoding="utf-8",
         errors="replace",
         check=False,
+        timeout=60,
     )
     return {
         "name": name,

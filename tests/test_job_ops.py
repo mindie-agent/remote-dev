@@ -172,6 +172,8 @@ class RemoteJobControlTests(unittest.TestCase):
                 grace = float(os.environ["REMOTE_DEV_STOP_GRACE_SECONDS"])
                 try:
                     proc.terminate()
+                except TimeoutError:
+                    raise
                 except OSError:
                     pass
                 time.sleep(grace)
@@ -179,6 +181,8 @@ class RemoteJobControlTests(unittest.TestCase):
                 still_alive_after_grace = proc.poll() is None
                 try:
                     proc.kill()
+                except TimeoutError:
+                    raise
                 except OSError:
                     pass
                 proc.wait(timeout=2.0)
@@ -387,6 +391,27 @@ class StartRemoteJobTests(unittest.TestCase):
         self.assertEqual(seen["lines"], MAX_JOB_TAIL_LINES)
         self.assertIn("clamped", payload["result"]["warnings"][0])
         self.assertLessEqual(len(payload["text"]), MAX_TEXT_CHARS)
+
+    def test_tail_folds_consecutive_repeated_log_lines_preserving_diagnostics(self) -> None:
+        job_id = "job-tail-repeat-fold"
+        state_store.atomic_write_json(
+            state_store.job_record_path(self.endpoint, job_id),
+            {"job_id": job_id, "target": self.endpoint.to_result_target(), "remote_dir": "/srv/app/.remote-dev/jobs/job-tail-repeat-fold"},
+        )
+        noisy_stdout = (
+            "[1/64] Building AscendC kernel tilings...\n"
+            + ("warning: unused parameter 'workspace_ptr' [-Wunused-parameter]\n" * 400)
+            + ("retry_probe: waiting for HCCL rank 0...\n" * 2)
+            + "error: AICore UB overflow at fused_rmsnorm.cpp:142 (expected <= 196608B, got 262144B)\n"
+        )
+        with mock.patch.object(job_ops, "control", return_value=_supervisor(stdout=noisy_stdout, stderr="")):
+            payload = job_ops.remote_job_tail(None, job_id=job_id, lines=500)
+        text = payload["text"]
+        self.assertIn("[1/64] Building AscendC kernel tilings...", text)
+        self.assertIn("[previous line repeated 399 more times]", text)
+        self.assertEqual(text.count("retry_probe: waiting for HCCL rank 0..."), 2)
+        self.assertIn("error: AICore UB overflow at fused_rmsnorm.cpp:142", text)
+        self.assertNotIn("<remote-dev text truncated", text)
 
     def test_running_session_never_reports_exit_code_in_summary(self) -> None:
         row = _supervisor(
