@@ -24,6 +24,10 @@ from typing import Any
 from .errors import RemoteExecutionError, record_cleanup_failure
 
 
+JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+
 class OwnedProcess:
     """A local subprocess whose inherited child group ends with its owner.
 
@@ -33,15 +37,19 @@ class OwnedProcess:
     """
 
     def __init__(self, argv: Sequence[str], *, cwd=None,
-                 env: Mapping[str, str] | None = None, **stdio: Any) -> None:
+                 env: Mapping[str, str] | None = None,
+                 max_memory_mb: int | None = None, **stdio: Any) -> None:
         if isinstance(argv, (str, bytes)) or not argv:
             raise ValueError("local command requires a non-empty argv array")
+        if max_memory_mb is not None and (type(max_memory_mb) is not int or max_memory_mb <= 0):
+            raise ValueError("max_memory_mb must be a positive integer")
         forbidden = {"shell", "start_new_session", "creationflags", "preexec_fn"} & stdio.keys()
         if forbidden:
             raise ValueError("process ownership controls " + ", ".join(sorted(forbidden)))
         self._closed = False
         self._owner_fd = None
-        self._job = _WindowsJob() if os.name == "nt" else None
+        self.max_memory_mb = max_memory_mb
+        self._job = _WindowsJob(max_memory_mb=max_memory_mb) if os.name == "nt" else None
         options = dict(stdio, cwd=cwd, env=None if env is None else {**os.environ, **env})
         if self._job is None:
             options["start_new_session"] = True
@@ -196,11 +204,14 @@ class OwnedProcess:
 class _WindowsJob:
     """Win32 declarations stay lazy so POSIX has no Windows dependency."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_memory_mb: int | None = None) -> None:
+        if max_memory_mb is not None and (type(max_memory_mb) is not int or max_memory_mb <= 0):
+            raise ValueError("max_memory_mb must be a positive integer")
         import ctypes
         from ctypes import wintypes
 
         self.ctypes = ctypes
+        self.max_memory_mb = max_memory_mb
 
         class BasicLimits(ctypes.Structure):
             _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
@@ -239,7 +250,11 @@ class _WindowsJob:
         self.handle = self.check(create(None, None))
         try:
             value = ExtendedLimits()
-            value.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if max_memory_mb is not None:
+                flags |= JOB_OBJECT_LIMIT_JOB_MEMORY
+                value.job_memory = int(max_memory_mb) * 1024 * 1024
+            value.basic.flags = flags
             self.check(limits(self.handle, 9, ctypes.byref(value), ctypes.sizeof(value)))
         except BaseException:
             self.close()
