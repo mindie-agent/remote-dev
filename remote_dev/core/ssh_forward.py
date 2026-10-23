@@ -194,15 +194,16 @@ class LocalForward:
                     _transport().record_cleanup_failure(failure, cleanup_error)
                 raise failure
             try:
+                probe_timeout = 0.5 if deadline is None else min(0.5, max(0.05, deadline - time.monotonic()))
                 with socket.socket(family, socket.SOCK_STREAM) as sock:
-                    sock.settimeout(0.5)
+                    sock.settimeout(probe_timeout)
                     sock.connect((self.local_host, self.local_port))
                 return
-            except TimeoutError:
-                raise
-            except OSError as exc:
+            except (TimeoutError, OSError) as exc:
                 last_error = str(exc)
-                time.sleep(0.2)
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05 if deadline is not None else 0.2)
         raise _transport().RemoteExecutionError(
             f"timed out waiting for ssh local forward on {self.local_host}:{self.local_port} ({last_error})"
         )

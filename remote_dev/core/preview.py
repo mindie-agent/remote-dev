@@ -32,7 +32,7 @@ def _tail_slice(value: str, count: int) -> str:
 
 
 def fold_repeated_lines(value: str) -> str:
-    """Collapse runs of >2 identical consecutive lines while preserving trailing newline."""
+    """Collapse runs of >2 identical consecutive non-blank lines when folding strictly shrinks text."""
     if "\n" not in value:
         return value
     trailing_newline = value.endswith("\n")
@@ -40,17 +40,23 @@ def fold_repeated_lines(value: str) -> str:
     deduped: list[str] = []
     index = 0
     total = len(lines)
+    any_folded = False
     while index < total:
         next_index = index + 1
         while next_index < total and lines[next_index] == lines[index]:
             next_index += 1
         repeats = next_index - index
-        deduped.append(lines[index])
-        if repeats > 2:
-            deduped.append(f"[previous line repeated {repeats - 1} more times]")
-        elif repeats == 2:
-            deduped.append(lines[index])
+        line = lines[index]
+        marker = f"[previous line repeated {repeats - 1} more times]"
+        if repeats > 2 and line.strip() and (repeats - 1) * (len(line) + 1) > len(marker) + 1:
+            deduped.append(line)
+            deduped.append(marker)
+            any_folded = True
+        else:
+            deduped.extend(lines[index:next_index])
         index = next_index
+    if not any_folded:
+        return value
     folded = "\n".join(deduped)
     if trailing_newline and folded:
         folded += "\n"

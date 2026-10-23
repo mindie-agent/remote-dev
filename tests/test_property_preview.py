@@ -138,6 +138,14 @@ class CompactTextProperties(unittest.TestCase):
         entire value. A caller asking for no tail must get ``""``."""
         self.assertEqual(preview.tail_text("x" * 200, 0), "")
 
+    def test_fold_repeated_lines_never_expands_blank_or_short_runs(self) -> None:
+        """Repeated blank or short lines within ``limit`` must never expand into
+        a longer ``[previous line repeated ...]`` marker and trigger truncation."""
+        value = "header\n\n\n\nfooter\n" + ("ok\n" * 4)
+        self.assertEqual(preview.fold_repeated_lines(value), value)
+        self.assertEqual(preview.compact_text(value, limit=len(value)), value)
+
+
 
 class RemoteReadPaginationProperties(unittest.TestCase):
     def setUp(self) -> None:
