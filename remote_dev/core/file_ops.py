@@ -21,10 +21,10 @@ from .locking import serialize_mutation
 from .endpoint import Endpoint
 from .container_endpoint import pinned_endpoint
 from .errors import PathPolicyError
-from .path_policy import assert_under_root, join_under_root
+from .path_policy import join_under_root
 from .preview import MAX_LINE_CHARS, MAX_READ_LINES, compact_text
 from .read_paging import format_read_text
-from remote_dev.result import make_result, new_invocation_id, utc_now_iso
+from remote_dev.result import make_result, utc_now_iso
 from .ssh_transport import run_remote_python
 from .state_store import load_write_ledger_guard, resolve_ledger_scope, write_read_ledger
 

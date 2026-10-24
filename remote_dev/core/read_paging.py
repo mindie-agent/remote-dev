@@ -233,7 +233,10 @@ def _read_too_small(
     result["status"] = "max_chars_too_small"
     result["summary"] = f"RemoteRead needs_input for {file_info.get('path', '')}"
     result["error"] = message
-    result["file"] = {k: v for k, v in file_info.items() if k != "page_lines"}
+    result["file"] = {
+        key: value for key, value in file_info.items()
+        if key not in {"page_lines", "next_offset", "next_column_offset"}
+    }
     result["preview"] = {}
     result["next"] = None
     return result["summary"] + "\n" + message + "\n"
@@ -312,15 +315,10 @@ def _format_paged_read(
     entries = _read_page_entries(body, file_info, utf16_units)
     if entries is None:
         return _format_legacy_read(endpoint_label, result, file_info, body, max_chars=max_chars, utf16_units=utf16_units)
-    if not entries and file_info.get("next_offset") is not None:
-        return _read_too_small(result, file_info, max_chars)
-    total = file_info.get("total_lines")
-    if file_info.get("from_tail"):
-        return _format_tail_read(
-            endpoint_label, result, file_info, body,
-            max_chars=max_chars, utf16_units=utf16_units,
-        )
     if not entries:
+        if file_info.get("next_offset") is not None:
+            return _read_too_small(result, file_info, max_chars)
+        total = file_info.get("total_lines")
         line_start = int(file_info.get("line_start", 0))
         line_end = int(file_info.get("line_end", 0))
         partial = bool(file_info.get("partial", False))
@@ -334,6 +332,12 @@ def _format_paged_read(
             "truncated_line_count": 0,
         }
         return _finalize_read_page(result, file_info, header + "\n" + "\n", page, utf16_units)
+    total = file_info.get("total_lines")
+    if file_info.get("from_tail"):
+        return _format_tail_read(
+            endpoint_label, result, file_info, body,
+            max_chars=max_chars, utf16_units=utf16_units,
+        )
     range_end = _read_range_end(file_info)
     content_offset = int(file_info.get("content_offset") or 0)
 

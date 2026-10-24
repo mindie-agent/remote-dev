@@ -220,6 +220,14 @@ class KimiReadPaginationTests(unittest.TestCase):
         body = self._page_body(payload["text"])
         self.assertEqual(body, "8 | line-8\n9 | line-9\n10 | line-10")
 
+    def test_empty_file_tail_is_ok_not_a_budget_error(self) -> None:
+        (self.root / "empty.txt").write_text("", encoding="utf-8")
+        payload = self._read("empty.txt", offset=-1, limit=10, max_chars=500, utf16_units=True)
+        self.assertEqual(payload["result"]["status"], "ok")
+        self.assertEqual(payload["result"]["file"]["line_start"], 0)
+        self.assertEqual(payload["result"]["file"]["line_end"], 0)
+        self.assertIsNone(payload["result"].get("next"))
+
     def test_negative_tail_budget_keeps_trailing_whole_lines(self) -> None:
         lines = [f"{index}-" + "a" * 295 for index in range(1, 6)]
         (self.root / "tailbudget.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -248,6 +256,7 @@ class KimiReadPaginationTests(unittest.TestCase):
         self.assertEqual(payload["result"]["status"], "max_chars_too_small")
         self.assertIn("too small", payload["text"])
         self.assertIsNone(payload["result"].get("next"))
+        self.assertNotIn("next_offset", payload["result"]["file"])
 
     def test_large_line_output_is_bounded_and_continues(self) -> None:
         source = "z" * 1_200_000
