@@ -132,9 +132,17 @@ def dsh_job_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], nor
         )
         for record in jobs
     ]
-    text = "(no background jobs)" if not projections else "\n".join(
-        f"{job['id']} [{job['kind']}] {job['status']} — {job['label']}" for job in projections
-    )
+    if not projections:
+        text = "(no background jobs)"
+    else:
+        lines = []
+        for job, row in zip(projections, jobs):
+            line = f"{job['id']} [{job['kind']}] {job['status']} — {job['label']}"
+            detail = row.get("status_detail")
+            if detail:
+                line += f" ({detail})"
+            lines.append(line)
+        text = "\n".join(lines)
     return {
         "text": text + "\n",
         "result": make_result(

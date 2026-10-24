@@ -824,6 +824,8 @@ class BackgroundHonestyTests(unittest.TestCase):
         self.assertEqual(job["status"], "running")
         self.assertIn("live status unavailable", job["detail"])
         self.assertIn("last known: running", job["detail"])
+        self.assertIn("live status unavailable", payload["text"])
+        self.assertIn("last known: running", payload["text"])
 
     def test_kimi_task_list_strips_private_job_fields(self) -> None:
         from remote_dev.mcp import native_handlers_kimi as kimi_handlers
