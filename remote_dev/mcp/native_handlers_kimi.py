@@ -116,6 +116,7 @@ def kimi_task_stop(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
 
 @handler("kimi_task_list")
 def kimi_task_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
+    from remote_dev.core.job_ops import _public_job_record
     from remote_dev.core.state_store import list_job_records
     from remote_dev.mcp.schemas import TOOL_SCHEMAS
     from remote_dev.result import make_result
@@ -142,7 +143,7 @@ def kimi_task_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
                 raise caller_error(
                     f"TaskList could not query task {record.get('job_id')}: {type(exc).__name__}: {exc}"
                 ) from exc
-            record = {**record, "state": state}
+            record = _public_job_record({**record, "state": state})
             if active_only and state in _TERMINAL:
                 continue
             jobs.append(record)

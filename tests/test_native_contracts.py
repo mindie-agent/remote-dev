@@ -825,6 +825,39 @@ class BackgroundHonestyTests(unittest.TestCase):
         self.assertIn("live status unavailable", job["detail"])
         self.assertIn("last known: running", job["detail"])
 
+    def test_kimi_task_list_strips_private_job_fields(self) -> None:
+        from remote_dev.mcp import native_handlers_kimi as kimi_handlers
+
+        record = {
+            "job_id": "j", "session_scope": "scope", "description": "demo",
+            "command_preview": "sleep 1", "started_at": "2026-10-24T00:00:00Z",
+            "state": "running", "authorization": {"token": "secret"},
+            "connection": {"host": "h", "password": "secret"},
+            "local_record": "/tmp/j.json",
+        }
+        with (
+            mock.patch(
+                "remote_dev.core.state_store.list_endpoint_records",
+                return_value=[{"endpoint_id": "e"}],
+            ),
+            mock.patch(
+                "remote_dev.core.state_store.list_job_records", return_value=[record]
+            ),
+            mock.patch(
+                "remote_dev.core.state_store.resolve_ledger_scope", return_value="scope"
+            ),
+            mock.patch.object(
+                kimi_handlers, "_live_job", return_value=("running", {})
+            ),
+        ):
+            payload = tools.call_tool("remote_TaskList", {}, profile="kimi")
+        job = payload["result"]["jobs"][0]
+        self.assertEqual(job["job_id"], "j")
+        self.assertEqual(job["state"], "running")
+        self.assertNotIn("authorization", job)
+        self.assertNotIn("connection", job)
+        self.assertNotIn("local_record", job)
+
     def test_dsh_background_nonzero_is_completed_with_exit_detail(self) -> None:
         from remote_dev.mcp import native_handlers_dsh as dsh_handlers
 
