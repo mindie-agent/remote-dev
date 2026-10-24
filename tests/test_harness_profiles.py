@@ -88,8 +88,8 @@ class CatalogTests(unittest.TestCase):
         # advertised on the native wire schema.
         self.assertNotIn("lines", job["properties"])
         read = by_name["remote_read"]["inputSchema"]
-        self.assertEqual(read["properties"]["limit"]["default"], 2000)
-        self.assertEqual(read["properties"]["limit"]["maximum"], 2000)
+        self.assertNotIn("default", read["properties"]["limit"])
+        self.assertNotIn("maximum", read["properties"]["limit"])
 
     def test_kimi_seconds_and_claude_milliseconds_are_not_guessed(self) -> None:
         calls: list[tuple[str, dict]] = []

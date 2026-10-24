@@ -96,10 +96,11 @@ DSH_READ = NativeToolSpec(
     canonical="remote.read",
     description="Read a UTF-8 text file and return line-numbered content (DSH read; default/max 2000 lines).",
     properties={
-        "file_path": {"type": "string", "minLength": 1},
-        "offset": {"type": "number", "minimum": 1, "default": 1},
-        "limit": {"type": "number", "minimum": 1, "maximum": 2000, "default": 2000},
+        "file_path": {"type": "string"},
+        "offset": {"type": "number"},
+        "limit": {"type": "number"},
     },
+    additional_properties=None,
     required=("file_path",),
     defaults={"offset": 1, "limit": 2000},
     compat_properties={
@@ -114,7 +115,6 @@ DSH_READ = NativeToolSpec(
         "node_paths": {"type": "array", "items": {"type": "string"}},
         "client_context_id": {"type": "string"},
     },
-    additional_properties=True,
     normalize=_dsh_read,
 )
 
@@ -123,9 +123,10 @@ DSH_WRITE = NativeToolSpec(
     canonical="remote.write",
     description="Create or fully replace a UTF-8 text file (DSH write; observation policy is local to the host).",
     properties={
-        "file_path": {"type": "string", "minLength": 1},
+        "file_path": {"type": "string"},
         "content": {"type": "string"},
     },
+    additional_properties=None,
     required=("file_path", "content"),
     compat_properties={
         "path": {"type": "string"},
@@ -136,7 +137,6 @@ DSH_WRITE = NativeToolSpec(
         "description": {"type": "string"},
         "client_context_id": {"type": "string"},
     },
-    additional_properties=True,
     require_prior_read=True,
     normalize=_dsh_write,
 )
@@ -146,11 +146,12 @@ DSH_EDIT = NativeToolSpec(
     canonical="remote.edit",
     description="Edit an existing UTF-8 text file by replacing literal text (DSH edit).",
     properties={
-        "file_path": {"type": "string", "minLength": 1},
-        "old_string": {"type": "string", "minLength": 1},
+        "file_path": {"type": "string"},
+        "old_string": {"type": "string"},
         "new_string": {"type": "string"},
-        "replace_all": {"type": "boolean", "default": False},
+        "replace_all": {"type": "boolean"},
     },
+    additional_properties=None,
     required=("file_path", "old_string", "new_string"),
     defaults={"replace_all": False},
     compat_properties={
@@ -161,7 +162,6 @@ DSH_EDIT = NativeToolSpec(
         "description": {"type": "string"},
         "client_context_id": {"type": "string"},
     },
-    additional_properties=True,
     require_prior_read=True,
     normalize=_dsh_edit,
 )
@@ -171,12 +171,13 @@ DSH_BASH = NativeToolSpec(
     canonical="remote.bash",
     description="Execute a bash command (DSH bash; timeoutMs promotes a foreground command to a background job).",
     properties={
-        "command": {"type": "string", "minLength": 1},
-        "description": {"type": "string", "minLength": 1},
+        "command": {"type": "string"},
+        "description": {"type": "string"},
         "timeoutMs": {"type": "number"},
         "workdir": {"type": "string"},
         "run_in_background": {"type": "boolean"},
     },
+    additional_properties=None,
     required=("command", "description"),
     compat_properties={
         "cmd": {"type": "string"},
@@ -186,7 +187,6 @@ DSH_BASH = NativeToolSpec(
         "env": {"type": "object"},
         "tty": {"type": "boolean"},
     },
-    additional_properties=True,
     handler="dsh_bash",
     normalize=_dsh_bash,
 )
@@ -196,9 +196,10 @@ DSH_GLOB = NativeToolSpec(
     canonical="remote.glob",
     description="Find files by path pattern, including hidden and ignored files (DSH glob).",
     properties={
-        "pattern": {"type": "string", "minLength": 1},
+        "pattern": {"type": "string"},
         "path": {"type": "string"},
     },
+    additional_properties=None,
     required=("pattern",),
     compat_properties={
         "limit": {"type": "integer"},
@@ -211,7 +212,6 @@ DSH_GLOB = NativeToolSpec(
         "max_depth": {"type": "integer"},
         "full_path": {"type": "boolean"},
     },
-    additional_properties=True,
     normalize=_dsh_glob,
 )
 
@@ -220,10 +220,11 @@ DSH_GREP = NativeToolSpec(
     canonical="remote.grep",
     description="Search file contents with a ripgrep regular expression (DSH grep; matching lines with line numbers).",
     properties={
-        "pattern": {"type": "string", "minLength": 1},
+        "pattern": {"type": "string"},
         "path": {"type": "string"},
         "include": {"type": "string"},
     },
+    additional_properties=None,
     required=("pattern",),
     compat_properties={
         "glob": {"type": "string"},
@@ -242,7 +243,6 @@ DSH_GREP = NativeToolSpec(
         "offset": {"type": "integer"},
         "limit": {"type": "integer"},
     },
-    additional_properties=True,
     normalize=_dsh_grep,
 )
 
@@ -251,10 +251,11 @@ DSH_JOB_OUTPUT = NativeToolSpec(
     canonical="remote.job_output",
     description="Read a background job: output since the previous read, optionally waiting for completion (DSH job_output).",
     properties={
-        "job_id": {"type": "string", "minLength": 1},
-        "wait": {"type": "boolean", "default": False},
-        "timeout_ms": {"type": "number", "minimum": 1, "description": "Max wait with wait=true; default 30000, cap 600000."},
+        "job_id": {"type": "string"},
+        "wait": {"type": "boolean"},
+        "timeout_ms": {"type": "number", "description": "Max wait with wait=true; default 30000, cap 600000."},
     },
+    additional_properties=None,
     required=("job_id",),
     defaults={"wait": False},
     handler="dsh_job_output",
@@ -265,7 +266,6 @@ DSH_JOB_OUTPUT = NativeToolSpec(
         "max_output_tokens": {"type": "integer"},
         "session_id": {"type": "string"},
     },
-    additional_properties=True,
     normalize=lambda args: {"job_id": args["job_id"], **_endpoint_args(args)},
 )
 
@@ -274,8 +274,8 @@ DSH_JOB_LIST = NativeToolSpec(
     canonical="remote.job_status",
     description="List your background jobs (running and finished) with ids, kinds, and statuses (DSH job_list).",
     properties={},
+    additional_properties=None,
     handler="dsh_job_list",
-    additional_properties=True,
     normalize=lambda args: dict(args),
 )
 
@@ -284,12 +284,12 @@ DSH_JOB_KILL = NativeToolSpec(
     canonical="remote.job_stop",
     description="Request cancellation of a running background job (DSH job_kill).",
     properties={
-        "job_id": {"type": "string", "minLength": 1},
+        "job_id": {"type": "string"},
         "reason": {"type": "string"},
     },
+    additional_properties=None,
     required=("job_id",),
     handler="dsh_job_kill",
-    additional_properties=True,
     normalize=lambda args: {"job_id": args["job_id"], **_endpoint_args(args)},
 )
 
@@ -298,11 +298,11 @@ DSH_READ_IMAGE = NativeToolSpec(
     canonical="remote.read_image",
     description="Read a PNG/JPEG/WebP/GIF file and return the image itself (DSH read_image).",
     properties={
-        "file_path": {"type": "string", "minLength": 1, "description": "Path to the image file, resolved by the filesystem backend."},
+        "file_path": {"type": "string", "description": "Path to the image file, resolved by the filesystem backend."},
     },
+    additional_properties=None,
     required=("file_path",),
     handler="dsh_read_image",
-    additional_properties=True,
     normalize=lambda args: {"file_path": args["file_path"], **_endpoint_args(args)},
 )
 

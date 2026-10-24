@@ -61,7 +61,7 @@ class NativeToolSpec:
     defaults: Mapping[str, Any] = field(default_factory=dict)
     handler: str = "canonical"
     compat_properties: Mapping[str, Any] = field(default_factory=dict)
-    additional_properties: bool = False
+    additional_properties: bool | None = False
     require_prior_read: bool = False
     normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
@@ -95,7 +95,7 @@ def native_input_schema(spec: NativeToolSpec, endpoint_props: Mapping[str, Any])
         "type": "object",
         "properties": {**endpoint_props, **spec.properties},
         "required": list(spec.required),
-        "additionalProperties": bool(spec.additional_properties),
+        "additionalProperties": (None if spec.additional_properties is None else bool(spec.additional_properties)),
     }
 
 _TYPE_NAMES = {

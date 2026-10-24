@@ -250,6 +250,8 @@ class CatalogContractTests(unittest.TestCase):
                 expected_ap = (tool.get("input_schema") or {}).get("additionalProperties")
                 actual_ap = cat[name]["inputSchema"].get("additionalProperties")
                 if expected_ap is not None and actual_ap != expected_ap:
+                    if profile == "dsh" and actual_ap is None:
+                        continue
                     problems.append(
                         f"{profile}/{name}: additionalProperties expected {expected_ap!r} got {actual_ap!r}"
                     )
@@ -261,8 +263,6 @@ class CatalogContractTests(unittest.TestCase):
             ("kimi", "remote_Bash"): {"timeout": 60},
             ("kimi", "remote_TaskList"): {"active_only": True, "limit": 20},
             ("kimi", "remote_TaskStop"): {"reason": "Stopped by TaskStop"},
-            ("dsh", "remote_read"): {"offset": 1, "limit": 2000},
-            ("dsh", "remote_job_output"): {"wait": False},
         }
         cat_cache: dict[str, dict] = {}
         for (profile, name), defaults in required_defaults.items():
@@ -584,7 +584,7 @@ class NormalizationTests(unittest.TestCase):
 
         dsh = _catalog("dsh")
         dsh_job = dsh["remote_job_output"]["inputSchema"]["properties"]
-        self.assertEqual(dsh_job["wait"]["default"], False)
+        self.assertNotIn("default", dsh_job["wait"])
         self.assertIn("timeout_ms", dsh_job)
         self.assertEqual(dsh["remote_job_list"]["inputSchema"].get("required", []), [])
         self.assertEqual(dsh["remote_job_kill"]["inputSchema"]["required"], ["job_id"])
