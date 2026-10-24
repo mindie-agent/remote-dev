@@ -67,21 +67,17 @@ CODEX_EXEC = NativeToolSpec(
         "workdir": {"type": "string", "description": "Working directory for the command. Defaults to the turn cwd."},
         "tty": {"type": "boolean", "default": False, "description": "True allocates a PTY; false or omitted uses plain pipes."},
         "yield_time_ms": {"type": "number", "default": 10000, "description": "Wait before yielding output. Defaults to 10000 ms; effective range 250-30000 ms."},
-        "max_output_tokens": {"type": "number", "description": "Output token budget. Defaults to 10000 tokens."},
-        "shell": {"type": "string", "description": "Host-local shell binary; rejected for remote calls."},
-        "login": {"type": "boolean", "description": "Host-local login-shell selection; rejected for remote calls."},
+        "max_output_tokens": {"type": "number", "default": 10000, "description": "Output token budget. Defaults to 10000 tokens."},
+        "shell": {"type": "string", "description": "Shell binary executed on the remote endpoint; omitted uses bash."},
+        "login": {"type": "boolean", "default": True, "description": "Run the selected remote shell with -l; native default true."},
         "environment_id": {"type": "string", "description": "Environment id; remote-dev supports only the primary environment."},
-        "sandbox_permissions": {"type": "string", "enum": _CODEX_SANDBOX_VALUES},
+        "sandbox_permissions": {"type": "string", "enum": _CODEX_SANDBOX_VALUES, "default": "use_default"},
         "justification": {"type": "string"},
         "prefix_rule": {"type": "array", "items": {"type": "string"}},
     },
     required=("cmd",),
     defaults={"tty": False, "yield_time_ms": 10000},
     handler="codex_exec",
-    compat_properties={
-        "timeout_ms": {"type": "integer"},
-        "timeout": {"type": "integer"},
-    },
     normalize=_codex_exec,
 )
 
@@ -124,11 +120,6 @@ CODEX_APPLY_PATCH = NativeToolSpec(
         "patch": {"type": "string", "minLength": 1, "description": "Raw *** Begin Patch ... *** End Patch text."},
     },
     required=("patch",),
-    compat_properties={
-        "command": {"type": "string"},
-        "cwd": {"type": "string"},
-        "timeout_ms": {"type": "integer"},
-    },
     normalize=lambda args: {"patch": args["patch"], **_endpoint_args(args)},
 )
 
