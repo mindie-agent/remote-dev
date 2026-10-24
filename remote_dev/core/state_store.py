@@ -23,7 +23,7 @@ from .atomic import replace_file
 from .path_policy import path_fingerprint
 from remote_dev.result import dumps, new_invocation_id, utc_now_iso
 
-LEDGER_SCOPE_ENV_VARS = ("CLAUDE_SESSION_ID", "CODEX_SESSION_ID", "CODEX_RUN_ID", "REMOTE_DEV_SESSION_ID")
+LEDGER_SCOPE_ENV_VARS = ("REMOTE_DEV_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_SESSION_ID", "CODEX_RUN_ID")
 LEDGER_SCOPE_PREFIX = "id-"
 LEDGER_NO_CONTEXT_SCOPE = "default"
 LEDGER_SCHEMA_VERSION = "remote-dev.read_ledger.v2"

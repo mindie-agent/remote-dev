@@ -21,9 +21,10 @@ from .locking import serialize_mutation
 from .endpoint import Endpoint
 from .container_endpoint import pinned_endpoint
 from .errors import PathPolicyError
-from .path_policy import assert_under_root, join_under_root
+from .path_policy import join_under_root
 from .preview import MAX_LINE_CHARS, MAX_READ_LINES, compact_text
-from remote_dev.result import make_result, new_invocation_id, utc_now_iso
+from .read_paging import format_read_text
+from remote_dev.result import make_result, utc_now_iso
 from .ssh_transport import run_remote_python
 from .state_store import load_write_ledger_guard, resolve_ledger_scope, write_read_ledger
 
@@ -47,7 +48,7 @@ def _status_to_outcome(status: str) -> str:
         return "success"
     if status in {"read_required", "file_changed_since_read", "old_string_not_unique", "path_outside_root", "symlink_not_allowed", "file_exists"}:
         return "blocked"
-    if status in {"path_required", "invalid_pagination", "parent_not_found", "invalid_flags"}:
+    if status in {"path_required", "invalid_pagination", "parent_not_found", "invalid_flags", "max_chars_too_small"}:
         return "needs_input"
     return "failed"
 
@@ -68,6 +69,12 @@ def remote_read(
     node_paths: list[str] | None = None,
     allow_symlink: bool = False,
     verify_content: bool = True,
+    max_chars: int | None = None,
+    column_offset: int = 0,
+    pages: str | None = None,
+    strict_offset: bool = False,
+    utf16_units: bool = False,
+    utf8_only: bool = False,
     client_context_id: str | None = None,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -99,8 +106,20 @@ def remote_read(
         "limit": limit,
         "allow_symlink": allow_symlink,
         "verify_content": verify_content,
-        "max_line_chars": MAX_LINE_CHARS,
+        "max_line_chars": MAX_LINE_CHARS if max_chars is None else max(MAX_LINE_CHARS, min(int(max_chars), 500000)),
     }
+    if max_chars is not None:
+        payload_req["max_chars"] = int(max_chars)
+    if column_offset:
+        payload_req["column_offset"] = int(column_offset)
+    if pages is not None:
+        payload_req["pages"] = str(pages)
+    if strict_offset:
+        payload_req["strict_offset"] = True
+    if utf16_units:
+        payload_req["utf16_units"] = True
+    if utf8_only:
+        payload_req["utf8_only"] = True
     if start_line is not None:
         payload_req["start_line"] = int(start_line)
     if end_line is not None:
@@ -145,7 +164,10 @@ def remote_read(
         warnings=warnings,
         extra={"file": {k: v for k, v in file_info.items() if k != "content"}, "error": data.get("error"), "error_details": data.get("error_details"), "ledger_scope": ledger_scope},
     )
-    text = _format_read_text(endpoint, result, file_info)
+    if status in {"ok", "partial"}:
+        text = format_read_text(_format_endpoint(endpoint), result, file_info, max_chars=max_chars, utf16_units=utf16_units)
+    else:
+        text = result["summary"] + "\n" + str(data.get("error") or data.get("status") or "read failed") + "\n"
     payload = {"text": text, "result": result}
     if recording_error:
         from remote_dev.result import recording_failure
@@ -155,6 +177,25 @@ def remote_read(
 
 @observed_tool("remote.ls")
 @pinned_endpoint
+def remote_stat(
+    endpoint: Endpoint,
+    *,
+    file_path: str,
+    timeout_ms: int | None = None,
+) -> dict[str, Any]:
+    """Return remote file existence/metadata without reading content."""
+    try:
+        path = join_under_root(endpoint.root, endpoint.effective_cwd, file_path)
+    except PathPolicyError as exc:
+        return {"status": "path_outside_root", "error": str(exc), "exists": False}
+    return run_remote_python(
+        endpoint,
+        REMOTE_FILE_PY,
+        {"op": "stat", "root": endpoint.root, "cwd": endpoint.effective_cwd, "file_path": path},
+        timeout_ms=timeout_ms,
+    )
+
+
 def remote_ls(
     endpoint: Endpoint,
     *,
@@ -258,6 +299,7 @@ def remote_edit(
     old_string: str,
     new_string: str,
     replace_all: bool = False,
+    normalize_crlf: bool = False,
     start_line: int | None = None,
     end_line: int | None = None,
     client_context_id: str | None = None,
@@ -282,6 +324,7 @@ def remote_edit(
         "old_string": old_string,
         "new_string": new_string,
         "replace_all": replace_all,
+        "normalize_crlf": normalize_crlf,
         "expected_sha256": expected_sha,
     }
     if start_line is not None:
@@ -445,20 +488,6 @@ def _path_blocked_result(
 
 def _format_endpoint(endpoint: Endpoint) -> str:
     return f"{endpoint.user}@{endpoint.host}:{endpoint.port}"
-
-
-def _format_read_text(endpoint: Endpoint, result: dict[str, Any], file_info: dict[str, Any]) -> str:
-    lines = [
-        f"RemoteRead on {_format_endpoint(endpoint)}",
-        f"file: {file_info.get('path', '')}",
-        f"lines: {file_info.get('line_start', 0)}-{file_info.get('line_end', 0)} of {file_info.get('total_lines', 0)}",
-        f"partial: {str(file_info.get('partial', False)).lower()}",
-        "",
-        str(result.get("preview", {}).get("content", "")),
-    ]
-    if result.get("error"):
-        lines.append(f"error: {result['error']}")
-    return compact_text("\n".join(lines).rstrip() + "\n")
 
 
 def _format_ls_text(endpoint: Endpoint, result: dict[str, Any]) -> str:

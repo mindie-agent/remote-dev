@@ -6,6 +6,7 @@ from unittest.mock import patch
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core.search_ops import remote_grep
 from remote_dev.mcp import server
+from remote_dev.result import format_failure_text
 
 
 class McpErrorTextTests(unittest.TestCase):
@@ -20,6 +21,98 @@ class McpErrorTextTests(unittest.TestCase):
         self.assertIn("rg_required", result["content"][0]["text"])
         self.assertIn(detail, result["content"][0]["text"])
         self.assertEqual(result["structuredContent"]["error"], detail)
+
+    def test_native_background_result_is_not_an_mcp_error(self) -> None:
+        payload = {
+            "text": "background job job-final\n",
+            "result": {"kind": "background", "jobId": "job-final"},
+        }
+        with patch.object(server, "call_tool", return_value=payload), \
+                patch.object(server, "runtime_status", return_value={}), patch.object(server, "send") as send:
+            server.handle({"jsonrpc": "2.0", "id": 0, "method": "tools/call", "params": {"name": "remote_bash"}})
+        result = send.call_args.args[0]["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["content"][0]["text"], "background job job-final\n")
+        self.assertEqual(result["structuredContent"]["kind"], "background")
+        self.assertEqual(result["structuredContent"]["jobId"], "job-final")
+
+    def test_completed_native_nonzero_command_keeps_its_text(self) -> None:
+        payload = {
+            "text": "Remote command failed. Exit code: 3.\ncodex-final-ok\n",
+            "result": {
+                "tool": "remote_exec_command",
+                "outcome": "failed",
+                "status": "failed",
+                "state": "failed",
+                "exit_code": 3,
+            },
+        }
+        self.assertEqual(
+            format_failure_text(payload),
+            "Remote command failed. Exit code: 3.\ncodex-final-ok\n",
+        )
+
+    def test_local_recording_success_keeps_mcp_success(self) -> None:
+        result = {
+            "tool": "remote.job_stdin",
+            "outcome": "failed",
+            "status": "local_recording_failed",
+            "state": "succeeded",
+            "exit_code": 0,
+            "execution_outcome": "success",
+            "execution_status": "succeeded",
+            "error_details": {"operation_completed": True, "category": "local_recording"},
+            "local_recording": {"status": "failed", "stage": "save_output"},
+        }
+        payload = {"text": "Remote command completed.\nTASKOUTPUT_ZERO\nLocal output recording failed.\n", "result": result}
+        with patch.object(server, "call_tool", return_value=payload), \
+                patch.object(server, "runtime_status", return_value={}), patch.object(server, "send") as send:
+            server.handle({"jsonrpc": "2.0", "id": 0, "method": "tools/call", "params": {"name": "remote_TaskOutput"}})
+        sent = send.call_args.args[0]["result"]
+        self.assertFalse(sent["isError"])
+        self.assertIn("Local output recording failed", sent["content"][0]["text"])
+        self.assertEqual(sent["structuredContent"]["outcome"], "failed")
+
+    def test_local_recording_failure_keeps_mcp_error_for_exit7(self) -> None:
+        result = {
+            "tool": "remote.job_stdin",
+            "outcome": "failed",
+            "status": "local_recording_failed",
+            "state": "failed",
+            "exit_code": 7,
+            "execution_outcome": "failed",
+            "error_details": {"operation_completed": True, "category": "local_recording"},
+        }
+        payload = {"text": "Remote command failed. Exit code: 7.\nLocal output recording failed.\n", "result": result}
+        with patch.object(server, "call_tool", return_value=payload), \
+                patch.object(server, "runtime_status", return_value={}), patch.object(server, "send") as send:
+            server.handle({"jsonrpc": "2.0", "id": 0, "method": "tools/call", "params": {"name": "remote_TaskOutput"}})
+        sent = send.call_args.args[0]["result"]
+        self.assertTrue(sent["isError"])
+
+    def test_cancellation_requested_is_not_an_mcp_error(self) -> None:
+        payload = {
+            "text": "cancellation-requested\njob killed\n",
+            "result": {"outcome": "cancellation-requested", "status": "cancelled"},
+        }
+        with patch.object(server, "call_tool", return_value=payload), \
+                patch.object(server, "runtime_status", return_value={}), patch.object(server, "send") as send:
+            server.handle({"jsonrpc": "2.0", "id": 0, "method": "tools/call", "params": {"name": "remote_job_kill"}})
+        result = send.call_args.args[0]["result"]
+        self.assertFalse(result["isError"])
+        self.assertTrue(result["content"][0]["text"].startswith("cancellation-requested"))
+
+    def test_already_finished_terminal_stop_is_not_an_mcp_error(self) -> None:
+        payload = {
+            "text": "already-finished\njob completed\n",
+            "result": {"outcome": "already-finished", "status": "succeeded"},
+        }
+        with patch.object(server, "call_tool", return_value=payload), \
+                patch.object(server, "runtime_status", return_value={}), patch.object(server, "send") as send:
+            server.handle({"jsonrpc": "2.0", "id": 0, "method": "tools/call", "params": {"name": "remote_job_kill"}})
+        result = send.call_args.args[0]["result"]
+        self.assertFalse(result["isError"])
+        self.assertTrue(result["content"][0]["text"].startswith("already-finished"))
 
     def test_succeeded_remote_result_survives_local_recording_failure(self) -> None:
         payload = {

@@ -11,7 +11,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-from remote_dev.core.patch_ops import parse_codex_patch, parse_unified_patch_paths  # noqa: E402
+from remote_dev.core.patch_ops import PatchParseError, parse_codex_patch, parse_unified_patch_paths  # noqa: E402
 from remote_dev.core.endpoint import Endpoint  # noqa: E402
 import remote_dev.core.patch_ops as patch_ops  # noqa: E402
 
@@ -283,6 +283,116 @@ class PatchOpsTests(unittest.TestCase):
             self.assertFalse(moved.exists())
             self.assertEqual(other.read_text(encoding="utf-8"), "other\n")
 
+    def test_parse_codex_patch_requires_end_marker(self) -> None:
+        with self.assertRaises(PatchParseError):
+            parse_codex_patch("*** Begin Patch\n*** Add File: x\n+x\n")
+
+    def test_remote_apply_patch_dotdot_escape_returns_blocked_result(self) -> None:
+        endpoint = Endpoint(host="1.2.3.4", port=46000, root="/vllm-workspace")
+        patch = """*** Begin Patch
+*** Add File: ../../etc/escape.py
++x = 1
+*** End Patch
+"""
+        payload = patch_ops.remote_apply_patch(endpoint, patch=patch)
+        self.assertEqual(payload["result"]["outcome"], "blocked")
+        self.assertEqual(payload["result"]["status"], "path_outside_root")
+
+    def test_remote_apply_patch_missing_end_marker_is_invalid(self) -> None:
+        endpoint = Endpoint(host="1.2.3.4", port=46000, root="/vllm-workspace")
+        payload = patch_ops.remote_apply_patch(
+            endpoint, patch="*** Begin Patch\n*** Add File: x.py\n+x = 1\n"
+        )
+        self.assertEqual(payload["result"]["status"], "invalid_patch")
+        self.assertIn("*** End Patch", payload["result"]["error"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_codex_patch_add_delete_move_and_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "old.py"
+            gone = root / "gone.py"
+            source = root / "move.py"
+            old.write_bytes(b"old value\n")
+            old.chmod(0o640)
+            gone.write_bytes(b"gone\n")
+            source.write_bytes(b"move me\n")
+            source.chmod(0o755)
+            payload = {
+                "root": str(root),
+                "cwd": str(root),
+                "ops": [
+                    {"kind": "add", "path": "new.py", "content": "created\n"},
+                    {"kind": "update", "path": "old.py",
+                     "hunks": [{"old": "old value\n", "new": "new value\n"}]},
+                    {"kind": "delete", "path": "gone.py"},
+                    {"kind": "update", "path": "move.py", "move_to": "moved.py", "hunks": []},
+                ],
+            }
+            proc = subprocess.run(
+                [sys.executable, "-c", patch_ops.REMOTE_CODEX_PATCH_PY],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            result = json.loads(proc.stdout)
+            self.assertEqual(result["status"], "applied")
+            self.assertEqual((root / "new.py").read_text(), "created\n")
+            self.assertEqual((root / "old.py").read_text(), "new value\n")
+            self.assertFalse(gone.exists())
+            self.assertFalse(source.exists())
+            self.assertEqual((root / "moved.py").read_text(), "move me\n")
+            self.assertEqual((root / "old.py").stat().st_mode & 0o777, 0o640)
+            self.assertEqual((root / "moved.py").stat().st_mode & 0o777, 0o755)
+            self.assertEqual((root / "new.py").stat().st_mode & 0o777, 0o666 & ~_umask())
+
+    def test_codex_patch_rolls_back_all_files_when_commit_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "a.py"
+            second = root / "b.py"
+            first.write_bytes(b"old a\n")
+            second.write_bytes(b"old b\n")
+            payload = {
+                "root": str(root),
+                "cwd": str(root),
+                "ops": [
+                    {"kind": "update", "path": "a.py",
+                     "hunks": [{"old": "old a\n", "new": "new a\n"}]},
+                    {"kind": "update", "path": "b.py",
+                     "hunks": [{"old": "old b\n", "new": "new b\n"}]},
+                ],
+            }
+            prelude = (
+                "import os\n"
+                "_original_replace = os.replace\n"
+                "def _flaky_replace(src, dst):\n"
+                "    if str(dst).endswith('b.py'):\n"
+                "        raise OSError('fixture replace failure')\n"
+                "    return _original_replace(src, dst)\n"
+                "os.replace = _flaky_replace\n"
+            )
+            proc = subprocess.run(
+                [sys.executable, "-c", prelude + patch_ops.REMOTE_CODEX_PATCH_PY],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            result = json.loads(proc.stdout)
+            self.assertEqual(result["status"], "commit_failed")
+            self.assertIn("fixture replace failure", result["error"])
+            self.assertTrue(
+                any(Path(item).name == "a.py" for item in result["rollback_status"]["restored"]),
+                result["rollback_status"],
+            )
+            self.assertEqual(first.read_text(), "old a\n")
+            self.assertEqual(second.read_text(), "old b\n")
+            self.assertEqual([p.name for p in root.iterdir() if p.name.endswith(".tmp")], [])
+
     @unittest.skipIf(os.name == "nt", "executes remote Bash/git against local POSIX fixture paths")
     def test_unified_patch_records_before_sha_and_diffstat(self) -> None:
         original_runner = patch_ops.run_rpc_script
@@ -316,6 +426,12 @@ class PatchOpsTests(unittest.TestCase):
                 self.assertIn("a.py", payload["result"]["preview"]["diffstat"])
         finally:
             patch_ops.run_rpc_script = original_runner  # type: ignore[assignment]
+
+
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
 
 
 if __name__ == "__main__":

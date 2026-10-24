@@ -89,7 +89,7 @@ class ReadLedgerTests(unittest.TestCase):
             self.assertNotIn(scope, {".", ".."})
 
     def test_read_ledger_scope_explicit_id_precedes_environment(self) -> None:
-        with mock.patch.dict(os.environ, {"CLAUDE_SESSION_ID": "from-env/value", "CODEX_SESSION_ID": "other"}, clear=False):
+        with mock.patch.dict(os.environ, {"REMOTE_DEV_SESSION_ID": "", "CLAUDE_SESSION_ID": "from-env/value", "CODEX_SESSION_ID": "other"}, clear=False):
             env_scope = state_store.resolve_ledger_scope(None)
             self.assertEqual(env_scope, state_store.resolve_ledger_scope("from-env/value"))
             self.assertNotEqual(env_scope, state_store.LEDGER_NO_CONTEXT_SCOPE)

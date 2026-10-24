@@ -12,7 +12,7 @@ flowchart TB
         Coord["mindie-coordinator / 业务工作流 Skill"]
     end
 
-    subgraph LayerA["Layer A：远端开发工具面（18 个核心工具 + 40+ 6-Harness 别名）"]
+    subgraph LayerA["Layer A：远端开发工具面（19 个核心工具 + 60+ 6-Harness 别名）"]
         FileTools["文件与补丁：read / write / edit / multi_edit / apply_patch"]
         SearchTools["搜索与目录：glob / grep / ls"]
         JobTools["命令与后台作业：bash / job_status / job_tail / job_stop / job_stdin"]
@@ -35,7 +35,7 @@ flowchart TB
 
 ## 三层架构是怎么分工的？
 
-### 1. 工具表面层（Layer A：面向 Agent 的 18 个核心工具 + 40+ 6-Harness 别名）
+### 1. 工具表面层（Layer A：面向 Agent 的 19 个核心工具 + 60+ 6-Harness 别名）
 
 把 Agent 最熟悉的操作一对一暴露为 MCP 工具和 CLI 子命令：
 - **读写与改代码**：`remote.read`、`remote.write`、`remote.edit`、`remote.multi_edit`、`remote.apply_patch`
@@ -73,7 +73,7 @@ flowchart TB
 
 ## MCP 传输协议与资源 URI
 
-MCP Server（`remote-dev server`）同时支持标准的 `Content-Length` JSON-RPC 帧协议和按行分隔的 JSON-RPC 消息。除 18 个核心工具（及 40+ 个 6-Harness 别名）外，还暴露了只读 MCP 资源供客户端按 URI 订阅查看：
+MCP Server（`remote-dev server`）同时支持标准的 `Content-Length` JSON-RPC 帧协议和按行分隔的 JSON-RPC 消息。除 19 个核心工具（及 60+ 个 6-Harness 别名）外，还暴露了只读 MCP 资源供客户端按 URI 订阅查看：
 
 - `remote://endpoints`：已知远端端点列表
 - `remote://endpoint/<endpoint-id>/context/latest`：端点最新环境快照

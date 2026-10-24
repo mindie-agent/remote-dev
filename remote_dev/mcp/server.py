@@ -106,12 +106,48 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
             # execution outcome, keeping the recording_failure diagnostic in
             # structuredContent.
             error_outcome = details.get("outcome")
-            if details.get("status") == "local_recording_failed" and details.get("operation_completed") is True:
+            error_details = details.get("error_details") if isinstance(details.get("error_details"), dict) else {}
+            completed_locally = (
+                details.get("operation_completed") is True
+                or error_details.get("operation_completed") is True
+            )
+            if details.get("status") == "local_recording_failed" and completed_locally:
                 error_outcome = details.get("execution_outcome", error_outcome)
+            # A command that really ran and returned a nonzero exit code is a
+            # native tool result, not an MCP/helper failure. Keep the exit code
+            # in structuredContent and only flag start/status/transport errors.
+            completed_command = (
+                details.get("state") in {"succeeded", "failed", "timeout", "cancelled"}
+                and isinstance(details.get("exit_code"), int)
+                and not isinstance(details.get("exit_code"), bool)
+                and (name.endswith("bash") or name.endswith("job_stdin")
+                     or name.endswith("exec_command") or name.endswith("write_stdin")
+                     or name.endswith("shell"))
+            )
+            background_started = (
+                details.get("kind") == "background"
+                and details.get("jobId") not in (None, "")
+            )
+            if background_started or error_outcome in {"cancellation-requested", "already-finished"}:
+                # DSH's native background result is intentionally the minimal
+                # {kind:"background", jobId} shape and has no outcome field.
+                # Starting a supervised job, accepting its cancellation, or
+                # observing that it already finished are successful results.
+                error_outcome = "success"
+            if completed_command:
+                error_outcome = "success"
+            blocks = payload.get("content")
+            if not isinstance(blocks, list) or not blocks:
+                blocks = [{"type": "text", "text": tool_text(payload)}]
+            else:
+                # Native image reads return an ordered MCP content array.
+                # Keep the textual receipt first so every client sees a
+                # human-readable result even when it cannot render images.
+                blocks = [{"type": "text", "text": tool_text(payload)}] + blocks
             result(
                 request_id,
                 {
-                    "content": [{"type": "text", "text": tool_text(payload)}],
+                    "content": blocks,
                     "structuredContent": details,
                     "isError": error_outcome not in {"success", "cancelled"},
                 },
