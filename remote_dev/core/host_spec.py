@@ -3,6 +3,8 @@
 [Invariants]
 - Probing works identically across Windows (`os.name == "nt"`), macOS (`sys.platform == "darwin"`), and Linux (`sys.platform.startswith("linux")`) with zero subprocess launches.
 - Placement compares `WorkloadExpectation` (`cpu_cores`, `memory_mb`, `vram_mb`/`hbm_mb`, `npu_count`) purely against candidate `HostHardwareSpec` headroom (`mem_usable_mb`, `cpu_cores`, `vram_free_mb`, `free_npus`); never rejects local execution based on OS platform name.
+- `npu_count`/`free_npus` count independently leasable physical execution units (A3 dual-die cards contribute two), matching the Phy-IDs a host queue leases; `free_phy_ids` is authoritative when present, including an empty list.
+- `vram_free_mb` is observed free HBM only. Total capacity is never substituted for an unobserved free figure; `vram_free_observed` reports which of the two a caller received.
 - Worker concurrency is bounded by both usable CPU cores and usable memory (`max(1, min(usable_cpu_cores, mem_usable_mb // max(1, per_worker_memory_mb)))`).
 [Timeouts & Locks]
 - Pure in-memory / kernel syscall (`GlobalMemoryStatusEx`, `/proc/meminfo`, `sysconf`/`sysctl`) probing and placement evaluation; zero subprocess launches, zero network I/O, zero locks.
@@ -300,6 +302,35 @@ def probe_local_hardware_spec(*, desktop_reserve_ratio: float = 0.20, min_deskto
     return HostHardwareSpec(os_family, cpu_cores, usable_cpu_cores, mem_total_mb, mem_available_mb, mem_usable_mb).to_dict()
 
 
+def _is_row_sequence(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) > 0
+
+
+def _iter_execution_units(npus: Any) -> Iterator[Mapping[str, Any]]:
+    """Yield one row per independently leasable physical unit.
+
+    A dual-die A3 card reports two `dies`; A2/A5 and legacy card-only probe
+    rows without a `dies` list stay one unit, so card-shaped formats keep
+    their original counts.
+    """
+    if not _is_row_sequence(npus):
+        return
+    for card in npus:
+        if not isinstance(card, Mapping):
+            continue
+        dies = card.get("dies")
+        for unit in (dies if _is_row_sequence(dies) else [card]):
+            if isinstance(unit, Mapping):
+                yield unit
+
+
+def _first_physical_unit_count(*candidates: Any) -> int:
+    for value in candidates:
+        if value is not None and not isinstance(value, bool):
+            return max(0, int(value))
+    return 0
+
+
 def normalize_remote_probe_spec(probe_row: Mapping[str, Any]) -> dict[str, Any]:
     server = probe_row.get("server") if isinstance(probe_row.get("server"), Mapping) else {}
     cpu_cores = max(0, int(probe_row.get("cpu_cores") or server.get("cpu_cores") or 0))
@@ -317,39 +348,57 @@ def normalize_remote_probe_spec(probe_row: Mapping[str, Any]) -> dict[str, Any]:
     mem_usable_mb = max(0, int(usable_raw if usable_raw is not None else mem_available_mb))
 
     npus = probe_row.get("npus")
-    vram_total_mb, vram_free_mb, computed_free_dies = 0, 0, 0
-    if isinstance(npus, Sequence) and not isinstance(npus, (str, bytes)) and len(npus) > 0:
-        for card in npus:
-            if not isinstance(card, Mapping):
-                continue
-            dies = card.get("dies")
-            units = dies if (isinstance(dies, Sequence) and not isinstance(dies, (str, bytes)) and len(dies) > 0) else [card]
-            for unit in units:
-                if isinstance(unit, Mapping):
-                    total_u, used_u = max(0, int(unit.get("hbm_total_mb") or 0)), max(0, int(unit.get("hbm_used_mb") or 0))
-                    vram_total_mb += total_u
-                    if not unit.get("busy"):
-                        vram_free_mb += max(0, total_u - used_u)
-                        computed_free_dies += 1
-    else:
+    unit_rows = list(_iter_execution_units(npus))
+    vram_free_observed = bool(unit_rows)
+    vram_total_mb, vram_free_mb, free_units = 0, 0, 0
+    for unit in unit_rows:
+        total_u = max(0, int(unit.get("hbm_total_mb") or 0))
+        used_raw = unit.get("hbm_used_mb")
+        # Free HBM is measured capacity minus measured usage. A unit whose
+        # total or usage was not measured contributes neither, so an
+        # unprobed Die is never credited with its nameplate capacity.
+        measured = total_u > 0 and used_raw is not None
+        vram_total_mb += total_u
+        if not measured:
+            vram_free_observed = False
+        if not unit.get("busy"):
+            free_units += 1
+            if measured:
+                vram_free_mb += max(0, total_u - max(0, int(used_raw)))
+    if not unit_rows:
         vram_total_mb = max(0, int(probe_row.get("vram_total_mb") or probe_row.get("hbm_total_mb") or 0))
         free_vram_raw = probe_row.get("vram_free_mb") if probe_row.get("vram_free_mb") is not None else probe_row.get("hbm_free_mb")
-        vram_free_mb = max(0, int(free_vram_raw if free_vram_raw is not None else vram_total_mb))
+        # Total capacity is not free capacity. Without an observed free figure
+        # no HBM may be claimed available; the caller sees `vram_free_observed`.
+        vram_free_observed = free_vram_raw is not None
+        vram_free_mb = max(0, int(free_vram_raw)) if vram_free_observed else 0
 
-    npu_count_raw = probe_row.get("npu_count") if probe_row.get("npu_count") is not None else probe_row.get("total_npus")
-    npu_count = max(0, int(npu_count_raw)) if npu_count_raw is not None else (len(npus) if isinstance(npus, Sequence) and not isinstance(npus, (str, bytes)) else 0)
-    free_phy_ids = list(probe_row.get("free_phy_ids") or [])
-    free_npus = max(0, int(probe_row["free_npus"])) if probe_row.get("free_npus") is not None else (len(free_phy_ids) if free_phy_ids else computed_free_dies)
+    npu_count = _first_physical_unit_count(
+        probe_row.get("npu_count"),
+        len(unit_rows) if unit_rows else None,
+        probe_row.get("total_phy_devices"),
+        probe_row.get("total_npus"),
+        len(npus) if isinstance(npus, Sequence) and not isinstance(npus, (str, bytes)) else None,
+    )
+    # `free_phy_ids` enumerates physical Dies, so an empty list is an
+    # authoritative zero that outranks the card-level `free_npus` count.
+    if "free_phy_ids" in probe_row:
+        free_npus = len(list(probe_row["free_phy_ids"] or []))
+    elif unit_rows:
+        free_npus = free_units
+    else:
+        free_npus = _first_physical_unit_count(probe_row.get("free_npus"))
 
     spec = HostHardwareSpec(
         str(probe_row.get("os_family") or "linux"), cpu_cores, usable_cpu_cores,
         mem_total_mb, mem_available_mb, mem_usable_mb, vram_total_mb, vram_free_mb, npu_count, free_npus,
     ).to_dict()
+    spec["vram_free_observed"] = vram_free_observed
     for meta_key in ("host", "alias", "online"):
         if meta_key in probe_row:
             spec[meta_key] = probe_row[meta_key]
-    if free_phy_ids:
-        spec["free_phy_ids"] = free_phy_ids
+    if "free_phy_ids" in probe_row:
+        spec["free_phy_ids"] = list(probe_row["free_phy_ids"] or [])
     return spec
 
 

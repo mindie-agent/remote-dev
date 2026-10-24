@@ -1,0 +1,182 @@
+{
+  "_provenance": {
+    "captures": {
+      "a2_single_die": "tests/fixtures/a2-173-125-1-2.txt (cards 0,1)",
+      "a3_all_busy": "tests/fixtures/a3-192-168-13-154-busy.txt (cards 0,1)",
+      "a3_dual_die_partial": "tests/fixtures/a3-192-168-13-156-partial.txt (cards 0,2)"
+    },
+    "fixture_commit": "6e266419d835ec6bbafdbc351656c07f3b208041",
+    "note": "Verbatim parser output, reduced to the capacity-relevant keys. Counts are never stored here; tests derive them with the same rule as fleet_probe_parser.",
+    "producer": "mindie_coordinator.fleet_probe_parser.parse_npu_smi_info",
+    "source_commit": "7a252d03c25882b58054afbce7eaedb09390f32a",
+    "source_repo": "mindie-agent/coordinator"
+  },
+  "a2_single_die": [
+    {
+      "busy": false,
+      "chip_name": "910B4",
+      "die_count": 1,
+      "dies": [
+        {
+          "aicore_pct": 0.0,
+          "busy": false,
+          "chip_id": 0,
+          "hbm_total_mb": 32768,
+          "hbm_used_mb": 2874,
+          "phy_id": 0
+        }
+      ],
+      "hbm_total_mb": 32768,
+      "hbm_used_mb": 2874,
+      "npu_id": 0,
+      "phy_ids": [
+        0
+      ]
+    },
+    {
+      "busy": false,
+      "chip_name": "910B4",
+      "die_count": 1,
+      "dies": [
+        {
+          "aicore_pct": 0.0,
+          "busy": false,
+          "chip_id": 0,
+          "hbm_total_mb": 32768,
+          "hbm_used_mb": 2873,
+          "phy_id": 1
+        }
+      ],
+      "hbm_total_mb": 32768,
+      "hbm_used_mb": 2873,
+      "npu_id": 1,
+      "phy_ids": [
+        1
+      ]
+    }
+  ],
+  "a3_all_busy": [
+    {
+      "busy": true,
+      "chip_name": "Ascend910 (910C dual-die)",
+      "die_count": 2,
+      "dies": [
+        {
+          "aicore_pct": 0.0,
+          "busy": true,
+          "chip_id": 0,
+          "hbm_total_mb": 65536,
+          "hbm_used_mb": 58968,
+          "phy_id": 0
+        },
+        {
+          "aicore_pct": 0.0,
+          "busy": true,
+          "chip_id": 1,
+          "hbm_total_mb": 65536,
+          "hbm_used_mb": 58530,
+          "phy_id": 1
+        }
+      ],
+      "hbm_total_mb": 131072,
+      "hbm_used_mb": 117498,
+      "npu_id": 0,
+      "phy_ids": [
+        0,
+        1
+      ]
+    },
+    {
+      "busy": true,
+      "chip_name": "Ascend910 (910C dual-die)",
+      "die_count": 2,
+      "dies": [
+        {
+          "aicore_pct": 0.0,
+          "busy": true,
+          "chip_id": 0,
+          "hbm_total_mb": 65536,
+          "hbm_used_mb": 58801,
+          "phy_id": 2
+        },
+        {
+          "aicore_pct": 0.0,
+          "busy": true,
+          "chip_id": 1,
+          "hbm_total_mb": 65536,
+          "hbm_used_mb": 58529,
+          "phy_id": 3
+        }
+      ],
+      "hbm_total_mb": 131072,
+      "hbm_used_mb": 117330,
+      "npu_id": 1,
+      "phy_ids": [
+        2,
+        3
+      ]
+    }
+  ],
+  "a3_dual_die_partial": [
+    {
+      "busy": true,
+      "chip_name": "Ascend910 (910C dual-die)",
+      "die_count": 2,
+      "dies": [
+        {
+          "aicore_pct": 47.0,
+          "busy": true,
+          "chip_id": 0,
+          "hbm_total_mb": 65536,
+          "hbm_used_mb": 60728,
+          "phy_id": 0
+        },
+        {
+          "aicore_pct": 48.0,
+          "busy": true,
+          "chip_id": 1,
+          "hbm_total_mb": 65536,
+          "hbm_used_mb": 60272,
+          "phy_id": 1
+        }
+      ],
+      "hbm_total_mb": 131072,
+      "hbm_used_mb": 121000,
+      "npu_id": 0,
+      "phy_ids": [
+        0,
+        1
+      ]
+    },
+    {
+      "busy": false,
+      "chip_name": "Ascend910 (910C dual-die)",
+      "die_count": 2,
+      "dies": [
+        {
+          "aicore_pct": 0.0,
+          "busy": false,
+          "chip_id": 0,
+          "hbm_total_mb": 65536,
+          "hbm_used_mb": 3130,
+          "phy_id": 4
+        },
+        {
+          "aicore_pct": 0.0,
+          "busy": false,
+          "chip_id": 1,
+          "hbm_total_mb": 65536,
+          "hbm_used_mb": 3128,
+          "phy_id": 5
+        }
+      ],
+      "hbm_total_mb": 131072,
+      "hbm_used_mb": 6258,
+      "npu_id": 2,
+      "phy_ids": [
+        4,
+        5
+      ]
+    }
+  ]
+}

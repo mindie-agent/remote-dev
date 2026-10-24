@@ -1,7 +1,10 @@
 """Tier 0 unit tests for cross-platform HostHardwareSpec, WorkloadExpectation, and Spec-Driven Placement."""
 from __future__ import annotations
 
+import copy
 import ctypes
+import json
+from pathlib import Path
 import subprocess
 import sys
 from unittest import mock
@@ -78,51 +81,167 @@ def test_probe_local_hardware_spec_respects_desktop_reserve():
     assert _compute_usable_memory_mb(65536, 56000, desktop_reserve_ratio=0.20, min_desktop_reserve_mb=2048) == 42893
 
 
-def test_normalize_remote_probe_spec_from_fleet_probe_dual_die_a3():
-    fleet_row = {
-        "alias": "a3-165",
-        "host": "192.168.13.165",
+PROBE_FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "npu_capacity_probe.json").read_text(encoding="utf-8"))
+
+
+def fleet_row(cards, **server):
+    """Assemble one `fleet_probe` row, deriving every count from the card rows.
+
+    Mirrors `fleet_probe_parser.parse_fleet_probe_output`: card-level
+    `free_npus`/`total_npus` and Die-level `free_phy_ids`/`total_phy_devices`
+    are all computed from the same `npus` records, so a fixture can never
+    claim a free Phy-ID that its own Die rows report busy.
+    """
+    dies = [(card, die) for card in cards for die in (card.get("dies") or [card])]
+    return {
+        "alias": server.pop("alias", "a3-165"),
+        "host": server.pop("host", "192.168.13.165"),
         "online": True,
-        "total_npus": 8,
-        "free_npus": 7,
-        "free_phy_ids": [0, 1, 2, 3],
-        "server": {
-            "cpu_cores": 192,
-            "load_1m": 12.0,
-            "mem_total_mb": 1048576,
-            "mem_available_mb": 900000,
-        },
-        "npus": [
-            {
-                "npu_id": 0,
-                "busy": False,
-                "dies": [
-                    {"phy_id": 0, "busy": False, "hbm_total_mb": 65536, "hbm_used_mb": 1024},
-                    {"phy_id": 1, "busy": False, "hbm_total_mb": 65536, "hbm_used_mb": 512},
-                ],
-            },
-            {
-                "npu_id": 1,
-                "busy": True,
-                "dies": [
-                    {"phy_id": 2, "busy": True, "hbm_total_mb": 65536, "hbm_used_mb": 60000},
-                    {"phy_id": 3, "busy": False, "hbm_total_mb": 65536, "hbm_used_mb": 0},
-                ],
-            },
-        ],
+        "npus": cards,
+        "total_npus": len(cards),
+        "free_npus": len([card for card in cards if not card["busy"]]),
+        "total_phy_devices": len(dies),
+        "free_phy_ids": [die["phy_id"] for _card, die in dies if not die["busy"]],
+        "busy_phy_ids": [die["phy_id"] for _card, die in dies if die["busy"]],
+        "server": {"cpu_cores": 192, "load_1m": 12.0, "mem_total_mb": 1048576,
+                   "mem_available_mb": 900000, **server},
     }
-    norm = normalize_remote_probe_spec(fleet_row)
+
+
+def half_busy_dual_die_cards():
+    """One Die of a free A3 card occupied, as a single-Die (TP=1) lease looks.
+
+    `parse_npu_smi_info` marks a Die busy from its own HBM/AICore/process
+    attribution, so one card can carry one busy and one free Die.
+    """
+    cards = copy.deepcopy(PROBE_FIXTURE["a3_dual_die_partial"])
+    free_card = next(card for card in cards if not card["busy"])
+    free_card["dies"][0]["busy"] = True
+    free_card["dies"][0]["hbm_used_mb"] = 60000
+    free_card["busy"] = True  # card-level aggregation follows its busiest Die
+    free_card["hbm_used_mb"] = sum(die["hbm_used_mb"] for die in free_card["dies"])
+    return cards
+
+
+def test_dual_die_capacity_counts_physical_execution_units_not_cards():
+    row = fleet_row(copy.deepcopy(PROBE_FIXTURE["a3_dual_die_partial"]))
+    norm = normalize_remote_probe_spec(row)
     assert norm["host"] == "192.168.13.165"
-    assert norm["alias"] == "a3-165"
     assert norm["cpu_cores"] == 192
     assert norm["usable_cpu_cores"] == 180.0
-    assert norm["mem_total_mb"] == 1048576
     assert norm["mem_usable_mb"] == 900000
+    # Two real A3 cards -> four physical Dies, not two execution units.
+    assert (row["total_npus"], row["free_npus"]) == (2, 1)
+    assert norm["npu_count"] == 4
+    assert norm["free_npus"] == 2
+    assert norm["free_phy_ids"] == [4, 5]
     assert norm["vram_total_mb"] == 4 * 65536
-    # Free dies: phy 0 (64512) + phy 1 (65024) + phy 3 (65536) = 195072 MB
-    assert norm["vram_free_mb"] == (65536 - 1024) + (65536 - 512) + 65536
-    assert norm["npu_count"] == 8
-    assert norm["free_npus"] == 7
+    # Free HBM is per-Die available capacity: (65536-3130) + (65536-3128).
+    assert norm["vram_free_mb"] == (65536 - 3130) + (65536 - 3128)
+    assert norm["vram_free_observed"] is True
+
+
+def test_half_busy_dual_die_card_still_offers_its_free_die():
+    row = fleet_row(half_busy_dual_die_cards())
+    norm = normalize_remote_probe_spec(row)
+    # Every card is card-level busy, yet one Die remains leasable.
+    assert row["free_npus"] == 0
+    assert row["free_phy_ids"] == [5]
+    assert norm["free_npus"] == 1
+    assert norm["vram_free_mb"] == 65536 - 3128
+    placed = evaluate_placement(
+        {"tier": "npu", "npu_count": 1, "hbm_mb": 60000, "memory_mb": 4096, "cpu_cores": 8},
+        local_spec={"os_family": "macos", "cpu_cores": 8, "usable_cpu_cores": 7.0,
+                    "mem_total_mb": 16384, "mem_available_mb": 8192},
+        remote_specs=[row],
+    )
+    assert placed["decision"] == "remote"
+    assert placed["host"] == "192.168.13.165"
+
+
+def test_all_busy_a3_reports_authoritative_zero_free_dies():
+    row = fleet_row(copy.deepcopy(PROBE_FIXTURE["a3_all_busy"]), host="192.168.13.154", alias="a3-154")
+    assert row["free_phy_ids"] == []
+    norm = normalize_remote_probe_spec(row)
+    assert norm["npu_count"] == 4
+    assert norm["free_npus"] == 0
+    assert norm["free_phy_ids"] == []
+    # An empty Phy-ID list outranks a stale card-level count rather than
+    # falling back to it.
+    assert normalize_remote_probe_spec({**row, "free_npus": 2})["free_npus"] == 0
+
+
+def test_legacy_single_die_a2_and_card_only_rows_keep_card_counts():
+    row = fleet_row(copy.deepcopy(PROBE_FIXTURE["a2_single_die"]), host="173.125.1.2", alias="a2-2")
+    norm = normalize_remote_probe_spec(row)
+    # A2 910B4 is one Die per card: Die and card counts coincide.
+    assert (row["total_npus"], row["free_npus"]) == (2, 2)
+    assert norm["npu_count"] == 2
+    assert norm["free_npus"] == 2
+    assert norm["vram_free_mb"] == (32768 - 2874) + (32768 - 2873)
+
+    # Legacy probe rows that predate per-Die records stay card-shaped.
+    card_only = [{"npu_id": 0, "busy": False, "hbm_total_mb": 32768, "hbm_used_mb": 2874},
+                 {"npu_id": 1, "busy": True, "hbm_total_mb": 32768, "hbm_used_mb": 30000}]
+    legacy = normalize_remote_probe_spec(
+        {"host": "10.0.0.7", "npus": card_only, "total_npus": 2, "free_npus": 1,
+         "server": {"cpu_cores": 64, "mem_total_mb": 32768, "mem_available_mb": 20000}})
+    assert legacy["npu_count"] == 2
+    assert legacy["free_npus"] == 1
+    assert legacy["vram_free_mb"] == 32768 - 2874
+
+
+def test_unmeasured_die_hbm_is_leasable_but_carries_no_headroom():
+    """A `0 / 0` HBM Die is still a free execution unit with unknown headroom.
+
+    `fleet_probe.probe_machine_record` keeps `hbm_total_mb == 0` on cards whose
+    `npu-smi info` table reported no HBM and whose `npu-smi info -t usages`
+    fallback failed (the snapshot then carries `usage_parse_error`). That is the
+    reachable shape here: the production parser always emits both HBM keys, so
+    only the unmeasured-total arm occurs in a real fleet row.
+    """
+    row = {
+        "host": "10.0.0.9", "free_phy_ids": [0, 1],
+        "usage_parse_error": "TimeoutError: npu-smi info -t usages timed out",
+        "server": {"cpu_cores": 192, "mem_total_mb": 1048576, "mem_available_mb": 900000},
+        "npus": [{"npu_id": 0, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0, "die_count": 1,
+                  "dies": [{"phy_id": 0, "busy": False, "hbm_used_mb": 0, "hbm_total_mb": 0}]},
+                 {"npu_id": 1, "busy": False, "hbm_used_mb": 4778, "hbm_total_mb": 98304, "die_count": 1,
+                  "dies": [{"phy_id": 1, "busy": False, "hbm_used_mb": 4778, "hbm_total_mb": 98304}]}],
+    }
+    norm = normalize_remote_probe_spec(row)
+    assert norm["free_npus"] == 2
+    # Only the measured Die contributes headroom; the unmeasured one adds none
+    # and is not credited with a nameplate capacity it never reported.
+    assert norm["vram_free_mb"] == 98304 - 4778
+    assert norm["vram_total_mb"] == 98304
+    assert norm["vram_free_observed"] is False
+
+
+def test_unobserved_free_hbm_is_not_total_capacity():
+    # No `npus` inventory and no free figure: nothing may be claimed available.
+    unobserved = normalize_remote_probe_spec(
+        {"host": "10.0.0.8", "hbm_total_mb": 131072,
+         "server": {"cpu_cores": 64, "mem_total_mb": 32768, "mem_available_mb": 20000}})
+    assert unobserved["vram_total_mb"] == 131072
+    assert unobserved["vram_free_mb"] == 0
+    assert unobserved["vram_free_observed"] is False
+
+    observed = normalize_remote_probe_spec(
+        {"host": "10.0.0.8", "hbm_total_mb": 131072, "hbm_free_mb": 65536,
+         "server": {"cpu_cores": 64, "mem_total_mb": 32768, "mem_available_mb": 20000}})
+    assert observed["vram_free_mb"] == 65536
+    assert observed["vram_free_observed"] is True
+
+    rejected = evaluate_placement(
+        {"tier": "npu", "npu_count": 1, "hbm_mb": 65536},
+        local_spec={"os_family": "linux", "cpu_cores": 8, "usable_cpu_cores": 8.0,
+                    "mem_total_mb": 16384, "mem_available_mb": 8192},
+        remote_specs=[{"host": "10.0.0.8", "hbm_total_mb": 131072, "free_npus": 4,
+                       "server": {"cpu_cores": 64, "mem_total_mb": 32768, "mem_available_mb": 20000}}],
+    )
+    assert rejected["decision"] == "reject"
+    assert rejected["shortfall"]["remote"][0]["gaps"]["vram_mb"] == {"required": 65536, "available": 0}
 
 
 def test_high_spec_macos_or_windows_workstation_executes_heavy_workload_locally():
