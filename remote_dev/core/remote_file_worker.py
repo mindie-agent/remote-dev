@@ -140,6 +140,102 @@ def _utf16_index(text, units, label="column_offset"):
     fail("invalid_pagination", f"{label} {units} is past the end of the line")
 
 
+READ_LINE_MARKER = "<remote-dev line truncated>"
+
+
+def _text_width(text, utf16_units):
+    return _utf16_width(text) if utf16_units else len(text)
+
+
+def _take_text_units(text, units, utf16_units):
+    """Return (prefix, consumed) without splitting a surrogate pair."""
+    if units <= 0:
+        return "", 0
+    if not utf16_units:
+        part = text[:units]
+        return part, len(part)
+    consumed = 0
+    end = 0
+    for index, ch in enumerate(text):
+        width = 2 if ord(ch) > 0xFFFF else 1
+        if consumed + width > units:
+            return text[:index], consumed
+        consumed += width
+        end = index + 1
+    return text[:end], consumed
+
+
+def _page_budget(selected, max_chars, utf16_units, column_offset):
+    """Bound candidate lines and expose a cursor that follows the emitted body.
+
+    ``selected`` is a list of ``(line_no, body, more_text)`` where ``body``
+    already reflects ``column_offset`` and the per-line display cap.  The local
+    formatter re-budgets against the final header/footer, so this function only
+    needs to keep enough candidates and never advertise a cursor past the body
+    it emits.
+    """
+    budgeted = []
+    used = 0
+    next_offset = None
+    next_column = None
+    first_line = selected[0][0] if selected else 0
+    for index, body, more_text in selected:
+        column_start = column_offset if index == first_line else 0
+        prefix_units = len(str(index)) + 3
+        body_units = _text_width(body, utf16_units)
+        separator = 1 if budgeted else 0
+        if used + separator + prefix_units + body_units > max_chars:
+            if budgeted:
+                next_offset = index
+                next_column = column_start
+            else:
+                room = max_chars - prefix_units - 1
+                if room <= 0:
+                    fail(
+                        "max_chars_too_small",
+                        f"max_chars={max_chars} is too small for file text and the Read status",
+                    )
+                part, consumed = _take_text_units(body, room, utf16_units)
+                if consumed <= 0:
+                    fail(
+                        "max_chars_too_small",
+                        f"max_chars={max_chars} is too small for file text and the Read status",
+                    )
+                budgeted.append((index, part, True))
+                next_offset = index
+                next_column = column_start + consumed
+            break
+        budgeted.append((index, body, more_text))
+        used += separator + prefix_units + body_units
+    else:
+        if budgeted and budgeted[-1][2]:
+            index, body, _more = budgeted[-1]
+            column_start = column_offset if index == first_line else 0
+            next_offset = index
+            next_column = column_start + _text_width(body, utf16_units)
+    return budgeted, next_offset, next_column
+
+
+def _page_content(budgeted):
+    return "\n".join(
+        f"{index} | {body}" + (READ_LINE_MARKER if more_text else "")
+        for index, body, more_text in budgeted
+    )
+
+
+def _page_metadata(budgeted, utf16_units, column_offset):
+    first_line = budgeted[0][0] if budgeted else 0
+    return [
+        {
+            "line": index,
+            "column_start": column_offset if index == first_line else 0,
+            "body_units": _text_width(body, utf16_units),
+            "clipped": bool(more_text),
+        }
+        for index, body, more_text in budgeted
+    ]
+
+
 def resolve_path(
     raw: str,
     root: pathlib.Path,
@@ -211,12 +307,53 @@ def unified(before: str, after: str, path: pathlib.Path) -> str:
     )[:12000]
 
 
-def scan_text_lines(path: pathlib.Path, max_chars: int, digest=None):
+def scan_text_lines(path: pathlib.Path, max_chars: int, digest=None, *,
+                    skip_line=None, skip_units=0, utf16_units=False):
     # Split like str.splitlines(), including CRLF across chunk boundaries.
     # Keep only a bounded prefix even if a file contains one enormous line.
+    # ``skip_line``/``skip_units`` discard a leading column without buffering
+    # it, so continuing a very long line stays bounded by ``max_chars``.
     breaks = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     prefix, length, skip_lf, first = "", 0, False, True
+    line_no = 1
+    remaining_skip = skip_units if skip_line == 1 else 0
+
+    def consume(piece):
+        nonlocal prefix, length, remaining_skip
+        if remaining_skip and line_no == skip_line:
+            if utf16_units:
+                index = 0
+                while index < len(piece) and remaining_skip:
+                    width = 2 if ord(piece[index]) > 0xFFFF else 1
+                    if width > remaining_skip:
+                        fail(
+                            "invalid_pagination",
+                            f"column_offset {skip_units} falls inside a Unicode surrogate pair",
+                        )
+                    remaining_skip -= width
+                    index += 1
+                piece = piece[index:]
+            else:
+                drop = min(len(piece), remaining_skip)
+                remaining_skip -= drop
+                piece = piece[drop:]
+        prefix += piece[:max(0, max_chars - len(prefix))]
+        length += len(piece)
+
+    def finish():
+        nonlocal prefix, length, line_no, remaining_skip
+        if line_no == skip_line and remaining_skip:
+            fail(
+                "invalid_pagination",
+                f"column_offset {skip_units} is past the end of line {line_no}",
+            )
+        result = (prefix, length > max_chars)
+        prefix, length = "", 0
+        line_no += 1
+        remaining_skip = skip_units if skip_line == line_no else 0
+        return result
+
     with path.open("rb") as stream:
         while True:
             raw = stream.read(65536)
@@ -233,19 +370,14 @@ def scan_text_lines(path: pathlib.Path, max_chars: int, digest=None):
                 skip_lf = False
             start = 0
             for match in breaks.finditer(text):
-                piece = text[start:match.start()]
-                prefix += piece[:max(0, max_chars - len(prefix))]
-                length += len(piece)
-                yield prefix, length > max_chars
-                prefix, length = "", 0
+                consume(text[start:match.start()])
+                yield finish()
                 skip_lf = match.group() == "\r" and match.end() == len(text)
                 start = match.end()
-            piece = text[start:]
-            prefix += piece[:max(0, max_chars - len(prefix))]
-            length += len(piece)
+            consume(text[start:])
             if not raw:
                 if length:
-                    yield prefix, length > max_chars
+                    yield finish()
                 return
 
 
@@ -423,7 +555,6 @@ def main() -> None:
             digest_hex = _stream_sha256(path) if verify else None
             total = 0
             selected_lines = []
-            used = 0
             warnings = []
             lossy_total = 0
             forward = offset > 0
@@ -446,42 +577,69 @@ def main() -> None:
                     if len(selected_lines) > abs(offset) + limit:
                         selected_lines.pop(0)
             if not forward:
-                start_index = max(0, total + offset)
-                selected_lines = selected_lines[:limit]
+                # Keep the last abs(offset) lines (then the requested count),
+                # not the first lines of that rolling window.
+                selected_lines = selected_lines[-abs(offset):][:limit]
+                effective_offset = max(1, total + offset + 1)
+            else:
+                effective_offset = offset
             if lossy_total:
                 warnings.append(f"{lossy_total} invalid UTF-16 sequence(s) replaced with U+FFFD")
-            numbered_lines = []
-            line_start = line_end = 0
+            prepared = []
             for position, (line_no, line_text) in enumerate(selected_lines):
                 body_text = line_text
                 if position == 0 and column_offset:
-                    cut = _utf16_index(body_text, column_offset)
+                    if utf16_units:
+                        cut = _utf16_index(body_text, column_offset)
+                    else:
+                        if column_offset > len(body_text):
+                            fail("invalid_pagination", f"column_offset {column_offset} is past the end of line {line_no}")
+                        cut = column_offset
                     body_text = body_text[cut:]
-                if _utf16_width(body_text) > max_line_chars:
-                    body_text = body_text[:_utf16_index(body_text, max_line_chars)]
-                rendered = f"{line_no} | {body_text}"
-                if max_chars is not None and numbered_lines and used + _utf16_width(rendered) + 1 > max_chars:
-                    break
-                numbered_lines.append(rendered)
-                used += _utf16_width(rendered) + 1
-                line_start = line_no if not line_start else line_start
-                line_end = line_no
+                more_text = _text_width(body_text, utf16_units) > max_line_chars
+                if more_text:
+                    if utf16_units:
+                        body_text = body_text[:_utf16_index(body_text, max_line_chars)]
+                    else:
+                        body_text = body_text[:max_line_chars]
+                prepared.append((line_no, body_text, more_text))
+            if max_chars is not None:
+                budgeted, next_offset, next_column = _page_budget(
+                    prepared, max_chars, utf16_units, column_offset
+                )
+            else:
+                budgeted, next_offset, next_column = prepared, None, None
+            line_start = budgeted[0][0] if budgeted else 0
+            line_end = budgeted[-1][0] if budgeted else 0
             after = path.stat()
             if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
                 fail("file_changed", "file changed during read; retry to obtain a consistent read")
             if payload.get("strict_offset") and forward and offset > total:
                 fail("invalid_pagination", f"offset {offset} is past the end of the file ({total} lines)")
+            partial = (
+                line_start > 1
+                or next_offset is not None
+                or line_end < total
+            )
             info = {
                 "path": str(path), "resolved_path": str(resolved), "size": after.st_size,
                 "mtime_ns": after.st_mtime_ns, "sha256": digest_hex,
-                "total_lines": total, "offset": offset, "limit": limit,
+                "total_lines": total, "offset": effective_offset, "limit": limit,
                 "line_start": line_start, "line_end": line_end,
-                "partial": (line_start > 1 if forward else start_index > 0) or line_end < total,
-                "content": "\n".join(numbered_lines),
-                "truncated_line_count": 0, "symlink": path.is_symlink(),
+                "partial": partial,
+                "content": _page_content(budgeted),
+                "truncated_line_count": sum(1 for _i, _b, more in budgeted if more),
+                "symlink": path.is_symlink(),
                 "content_verified": verify, "encoding": encoding,
             }
-            print(json.dumps({"status": "partial" if info["partial"] else "ok", "file": info, "warnings": warnings}, sort_keys=True))
+            if max_chars is not None:
+                info["page_lines"] = _page_metadata(budgeted, utf16_units, column_offset)
+            if next_offset is not None:
+                info["next_offset"] = next_offset
+                info["next_column_offset"] = next_column or 0
+            if column_offset:
+                info["column_offset"] = column_offset
+            print(json.dumps({"status": "partial" if partial else "ok", "file": info, "warnings": warnings}, sort_keys=True))
             raise SystemExit(0)
 
         with path.open("rb") as binary_probe:
@@ -612,7 +770,12 @@ def main() -> None:
         selected, total, more = [], 0, False
         selected_chars = 0
         collecting = True
-        for index, line in enumerate(scan_text_lines(path, scan_limit, None), 1):
+        for index, line in enumerate(scan_text_lines(
+            path, scan_limit, None,
+            skip_line=offset if (offset > 0 and column_offset) else None,
+            skip_units=column_offset,
+            utf16_units=utf16_units,
+        ), 1):
             total = index
             if offset > 0 and offset <= index < offset + limit and collecting:
                 body, clipped = line
@@ -641,64 +804,44 @@ def main() -> None:
             fail("file_changed", "file changed during read; retry to obtain a consistent read")
         if payload.get("strict_offset") and offset > total:
             fail("invalid_pagination", f"offset {offset} is past the end of the file ({total} lines)")
-        start = min(offset - 1, total)
-        end = min(start + limit, total)
-        if column_offset and selected:
-            first_index, first_body, first_clipped = selected[0]
-            if utf16_units:
-                cut = _utf16_index(first_body, column_offset)
-            else:
-                if column_offset > len(first_body):
-                    fail("invalid_pagination", f"column_offset {column_offset} is past the end of line {first_index}")
-                cut = column_offset
-            selected[0] = (first_index, first_body[cut:], first_clipped or len(first_body) - cut > max_line_chars)
         next_offset = None
         next_column_offset = None
         if max_chars is not None:
-            budgeted = []
-            used = 0
-            truncated_by_chars = False
+            prepared = []
             for index, body, clipped in selected:
                 if utf16_units and _utf16_width(body) > max_line_chars:
-                    body = body[:_utf16_index(body, max_line_chars)]
+                    body, _consumed = _take_text_units(body, max_line_chars, True)
                     clipped = True
-                rendered_len = (len(str(index)) + 3 + _utf16_width(body) + 1) if utf16_units else (len(str(index)) + 3 + len(body) + 1)
-                if used + rendered_len > max_chars:
-                    if not budgeted:
-                        if max_chars <= len(str(index)) + 4:
-                            fail("max_chars_too_small", f"max_chars={max_chars} is too small for file text and the Read status")
-                        room = max(1, max_chars - used - len(str(index)) - 4)
-                        body = body[:room]
-                        clipped = True
-                        budgeted.append((index, body, clipped))
-                        next_offset = index
-                        next_column_offset = _utf16_width(body) if utf16_units else len(body)
-                    else:
-                        next_offset = index
-                        next_column_offset = 0
-                    truncated_by_chars = True
-                    break
-                budgeted.append((index, body, clipped))
-                used += rendered_len
-            selected = budgeted
-            if truncated_by_chars:
-                end = selected[-1][0] if selected else start
+                prepared.append((index, body, clipped))
+            selected, next_offset, next_column_offset = _page_budget(
+                prepared, max_chars, utf16_units, column_offset
+            )
         truncated_lines = sum(clipped for _, _, clipped in selected)
         if truncated_lines and next_offset is None and selected:
             last_index, last_body, _last_clipped = selected[-1]
             next_offset = last_index
-            next_column_offset = _utf16_width(last_body) if utf16_units else len(last_body)
-        numbered = "\n".join(f"{index} | {body}" + ("<remote-dev line truncated>" if clipped else "")
-                             for index, body, clipped in selected)
+            next_column_offset = _text_width(last_body, utf16_units)
+        if selected:
+            line_start = selected[0][0]
+            line_end = selected[-1][0]
+        elif total:
+            line_start = min(offset, total + 1)
+            line_end = min(offset - 1 + limit, total)
+        else:
+            line_start = line_end = 0
+        total_known = total_lines if total_lines is not None else total
         info = {"path": str(path), "resolved_path": str(resolved), "size": after.st_size,
                 "mtime_ns": after.st_mtime_ns, "sha256": digest_hex,
                 "total_lines": total_lines, "offset": offset, "limit": limit,
-                "line_start": start + 1 if total else 0, "line_end": end,
-                "partial": start > 0 or more or end < total or content_offset > 0 or (max_chars is not None and next_offset is not None), "content": numbered,
+                "line_start": line_start, "line_end": line_end,
+                "partial": line_start > 1 or more or line_end < total_known or content_offset > 0 or (max_chars is not None and next_offset is not None),
+                "content": _page_content(selected),
                 "truncated_line_count": truncated_lines, "symlink": path.is_symlink(),
                 "content_verified": verify}
         if column_offset:
             info["column_offset"] = column_offset
+        if max_chars is not None:
+            info["page_lines"] = _page_metadata(selected, utf16_units, column_offset)
         if next_offset is not None:
             info["next_offset"] = next_offset
             info["next_column_offset"] = next_column_offset or 0

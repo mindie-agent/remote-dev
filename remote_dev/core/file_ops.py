@@ -23,6 +23,7 @@ from .container_endpoint import pinned_endpoint
 from .errors import PathPolicyError
 from .path_policy import assert_under_root, join_under_root
 from .preview import MAX_LINE_CHARS, MAX_READ_LINES, compact_text
+from .read_paging import format_read_text
 from remote_dev.result import make_result, new_invocation_id, utc_now_iso
 from .ssh_transport import run_remote_python
 from .state_store import load_write_ledger_guard, resolve_ledger_scope, write_read_ledger
@@ -47,7 +48,7 @@ def _status_to_outcome(status: str) -> str:
         return "success"
     if status in {"read_required", "file_changed_since_read", "old_string_not_unique", "path_outside_root", "symlink_not_allowed", "file_exists"}:
         return "blocked"
-    if status in {"path_required", "invalid_pagination", "parent_not_found", "invalid_flags"}:
+    if status in {"path_required", "invalid_pagination", "parent_not_found", "invalid_flags", "max_chars_too_small"}:
         return "needs_input"
     return "failed"
 
@@ -164,7 +165,7 @@ def remote_read(
         extra={"file": {k: v for k, v in file_info.items() if k != "content"}, "error": data.get("error"), "error_details": data.get("error_details"), "ledger_scope": ledger_scope},
     )
     if status in {"ok", "partial"}:
-        text = _format_read_text(endpoint, result, file_info, max_chars=max_chars)
+        text = format_read_text(_format_endpoint(endpoint), result, file_info, max_chars=max_chars, utf16_units=utf16_units)
     else:
         text = result["summary"] + "\n" + str(data.get("error") or data.get("status") or "read failed") + "\n"
     payload = {"text": text, "result": result}
@@ -487,56 +488,6 @@ def _path_blocked_result(
 
 def _format_endpoint(endpoint: Endpoint) -> str:
     return f"{endpoint.user}@{endpoint.host}:{endpoint.port}"
-
-
-def _format_read_text(
-    endpoint: Endpoint,
-    result: dict[str, Any],
-    file_info: dict[str, Any],
-    *,
-    max_chars: int | None = None,
-) -> str:
-    body = (
-        str(file_info.get("content", ""))
-        if max_chars is not None
-        else str(result.get("preview", {}).get("content", ""))
-    )
-    lines = [
-        f"RemoteRead on {_format_endpoint(endpoint)}",
-        f"file: {file_info.get('path', '')}",
-        f"lines: {file_info.get('line_start', 0)}-{file_info.get('line_end', 0)} of {file_info.get('total_lines', 0)}",
-        f"partial: {str(file_info.get('partial', False)).lower()}",
-        "",
-        body,
-    ]
-    if result.get("error"):
-        lines.append(f"error: {result['error']}")
-    footer = None
-    if max_chars is not None and file_info.get("next_offset") is not None:
-        import json
-
-        footer = "Next Read: " + json.dumps({
-            "path": file_info.get("path"),
-            "line_offset": file_info.get("next_offset"),
-            "column_offset": file_info.get("next_column_offset"),
-            "max_chars": max_chars,
-        }, separators=(",", ":"))
-    if max_chars is None:
-        if footer:
-            lines.append(footer)
-        return compact_text("\n".join(lines).rstrip() + "\n")
-    # Native Read keeps status/Next Read visible by dropping content, not by
-    # cutting the status text. Trim the body to the remaining character budget.
-    prefix = "\n".join(lines[:-1])
-    suffix = ("\n" + footer) if footer else ""
-    room = int(max_chars) - len(prefix) - len(suffix) - 1
-    if room > 0:
-        body = body[:room]
-    elif not footer:
-        body = ""
-    lines[-1] = body
-    rendered = "\n".join(lines) + suffix + "\n"
-    return rendered
 
 
 def _format_ls_text(endpoint: Endpoint, result: dict[str, Any]) -> str:
