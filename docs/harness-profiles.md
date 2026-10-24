@@ -72,13 +72,18 @@ existing `remote_*` call does not break.
 ## Media and host-only fields
 
 Image reads (Claude `Read` on PNG/JPEG/GIF/WebP, Kimi `ReadMediaFile`, DSH
-`read_image`, Codex `view_image`) return a bounded MCP image block plus a text
-receipt. Claude `Read` renders `.ipynb` cells and outputs as text, and
-`NotebookEdit` replaces/inserts/deletes cells by reading and atomically
-rewriting the notebook JSON. PDF page rendering and Kimi image-region crops
-are not implemented remotely; the tools return an explicit error instead of
-pretending success. Images are returned at original resolution unless the
-native size bound is exceeded; automatic downscaling is not replicated.
+`read_image`, Codex `view_image`) pull the file through the bounded streaming
+artifact path, then crop/downscale **locally** with `sips` (optional Pillow or
+ImageMagick fallback) and return a bounded MCP image block plus a text
+receipt. Kimi `region` and `full_resolution` are honored; `ReadMediaFile` on a
+video returns a local QuickLook/ffmpeg thumbnail, explicitly best-effort.
+Claude `Read` renders `.ipynb` cells/outputs structurally and `NotebookEdit`
+replaces/inserts/deletes cells by reading and atomically rewriting canonical
+notebook JSON; the read updates the prior-read ledger. Claude `Read` on PDF
+renders selected pages locally with `pdftoppm` (optional pypdfium2/PyMuPDF)
+after a bounded pull. When no local renderer/decoder exists the tool returns
+an explicit failure; no renderer is installed remotely and no model weights
+are loaded.
 
 Claude `TaskList` is the host session task/plan registry, a high-level host interface outside the remote-file/process scope; it is intentionally not exposed as a native projection. Kimi `TaskList` is a background-process roster and remains in scope. `TaskOutput` remains the background-output tool.
 
@@ -86,8 +91,9 @@ Host-local permission/escalation arguments are never interpreted as remote
 authorization. Claude `dangerouslyDisableSandbox`, DSH `sandbox_permissions`/
 `justification`, and Codex `sandbox_permissions` other than `use_default`,
 `additional_permissions`, `justification`, or `prefix_rule` are rejected with
-an explicit error. Codex `shell`/`login`, which select a host shell, are also
-rejected; the remote endpoint's configured shell is used.
+an explicit error. Codex `shell` and `login` are normal command-process
+parameters and are executed on the remote endpoint (`shell -c`, `-l` for
+login); they are not host-local approval controls.
 
 ## Standalone and compatibility
 
