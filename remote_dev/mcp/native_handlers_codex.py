@@ -91,7 +91,7 @@ def codex_view_image(profile: str, spec: NativeToolSpec, native: dict[str, Any],
         normalized, spec_wire=spec.wire, max_edge=None if native.get("detail") == "original" else 1568
     )
     if payload.get("content"):
-        mime = payload["result"]["extra"].get("mime_type") or "image/png"
+        mime = payload["result"].get("mime_type") or "image/png"
         data = payload["content"][0]["data"]
         payload["result"].update({
             "image_url": f"data:{mime};base64,{data}",
