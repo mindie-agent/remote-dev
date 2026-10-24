@@ -623,12 +623,13 @@ def codex_exec(profile: str, spec: NativeToolSpec, native: dict[str, Any], norma
     result = payload.get("result") or {}
     state = str(result.get("state") or result.get("status") or "unknown")
     session_id = result.get("session_id") or result.get("job_id")
+    native_session_id = int(session_id) if str(session_id).isdigit() else session_id
     exit_code = result.get("exit_code")
     output = _codex_output(result)
     duration = float(result.get("duration_ms") or 0) / 1000.0
     lines = [f"Chunk ID: {session_id or 'unknown'}", f"Wall time: {duration:.4f} seconds"]
     if state in {"prepared", "running"}:
-        lines.append(f"Process running with session ID {session_id}")
+        lines.append(f"Process running with session ID {native_session_id}")
     else:
         lines.append(f"Process exited with code {exit_code if exit_code is not None else 'unknown'}")
     if output:
@@ -639,7 +640,7 @@ def codex_exec(profile: str, spec: NativeToolSpec, native: dict[str, Any], norma
         "chunk_id": str(session_id) if session_id is not None else None,
         "wall_time_seconds": duration,
         "output": output,
-        **({"session_id": session_id} if state in {"prepared", "running"} else {}),
+        **({"session_id": native_session_id} if state in {"prepared", "running"} else {}),
         **({"exit_code": exit_code} if exit_code is not None else {}),
     })
     return payload
