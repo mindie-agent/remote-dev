@@ -89,7 +89,7 @@ class CatalogTests(unittest.TestCase):
         self.assertNotIn("lines", job["properties"])
         read = by_name["remote_read"]["inputSchema"]
         self.assertEqual(read["properties"]["limit"]["default"], 2000)
-        self.assertNotIn("maximum", read["properties"]["limit"])
+        self.assertEqual(read["properties"]["limit"]["maximum"], 2000)
 
     def test_kimi_seconds_and_claude_milliseconds_are_not_guessed(self) -> None:
         calls: list[tuple[str, dict]] = []

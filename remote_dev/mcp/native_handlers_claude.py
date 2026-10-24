@@ -100,12 +100,23 @@ def claude_task_stop(profile: str, spec: NativeToolSpec, native: dict[str, Any],
     job = status_payload["result"].get("job") or {}
     state = str(status_payload["result"].get("status") or job.get("state") or "unknown")
     if state in _TERMINAL:
-        # Claude TaskStop treats an already-terminal task as a successful
-        # no-op and returns its current status.
-        payload = status_payload
-        payload["text"] = f"Task {job_id} is already {state}." + "\n"
-        payload["result"].update({"tool": spec.wire, "task_id": job_id, "task_type": "local_bash"})
-        return payload
+        # Native Claude TaskStop validateInput rejects a non-running task with
+        # result:false / errorCode:3, rather than treating it as a no-op.
+        from remote_dev.result import make_result
+
+        message = f"Task {job_id} is not running (status: {state})"
+        return {
+            "text": message + "\n",
+            "result": make_result(
+                tool=spec.wire,
+                target={"kind": "local_state"},
+                outcome="failed",
+                status="not_running",
+                summary=message,
+                preview={"stderr": message},
+                extra={"result": False, "errorCode": 3, "task_id": job_id, "task_type": "local_bash", "state": state},
+            ),
+        }
     payload = _call_canonical("remote.job_stop", {"job_id": job_id})
     message = f"Successfully stopped task: {job_id} ({record.get('command_preview') or record.get('description') or ''})"
     payload["text"] = message + "\n"
@@ -137,8 +148,38 @@ def claude_read(profile: str, spec: NativeToolSpec, native: dict[str, Any], norm
         if fetched.get("status") != "ok":
             return _media_failure(spec.wire, fetched)
         if suffix == ".pdf":
+            from remote_dev.core.media_ops import pdf_page_count
+
+            counted = pdf_page_count(fetched["data"])
+            total_pages = counted.get("page_count") if counted.get("status") == "ok" else None
+            pages_arg = native.get("pages")
+            if pages_arg is None and isinstance(total_pages, int) and total_pages > 10:
+                return _media_failure(spec.wire, {
+                    "status": "too_many_pages",
+                    "error": f"PDF has {total_pages} pages; reads without pages are limited to 10 pages. Use pages to read specific pages.",
+                })
+            if pages_arg is None and isinstance(total_pages, int) and total_pages <= 10:
+                text = f"PDF {normalized['file_path']} ({total_pages} page(s), full document).\n"
+                result = make_result(
+                    tool=spec.wire,
+                    target=endpoint.to_result_target(),
+                    outcome="success",
+                    status="ok",
+                    summary=f"RemoteRead PDF {normalized['file_path']} ({total_pages} page(s)).",
+                    preview={"content": text},
+                    extra={"path": normalized["file_path"], "page_count": total_pages, "full_pdf": True},
+                )
+                return {
+                    "text": text,
+                    "result": result,
+                    "content": [{
+                        "type": "pdf",
+                        "data": base64.b64encode(fetched["data"]).decode("ascii"),
+                        "mimeType": "application/pdf",
+                    }],
+                }
             rendered = render_pdf(
-                fetched["data"], pages=native.get("pages"), max_pages=20, max_edge=1568
+                fetched["data"], pages=pages_arg, max_pages=20, max_edge=1568, image_format="jpeg"
             )
             if rendered.get("status") != "ok":
                 return _media_failure(spec.wire, rendered)
@@ -153,7 +194,7 @@ def claude_read(profile: str, spec: NativeToolSpec, native: dict[str, Any], norm
                 preview={"content": text},
                 extra={
                     "path": normalized["file_path"],
-                    "page_count": len(pages),
+                    "page_count": total_pages,
                     "pages": [{"page": page["page"], "width": page.get("width"), "height": page.get("height")} for page in pages],
                     "renderer": rendered.get("renderer"),
                 },

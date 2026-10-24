@@ -44,77 +44,58 @@ def _stream_sha256(path):
 
 
 def _detect_utf16(path):
-    import unicodedata
-
     with path.open("rb") as stream:
-        head = stream.read(4096)
-    if head.startswith(b"\xff\xfe"):
+        sample = stream.read(512)
+    if len(sample) >= 2:
+        if sample[0:2] == b"\xff\xfe":
+            return "utf-16-le"
+        if sample[0:2] == b"\xfe\xff":
+            return "utf-16-be"
+    zeros_at_odd = 0
+    zeros_at_even = 0
+    for index, byte in enumerate(sample[:512]):
+        if byte != 0:
+            continue
+        if index % 2:
+            zeros_at_odd += 1
+        else:
+            zeros_at_even += 1
+    if zeros_at_odd == 0 and zeros_at_even == 0:
+        return None
+    if zeros_at_even == 0 and zeros_at_odd >= 2:
         return "utf-16-le"
-    if head.startswith(b"\xfe\xff"):
+    if zeros_at_odd == 0 and zeros_at_even >= 2:
         return "utf-16-be"
-    if len(head) < 4 or path.stat().st_size % 2:
-        return None
-    if head.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"%PDF", b"RIFF")):
-        return None
-    sample = head[: len(head) - (len(head) % 2)]
-    has_nul = b"\x00" in sample
-    even_nul = sum(1 for i in range(0, len(sample), 2) if sample[i:i+1] == b"\x00")
-    odd_nul = sum(1 for i in range(1, len(sample), 2) if sample[i:i+1] == b"\x00")
-    for encoding in ("utf-16-le", "utf-16-be"):
-        try:
-            decoded = sample.decode(encoding, errors="strict")
-        except UnicodeDecodeError:
-            continue
-        if not decoded:
-            continue
-        printable = 0
-        controls = 0
-        common = 0
-        ascii_alnum = 0
-        non_ascii = 0
-        for char in decoded:
-            code = ord(char)
-            if char in "\n\r\t":
-                printable += 1
-            elif unicodedata.category(char).startswith("C"):
-                controls += 1
-                continue
-            else:
-                printable += 1
-            if char.isascii():
-                if char.isalnum():
-                    ascii_alnum += 1
-            else:
-                non_ascii += 1
-            if (
-                char.isspace()
-                or char.isascii()
-                or 0x3000 <= code <= 0x30FF
-                or 0x3400 <= code <= 0x9FFF
-                or 0xAC00 <= code <= 0xD7AF
-                or 0xF900 <= code <= 0xFAFF
-                or 0xFF00 <= code <= 0xFFEF
-                or 0x1F000 <= code <= 0x1FAFF
-            ):
-                common += 1
-        if controls or printable < max(1, len(decoded) * 0.9):
-            continue
-        if has_nul:
-            # ASCII-bearing UTF-16 has NUL padding on one byte position.
-            if encoding == "utf-16-le" and odd_nul >= max(2, even_nul * 3):
-                return encoding
-            if encoding == "utf-16-be" and even_nul >= max(2, odd_nul * 3):
-                return encoding
-        # No dominant NUL padding. Prefer UTF-8 whenever it decodes strictly; this
-        # keeps ordinary text safe. A BOM-less CJK/emoji UTF-16 file usually
-        # fails strict UTF-8, and only then accept a fully common-script body.
-        try:
-            sample.decode("utf-8", errors="strict")
-        except UnicodeDecodeError:
-            if common == len(decoded) and non_ascii and ascii_alnum == 0:
-                return encoding
-    return None
+    # Mixed/insufficient NUL padding is binary by the native sniffTextEncoding.
+    return "binary"
 
+
+def _seems_binary_utf8(sample):
+    if b"\x00" in sample:
+        return True
+    end = len(sample)
+    for index in range(max(0, len(sample) - 3), len(sample)):
+        byte = sample[index]
+        expected = 2 if 194 <= byte <= 223 else 3 if 224 <= byte <= 239 else 4 if 240 <= byte <= 244 else 0
+        if expected == 0 or index + expected <= len(sample):
+            continue
+        if all(128 <= cb <= 191 for cb in sample[index + 1 :]):
+            end = index
+            break
+    try:
+        text = sample[:end].decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return True
+    total = 0
+    non_printable = 0
+    for char in text:
+        total += 1
+        code = ord(char)
+        if code in (9, 10, 13):
+            continue
+        if code < 32 or 127 <= code <= 159:
+            non_printable += 1
+    return total > 0 and non_printable / total > 0.3
 
 def _utf16_lines(path, encoding):
     decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
@@ -433,6 +414,11 @@ def main() -> None:
         before = path.stat()
 
         encoding = _detect_utf16(path)
+        kimi_encoding = bool(payload.get("utf16_units"))
+        if kimi_encoding and encoding in {"utf-16-le", "utf-16-be"} and path.stat().st_size > 10485760:
+            fail("file_too_large", "Kimi Read rejects UTF-16 files larger than 10485760 bytes")
+        if encoding == "binary":
+            fail("binary_file", "remote.read detected binary data; use remote.artifact_pull for image/binary files")
         if encoding is not None:
             digest_hex = _stream_sha256(path) if verify else None
             total = 0
@@ -498,6 +484,8 @@ def main() -> None:
 
         with path.open("rb") as binary_probe:
             head_bytes = binary_probe.read(8192)
+        if kimi_encoding and _seems_binary_utf8(head_bytes[:512]):
+            fail("binary_file", "remote.read detected a binary/non-UTF-8 file")
         if b"\x00" in head_bytes:
             fail("binary_file", "remote.read returns UTF-8/UTF-16 text; use remote.artifact_pull for binary/image files")
 
@@ -675,12 +663,14 @@ def main() -> None:
                 rendered_len = (len(str(index)) + 3 + _utf16_width(body) + 1) if utf16_units else (len(str(index)) + 3 + len(body) + 1)
                 if used + rendered_len > max_chars:
                     if not budgeted:
+                        if max_chars <= len(str(index)) + 4:
+                            fail("max_chars_too_small", f"max_chars={max_chars} is too small for file text and the Read status")
                         room = max(1, max_chars - used - len(str(index)) - 4)
                         body = body[:room]
                         clipped = True
                         budgeted.append((index, body, clipped))
                         next_offset = index
-                        next_column_offset = len(body)
+                        next_column_offset = _utf16_width(body) if utf16_units else len(body)
                     else:
                         next_offset = index
                         next_column_offset = 0

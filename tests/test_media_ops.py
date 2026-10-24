@@ -480,7 +480,8 @@ def test_render_pdf_missing_renderer_is_explicit(
     empty_bin = tmp_path / "empty-bin"
     empty_bin.mkdir()
     monkeypatch.setenv("PATH", str(empty_bin))
-    monkeypatch.setattr(media_ops, "_module_available", lambda name: False)
+    import remote_dev.core.media_pdf as media_pdf
+    monkeypatch.setattr(media_pdf, "_module_available", lambda name: False)
     result = media_ops.render_pdf(_pdf_bytes(1))
     assert result["status"] == "failed"
     assert "renderer" in result["error"]
@@ -503,10 +504,11 @@ def test_read_notebook_structured_cells_and_text_fallback() -> None:
     assert result["cells"][0]["outputs"] == []
     assert result["cells"][1]["source"] == "print(1)"
     outputs = result["cells"][1]["outputs"]
-    assert "1\n" in outputs
-    assert "2" in outputs
-    assert "**bold**" in outputs
-    assert any("ValueError: bad" in output for output in outputs)
+    assert outputs and all(isinstance(output, dict) for output in outputs)
+    assert any(output.get("output_type") == "stream" for output in outputs)
+    assert any(output.get("output_type") == "execute_result" for output in outputs)
+    assert result["cells"][1]["execution_count"] == 2
+    assert result["cells"][1]["language"] == "python"
     assert "# Cell 0 [markdown] id=intro" in result["text"]
     assert "print(1)" in result["text"]
     assert "ValueError: bad" in result["text"]
@@ -539,7 +541,9 @@ def test_edit_notebook_replace_preserves_id_and_is_canonical() -> None:
     assert first["data"].endswith(b"\n")
     notebook = json.loads(first["data"])
     assert notebook["cells"][1]["id"] == "calc"
-    assert notebook["cells"][1]["source"] == ["print(2)"]
+    assert notebook["cells"][1]["source"] == "print(2)"
+    assert notebook["cells"][1]["execution_count"] is None
+    assert notebook["cells"][1]["outputs"] == []
     assert [cell["id"] for cell in first["cells"]] == ["intro", "calc", "cell-2"]
 
 

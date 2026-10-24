@@ -160,7 +160,10 @@ def remote_read(
         warnings=warnings,
         extra={"file": {k: v for k, v in file_info.items() if k != "content"}, "error": data.get("error"), "error_details": data.get("error_details"), "ledger_scope": ledger_scope},
     )
-    text = _format_read_text(endpoint, result, file_info, max_chars=max_chars)
+    if status in {"ok", "partial"}:
+        text = _format_read_text(endpoint, result, file_info, max_chars=max_chars)
+    else:
+        text = result["summary"] + "\n" + str(data.get("error") or data.get("status") or "read failed") + "\n"
     payload = {"text": text, "result": result}
     if recording_error:
         from remote_dev.result import recording_failure
@@ -505,12 +508,32 @@ def _format_read_text(
     ]
     if result.get("error"):
         lines.append(f"error: {result['error']}")
-    rendered = "\n".join(lines).rstrip() + "\n"
+    footer = None
+    if max_chars is not None and file_info.get("next_offset") is not None:
+        import json
+
+        footer = "Next Read: " + json.dumps({
+            "path": file_info.get("path"),
+            "line_offset": file_info.get("next_offset"),
+            "column_offset": file_info.get("next_column_offset"),
+            "max_chars": max_chars,
+        }, separators=(",", ":"))
     if max_chars is None:
-        return compact_text(rendered)
-    # Native Read budgets characters across content plus status. Keep the
-    # canonical header but never fold or clip below the requested budget.
-    return rendered if len(rendered) <= int(max_chars) else rendered[: int(max_chars)].rstrip() + "\n"
+        if footer:
+            lines.append(footer)
+        return compact_text("\n".join(lines).rstrip() + "\n")
+    # Native Read keeps status/Next Read visible by dropping content, not by
+    # cutting the status text. Trim the body to the remaining character budget.
+    prefix = "\n".join(lines[:-1])
+    suffix = ("\n" + footer) if footer else ""
+    room = int(max_chars) - len(prefix) - len(suffix) - 1
+    if room > 0:
+        body = body[:room]
+    elif not footer:
+        body = ""
+    lines[-1] = body
+    rendered = "\n".join(lines) + suffix + "\n"
+    return rendered
 
 
 def _format_ls_text(endpoint: Endpoint, result: dict[str, Any]) -> str:

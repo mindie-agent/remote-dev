@@ -492,7 +492,7 @@ def call_tool(
 
             return dispatch_native(resolved, spec, args, _call_canonical)
         other = spec_by_wire_any_profile(name)
-        if other is not None and other[0] != resolved:
+        if other is not None and other[0] != resolved and name not in ALIASES:
             raise caller_error(
                 f"{name} is a {other[0]} native tool; current harness profile is {resolved}"
             )

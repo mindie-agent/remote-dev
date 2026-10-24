@@ -10,9 +10,10 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from remote_dev.mcp.harness_profiles import NativeToolSpec
+from remote_dev.core.errors import caller_error
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
 from remote_dev.mcp.native_common import (
-    _IMAGE_EXTENSIONS, _assert_visible, _job_record, _media_failure, _native_job_status,
+    _IMAGE_EXTENSIONS, _TERMINAL, _assert_visible, _job_record, _media_failure, _native_job_status,
     _job_file, _live_job, _read_media_payload, _record_output_path,
     _refresh_job_output, _tail_text,
 )
@@ -129,8 +130,10 @@ def kimi_task_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
                 continue
             try:
                 state, _job = _live_job(str(record.get("job_id")))
-            except (ValueError, TimeoutError, OSError):
-                state = str(record.get("state") or "unknown")
+            except (ValueError, TimeoutError, OSError) as exc:
+                raise caller_error(
+                    f"TaskList could not query task {record.get('job_id')}: {type(exc).__name__}: {exc}"
+                ) from exc
             record = {**record, "state": state}
             if active_only and state in _TERMINAL:
                 continue
@@ -163,6 +166,44 @@ def kimi_task_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
 
 @handler("kimi_read_media")
 def kimi_read_media(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
+    import base64
+    from pathlib import Path
+    from remote_dev.core.bytes_ops import remote_read_bytes
+    from remote_dev.core.endpoint import resolve_endpoint
+    from remote_dev.result import make_result
+
+    suffix = Path(str(normalized["file_path"])).suffix.lower()
+    if suffix in {".mp4", ".webm", ".mov", ".m4v"}:
+        endpoint = resolve_endpoint(dict(normalized))
+        # The native Kimi host caps an inline video part at 10 MiB of base64,
+        # so keep the raw pull below ~7.5 MiB and fail explicitly above it.
+        fetched = remote_read_bytes(endpoint, file_path=str(normalized["file_path"]), max_bytes=7_500_000)
+        if fetched.get("status") != "ok":
+            return _media_failure(spec.wire, fetched)
+        mime = str(fetched.get("mime_type") or "video/mp4")
+        if not mime.startswith("video/"):
+            return _media_failure(spec.wire, {"status": "not_video", "error": f"unsupported media type {mime}"})
+        uri = str(Path(str(fetched.get("path") or normalized["file_path"])).resolve().as_uri())
+        text = f"Kimi ReadMediaFile {normalized['file_path']} ({mime}, {fetched['size']} bytes, full video resource).\n"
+        result = make_result(
+            tool=spec.wire,
+            target=endpoint.to_result_target(),
+            outcome="success",
+            status="ok",
+            summary=text.strip(),
+            preview={"content": text.strip()},
+            extra={"path": str(fetched.get("path") or normalized["file_path"]), "mime_type": mime,
+                   "size": fetched["size"], "video": True, "full_video": True},
+        )
+        resource = {
+            "type": "resource",
+            "resource": {
+                "uri": uri,
+                "mimeType": mime,
+                "blob": base64.b64encode(fetched["data"]).decode("ascii"),
+            },
+        }
+        return {"text": text, "result": result, "content": [resource]}
     payload = _read_media_payload(
         normalized,
         spec_wire=spec.wire,

@@ -150,7 +150,7 @@ CLAUDE_BASH = NativeToolSpec(
     description="Run a shell command (Claude Code Bash; timeout in milliseconds, 120000 default, 600000 max).",
     properties={
         "command": {"type": "string", "minLength": 1, "description": "The command to execute."},
-        "timeout": {"type": "number", "description": "Optional timeout in milliseconds (max 600000; default 120000)."},
+        "timeout": {"type": "integer", "description": "Optional timeout in milliseconds (max 600000; default 120000)."},
         "description": {"type": "string", "description": "Clear, concise description of what this command does in active voice."},
         "run_in_background": {"type": "boolean", "description": "Set to true to run this command in the background."},
         "dangerouslyDisableSandbox": {"type": "boolean", "description": "Local host sandbox override; rejected for remote calls."},

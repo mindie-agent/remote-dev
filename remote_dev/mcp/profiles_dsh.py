@@ -98,7 +98,7 @@ DSH_READ = NativeToolSpec(
     properties={
         "file_path": {"type": "string", "minLength": 1},
         "offset": {"type": "number", "minimum": 1, "default": 1},
-        "limit": {"type": "number", "minimum": 1, "default": 2000},
+        "limit": {"type": "number", "minimum": 1, "maximum": 2000, "default": 2000},
     },
     required=("file_path",),
     defaults={"offset": 1, "limit": 2000},
