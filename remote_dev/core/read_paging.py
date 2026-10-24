@@ -65,13 +65,17 @@ def _next_read_arguments(
     line_offset: int,
     column_offset: int,
     max_chars: int,
+    n_lines: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    arguments: dict[str, Any] = {
         "path": path,
         "line_offset": int(line_offset),
         "column_offset": int(column_offset),
         "max_chars": int(max_chars),
     }
+    if n_lines is not None:
+        arguments["n_lines"] = int(n_lines)
+    return arguments
 
 
 def _next_read_footer(arguments: dict[str, Any]) -> str:
@@ -155,22 +159,35 @@ def _read_next_cursor(
     all_entries: list[dict[str, Any]],
     file_info: dict[str, Any],
     range_end: int,
-) -> tuple[int, int] | None:
+) -> tuple[int, int, int | None] | None:
     if not delivered:
+        return None
+    if file_info.get("from_tail"):
+        first = delivered[0]
+        offset = int(file_info.get("offset") or 1)
+        if first["line"] > offset:
+            # Native tail pagination asks for the earlier lines that were
+            # dropped from the front of the window.
+            return (offset, 0, first["line"] - offset)
+        last = delivered[-1]
+        if last["units"] < last["full_units"]:
+            return (last["line"], last["column_start"] + last["units"], None)
+        if last["clipped"]:
+            return (last["line"], last["column_start"] + last["full_units"], None)
         return None
     last = delivered[-1]
     if last["units"] < last["full_units"]:
-        return (last["line"], last["column_start"] + last["units"])
+        return (last["line"], last["column_start"] + last["units"], None)
     if last["clipped"]:
-        return (last["line"], last["column_start"] + last["full_units"])
+        return (last["line"], last["column_start"] + last["full_units"], None)
     index = int(last["index"])
     if index + 1 < len(all_entries):
-        return (int(all_entries[index + 1]["line"]), 0)
+        return (int(all_entries[index + 1]["line"]), 0, None)
     if last["line"] < range_end:
-        return (int(last["line"]) + 1, 0)
+        return (int(last["line"]) + 1, 0, None)
     next_offset = file_info.get("next_offset")
     if isinstance(next_offset, int) and next_offset > last["line"]:
-        return (next_offset, int(file_info.get("next_column_offset") or 0))
+        return (next_offset, int(file_info.get("next_column_offset") or 0), None)
     return None
 
 
@@ -179,7 +196,7 @@ def _render_read_page(
     path: str,
     total_lines: object,
     delivered: list[dict[str, Any]],
-    next_cursor: tuple[int, int] | None,
+    next_cursor: tuple[int, int, int | None] | None,
     content_offset: int,
     max_chars: int,
 ) -> tuple[str, dict[str, Any]]:
@@ -191,7 +208,9 @@ def _render_read_page(
     text = header + "\n" + content
     arguments = None
     if next_cursor is not None:
-        arguments = _next_read_arguments(path, next_cursor[0], next_cursor[1], max_chars)
+        arguments = _next_read_arguments(
+            path, next_cursor[0], next_cursor[1], max_chars, next_cursor[2],
+        )
         text += "\n" + _next_read_footer(arguments)
     text += "\n"
     return text, {
@@ -220,6 +239,66 @@ def _read_too_small(
     return result["summary"] + "\n" + message + "\n"
 
 
+def _format_tail_read(
+    endpoint_label: str,
+    result: dict[str, Any],
+    file_info: dict[str, Any],
+    body: str,
+    *,
+    max_chars: int,
+    utf16_units: bool,
+) -> str:
+    """Tail reads keep trailing whole lines; drop front lines when over budget."""
+    path = str(file_info.get("path", ""))
+    entries = _read_page_entries(body, file_info, utf16_units)
+    if entries is None:
+        return _format_legacy_read(
+            endpoint_label, result, file_info, body,
+            max_chars=max_chars, utf16_units=utf16_units,
+        )
+    if not entries:
+        return _read_too_small(result, file_info, max_chars)
+    if entries[-1]["clipped"]:
+        return _read_too_small(result, file_info, max_chars)
+    total = file_info.get("total_lines")
+    range_end = _read_range_end(file_info)
+    content_offset = int(file_info.get("content_offset") or 0)
+    header_probe = _read_header(
+        endpoint_label, path, int(entries[-1]["line"]), int(entries[-1]["line"]), total, True,
+    )
+    footer_probe = _next_read_footer(_next_read_arguments(path, 10**9, 10**9, max_chars))
+    body_budget = int(max_chars) - _read_text_units(header_probe, utf16_units) - 3 - _read_text_units(footer_probe, utf16_units)
+    if body_budget <= 0:
+        return _read_too_small(result, file_info, max_chars)
+    delivered: list[dict[str, Any]] = []
+    remaining = body_budget
+    for entry in reversed(entries):
+        prefix_width = len(str(entry["line"])) + 3
+        separator = 1 if delivered else 0
+        if separator + prefix_width + entry["full_units"] > remaining:
+            break
+        delivered.append({**entry, "text": entry["full_text"], "units": entry["full_units"]})
+        remaining -= separator + prefix_width + entry["full_units"]
+    delivered.reverse()
+    if not delivered:
+        return _read_too_small(result, file_info, max_chars)
+    next_cursor = _read_next_cursor(delivered, entries, file_info, range_end)
+    text, page = _render_read_page(
+        endpoint_label, path, total, delivered, next_cursor, content_offset, max_chars,
+    )
+    for _ in range(16):
+        if _read_text_units(text, utf16_units) <= max_chars:
+            return _finalize_read_page(result, file_info, text, page, utf16_units)
+        if len(delivered) <= 1:
+            return _read_too_small(result, file_info, max_chars)
+        delivered.pop(0)
+        next_cursor = _read_next_cursor(delivered, entries, file_info, range_end)
+        text, page = _render_read_page(
+            endpoint_label, path, total, delivered, next_cursor, content_offset, max_chars,
+        )
+    return _read_too_small(result, file_info, max_chars)
+
+
 def _format_paged_read(
     endpoint_label: str,
     result: dict[str, Any],
@@ -236,6 +315,11 @@ def _format_paged_read(
     if not entries and file_info.get("next_offset") is not None:
         return _read_too_small(result, file_info, max_chars)
     total = file_info.get("total_lines")
+    if file_info.get("from_tail"):
+        return _format_tail_read(
+            endpoint_label, result, file_info, body,
+            max_chars=max_chars, utf16_units=utf16_units,
+        )
     if not entries:
         line_start = int(file_info.get("line_start", 0))
         line_end = int(file_info.get("line_end", 0))

@@ -151,6 +151,7 @@ class KimiReadPaginationTests(unittest.TestCase):
             payload = self._read(file_path, **kwargs)
             self.assertNotEqual(payload["result"].get("status"), "max_chars_too_small", payload.get("text"))
             self.assertLessEqual(self._js_units(payload["text"]), max_chars, payload["text"])
+            self.assertFalse(any(0xD800 <= ord(ch) <= 0xDFFF for ch in payload["text"]))
             body = self._page_body(payload["text"])
             for raw in body.split("\n") if body else []:
                 match = re.match(r"^(\d+) \| (.*)$", raw)
@@ -192,7 +193,7 @@ class KimiReadPaginationTests(unittest.TestCase):
 
     def test_multiline_emoji_boundary_reconstructs_exactly(self) -> None:
         lines = [
-            "A" + "😀" * 40 + "B",
+            "A" + "😀" * 160 + "B",
             "second 😀😀 line",
             "third line",
             "fourth " + "y" * 60,
@@ -218,6 +219,27 @@ class KimiReadPaginationTests(unittest.TestCase):
         self.assertEqual(payload["result"]["file"]["line_end"], 10)
         body = self._page_body(payload["text"])
         self.assertEqual(body, "8 | line-8\n9 | line-9\n10 | line-10")
+
+    def test_negative_tail_budget_keeps_trailing_whole_lines(self) -> None:
+        lines = [f"{index}-" + "a" * 295 for index in range(1, 6)]
+        (self.root / "tailbudget.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        payload = self._read("tailbudget.txt", offset=-3, limit=1_000_000, max_chars=800, utf16_units=True)
+        self.assertEqual(payload["result"]["file"]["line_start"], 5)
+        self.assertEqual(payload["result"]["file"]["line_end"], 5)
+        body = self._page_body(payload["text"])
+        self.assertTrue(body.startswith("5 | 5-"))
+        self.assertNotIn("4 | 4-", body)
+        next_args = payload["result"]["next"]
+        self.assertEqual(next_args["line_offset"], 3)
+        self.assertEqual(next_args["column_offset"], 0)
+        self.assertEqual(next_args["n_lines"], 2)
+        earlier = self._read(
+            "tailbudget.txt", offset=3, limit=next_args["n_lines"],
+            column_offset=0, max_chars=800, utf16_units=True,
+        )
+        self.assertEqual(earlier["result"]["file"]["line_start"], 3)
+        self.assertEqual(earlier["result"]["file"]["line_end"], 4)
+        self.assertIn("4 | 4-", earlier["text"])
 
     def test_small_max_chars_is_an_explicit_error(self) -> None:
         (self.root / "small.txt").write_text("hello\n", encoding="utf-8")

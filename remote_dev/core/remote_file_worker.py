@@ -236,6 +236,21 @@ def _page_metadata(budgeted, utf16_units, column_offset):
     ]
 
 
+def _tail_budget(selected, max_chars, utf16_units):
+    """Keep the trailing whole lines that fit; never cut the end of a tail read."""
+    kept = []
+    used = 0
+    for entry in reversed(selected):
+        index, body, more_text = entry
+        width = len(str(index)) + 3 + _text_width(body, utf16_units) + 1
+        if kept and used + width > max_chars:
+            break
+        kept.append(entry)
+        used += width
+    kept.reverse()
+    return kept
+
+
 def resolve_path(
     raw: str,
     root: pathlib.Path,
@@ -604,9 +619,14 @@ def main() -> None:
                         body_text = body_text[:max_line_chars]
                 prepared.append((line_no, body_text, more_text))
             if max_chars is not None:
-                budgeted, next_offset, next_column = _page_budget(
-                    prepared, max_chars, utf16_units, column_offset
-                )
+                if forward:
+                    budgeted, next_offset, next_column = _page_budget(
+                        prepared, max_chars, utf16_units, column_offset
+                    )
+                else:
+                    budgeted, next_offset, next_column = _tail_budget(
+                        prepared, max_chars, utf16_units
+                    ), None, None
             else:
                 budgeted, next_offset, next_column = prepared, None, None
             line_start = budgeted[0][0] if budgeted else 0
@@ -634,6 +654,8 @@ def main() -> None:
             }
             if max_chars is not None:
                 info["page_lines"] = _page_metadata(budgeted, utf16_units, column_offset)
+            if not forward:
+                info["from_tail"] = True
             if next_offset is not None:
                 info["next_offset"] = next_offset
                 info["next_column_offset"] = next_column or 0
@@ -789,7 +811,8 @@ def main() -> None:
                 more = True
                 break
         total_lines = None if more else total
-        if offset < 0:
+        tail_read = offset < 0
+        if tail_read:
             offset = max(1, total + offset + 1)
             for index, line in enumerate(scan_text_lines(path, scan_limit), 1):
                 if offset <= index < offset + limit:
@@ -813,9 +836,12 @@ def main() -> None:
                     body, _consumed = _take_text_units(body, max_line_chars, True)
                     clipped = True
                 prepared.append((index, body, clipped))
-            selected, next_offset, next_column_offset = _page_budget(
-                prepared, max_chars, utf16_units, column_offset
-            )
+            if tail_read:
+                selected = _tail_budget(prepared, max_chars, utf16_units)
+            else:
+                selected, next_offset, next_column_offset = _page_budget(
+                    prepared, max_chars, utf16_units, column_offset
+                )
         truncated_lines = sum(clipped for _, _, clipped in selected)
         if truncated_lines and next_offset is None and selected:
             last_index, last_body, _last_clipped = selected[-1]
@@ -840,6 +866,8 @@ def main() -> None:
                 "content_verified": verify}
         if column_offset:
             info["column_offset"] = column_offset
+        if tail_read:
+            info["from_tail"] = True
         if max_chars is not None:
             info["page_lines"] = _page_metadata(selected, utf16_units, column_offset)
         if next_offset is not None:
