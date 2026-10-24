@@ -144,8 +144,9 @@ def format_failure_text(payload: dict[str, Any]) -> str:
     """Actionable failure text from explicit public result fields only."""
     details = payload.get("result") if isinstance(payload.get("result"), dict) else {}
     text = str(payload.get("text") or "")
+    tool_name = str(details.get("tool") or "")
     completed_command = (
-        details.get("tool") in {"remote.bash", "remote.job_stdin"}
+        tool_name.endswith(("bash", "job_stdin", "exec_command", "write_stdin", "shell"))
         and details.get("state") in {"succeeded", "failed", "timeout", "cancelled"}
         and type(details.get("exit_code")) is int
     )

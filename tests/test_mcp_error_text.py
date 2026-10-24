@@ -6,6 +6,7 @@ from unittest.mock import patch
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core.search_ops import remote_grep
 from remote_dev.mcp import server
+from remote_dev.result import format_failure_text
 
 
 class McpErrorTextTests(unittest.TestCase):
@@ -34,6 +35,22 @@ class McpErrorTextTests(unittest.TestCase):
         self.assertEqual(result["content"][0]["text"], "background job job-final\n")
         self.assertEqual(result["structuredContent"]["kind"], "background")
         self.assertEqual(result["structuredContent"]["jobId"], "job-final")
+
+    def test_completed_native_nonzero_command_keeps_its_text(self) -> None:
+        payload = {
+            "text": "Remote command failed. Exit code: 3.\ncodex-final-ok\n",
+            "result": {
+                "tool": "remote_exec_command",
+                "outcome": "failed",
+                "status": "failed",
+                "state": "failed",
+                "exit_code": 3,
+            },
+        }
+        self.assertEqual(
+            format_failure_text(payload),
+            "Remote command failed. Exit code: 3.\ncodex-final-ok\n",
+        )
 
     def test_cancellation_requested_is_not_an_mcp_error(self) -> None:
         payload = {
