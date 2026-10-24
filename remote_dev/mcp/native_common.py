@@ -11,8 +11,6 @@ import base64
 from typing import Any, Mapping
 
 from remote_dev.core.errors import caller_error
-from remote_dev.mcp.native_runtime import CanonicalCall
-from remote_dev.mcp.harness_profiles import NativeToolSpec
 _TERMINAL = {"cancelled", "succeeded", "failed", "timeout", "absent"}
 
 def _native_job_status(state: str) -> str:
@@ -60,13 +58,22 @@ def _record_output_path(record: dict[str, Any], stream: str = "stdout") -> str |
     return f"{remote_dir}/{stream}.log"
 
 def _status_query_failed(result: Mapping[str, Any]) -> bool:
-    """True only when status control failed and no job state was observed.
+    """True when the status *query* failed, not when the job itself failed.
 
-    A normal ``absent``/``lost_outcome`` projection still carries a job state
-    and is reported as that honest state; a transport/control failure leaves
-    ``job.state`` unset and must not be mistaken for a terminal result.
+    ``remote.job_status`` keeps the last-known ``job.state`` even when its
+    control connection fails (and adds ``job.error``/``error_details``).  A
+    normal failed/absent job has a failed/absent state but no query error.
+    Never treat the query status ``failed`` as the process state.
     """
-    return result.get("outcome") == "failed" and not (result.get("job") or {}).get("state")
+    if result.get("outcome") != "failed":
+        return False
+    job = result.get("job") or {}
+    return (
+        job.get("error") is not None
+        or result.get("error_details") is not None
+        or not job.get("state")
+    )
+
 
 def _live_job(job_id: str, *, strict: bool = False) -> tuple[str, dict[str, Any]]:
     from remote_dev.mcp.tools import _call_canonical
@@ -74,11 +81,12 @@ def _live_job(job_id: str, *, strict: bool = False) -> tuple[str, dict[str, Any]
     payload = _call_canonical("remote.job_status", {"job_id": job_id})
     result = payload.get("result") or {}
     job = result.get("job") or {}
-    state = str(result.get("status") or job.get("state") or "unknown")
-    if strict and _status_query_failed(result):
-        detail = result.get("error") or result.get("summary") or state
+    if _status_query_failed(result):
+        detail = job.get("error") or result.get("error") or result.get("summary") or result.get("status")
         raise caller_error(f"remote job {job_id} status query failed: {detail}")
+    state = str(job.get("state") or result.get("status") or "unknown")
     return state, job
+
 
 def _job_result(job_id: str) -> dict[str, Any]:
     from remote_dev.mcp.tools import _call_canonical

@@ -858,6 +858,63 @@ class BackgroundHonestyTests(unittest.TestCase):
         self.assertNotIn("connection", job)
         self.assertNotIn("local_record", job)
 
+    def test_dsh_status_query_failure_does_not_become_completed(self) -> None:
+        from remote_dev.mcp import native_handlers_dsh as dsh_handlers
+
+        record = {
+            "job_id": "j", "session_scope": "scope", "state": "running",
+            "description": "demo", "started_at": "2026-10-24T00:00:00Z",
+        }
+        status_failure = {
+            "text": "Remote job j status failed.\n",
+            "result": {
+                "outcome": "failed",
+                "status": "failed",
+                "summary": "Remote job j status failed.",
+                "job": {
+                    "job_id": "j", "state": "running",
+                    "error": "Connection refused",
+                },
+                "error_details": {"category": "transport", "submission_state": "uncertain"},
+            },
+        }
+        with (
+            mock.patch.object(dsh_handlers, "_job_record", return_value=record),
+            mock.patch.object(dsh_handlers, "_assert_visible", return_value=None),
+            mock.patch("remote_dev.mcp.tools._call_canonical", return_value=status_failure),
+        ):
+            with self.assertRaises(ValueError) as raised:
+                tools.call_tool("remote_job_kill", {"job_id": "j"}, profile="dsh")
+        self.assertIn("status query failed", str(raised.exception))
+        self.assertNotIn("cancellation-requested", str(raised.exception))
+
+    def test_dsh_canonical_stop_failure_is_preserved(self) -> None:
+        from remote_dev.mcp import native_handlers_dsh as dsh_handlers
+
+        record = {
+            "job_id": "j", "session_scope": "scope", "state": "running",
+            "description": "demo", "started_at": "2026-10-24T00:00:00Z",
+        }
+        stop_failure = {
+            "text": "Remote job j stop failed.\nConnection refused\n",
+            "result": {
+                "outcome": "failed", "status": "failed",
+                "summary": "Remote job j stop failed.",
+                "error": "Connection refused",
+                "error_details": {"category": "transport", "submission_state": "not_sent"},
+            },
+        }
+        with (
+            mock.patch.object(dsh_handlers, "_job_record", return_value=record),
+            mock.patch.object(dsh_handlers, "_assert_visible", return_value=None),
+            mock.patch.object(dsh_handlers, "_live_job", return_value=("running", {})),
+            mock.patch("remote_dev.mcp.tools._call_canonical", return_value=stop_failure),
+        ):
+            payload = tools.call_tool("remote_job_kill", {"job_id": "j"}, profile="dsh")
+        self.assertEqual(payload["result"]["outcome"], "failed")
+        self.assertEqual(payload["result"]["status"], "failed")
+        self.assertIn("Connection refused", payload["result"]["error"])
+
     def test_dsh_background_nonzero_is_completed_with_exit_detail(self) -> None:
         from remote_dev.mcp import native_handlers_dsh as dsh_handlers
 

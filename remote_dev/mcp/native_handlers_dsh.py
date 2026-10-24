@@ -13,7 +13,7 @@ from remote_dev.core.errors import caller_error
 from remote_dev.mcp.harness_profiles import NativeToolSpec
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
 from remote_dev.mcp.native_common import (
-    _TERMINAL, _assert_visible, _job_record, _live_job, _media_failure, _read_media_payload,
+    _TERMINAL, _assert_visible, _job_record, _live_job, _read_media_payload,
     _status_query_failed,
 )
 
@@ -155,25 +155,26 @@ def dsh_job_kill(profile: str, spec: NativeToolSpec, native: dict[str, Any], nor
     reason = str(native.get("reason") or "")
     record = _job_record(job_id)
     _assert_visible(record)
-    try:
-        state, live_job = _live_job(job_id)
-        live = live_job.get("remote_status") or {}
-    except (ValueError, TimeoutError, OSError):
-        state = str(record.get("state") or "unknown")
-        live = {}
+    state, live_job = _live_job(job_id)
+    live = live_job.get("remote_status") or {}
     if state in _TERMINAL:
         outcome = "already-finished"
         payload = _call_canonical("remote.job_status", {"job_id": job_id})
         status_result = payload["result"]
         if _status_query_failed(status_result):
-            detail = status_result.get("error") or status_result.get("summary") or status_result.get("status")
+            detail = status_result.get("job", {}).get("error") or status_result.get("error") or status_result.get("summary")
             raise caller_error(f"could not confirm job {job_id} is finished: {detail}")
         live = (status_result.get("job") or {}).get("remote_status") or live
     else:
-        outcome = "cancellation-requested"
         payload = _call_canonical("remote.job_stop", {"job_id": job_id})
-        state = str(payload["result"].get("status") or state)
-        live = payload["result"].get("remote_status") or live
+        stop_result = payload["result"]
+        if _status_query_failed(stop_result) or stop_result.get("outcome") == "failed":
+            # Preserve the canonical stop failure/unknown.  Do not rewrite a
+            # rejected or uncertain stop into an accepted cancellation.
+            return payload
+        outcome = "cancellation-requested"
+        state = str(stop_result.get("status") or state)
+        live = stop_result.get("remote_status") or live
     job = _dsh_job(
         record,
         state=state,
