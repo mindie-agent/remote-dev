@@ -154,6 +154,22 @@ def _read_range_end(file_info: dict[str, Any]) -> int:
     return end
 
 
+def _bounded_n_lines(file_info: dict[str, Any], range_end: int, next_line: int) -> int | None:
+    """Preserve an explicit requested line range across a forward continuation.
+
+    Native ``finishPage`` carries ``n_lines = nextEnd - nextStart + 1`` whenever
+    the caller supplied ``n_lines``.  The Kimi profile uses 1_000_000 as its
+    "no explicit n_lines" sentinel; that value is omitted so a continuation
+    still reads toward EOF.
+    """
+    limit = int(file_info.get("limit") or 0)
+    if not (0 < limit < 1_000_000):
+        return None
+    if next_line > range_end:
+        return None
+    return range_end - next_line + 1
+
+
 def _read_next_cursor(
     delivered: list[dict[str, Any]],
     all_entries: list[dict[str, Any]],
@@ -177,17 +193,24 @@ def _read_next_cursor(
         return None
     last = delivered[-1]
     if last["units"] < last["full_units"]:
-        return (last["line"], last["column_start"] + last["units"], None)
+        next_line = int(last["line"])
+        return (next_line, last["column_start"] + last["units"],
+                _bounded_n_lines(file_info, range_end, next_line))
     if last["clipped"]:
-        return (last["line"], last["column_start"] + last["full_units"], None)
+        next_line = int(last["line"])
+        return (next_line, last["column_start"] + last["full_units"],
+                _bounded_n_lines(file_info, range_end, next_line))
     index = int(last["index"])
     if index + 1 < len(all_entries):
-        return (int(all_entries[index + 1]["line"]), 0, None)
+        next_line = int(all_entries[index + 1]["line"])
+        return (next_line, 0, _bounded_n_lines(file_info, range_end, next_line))
     if last["line"] < range_end:
-        return (int(last["line"]) + 1, 0, None)
+        next_line = int(last["line"]) + 1
+        return (next_line, 0, _bounded_n_lines(file_info, range_end, next_line))
     next_offset = file_info.get("next_offset")
     if isinstance(next_offset, int) and next_offset > last["line"]:
-        return (next_offset, int(file_info.get("next_column_offset") or 0), None)
+        return (next_offset, int(file_info.get("next_column_offset") or 0),
+                _bounded_n_lines(file_info, range_end, next_offset))
     return None
 
 

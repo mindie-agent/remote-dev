@@ -211,6 +211,54 @@ class KimiReadPaginationTests(unittest.TestCase):
         (self.root / "u.txt").write_text("\n".join(lines) + "\n", encoding="utf-16")
         self._follow("u.txt", lines, 420, utf16_units=True)
 
+    def test_forward_explicit_n_lines_continuation_keeps_the_range(self) -> None:
+        source = "x" * 1000
+        (self.root / "bounded.txt").write_text(source + "\nOUTSIDE_REQUEST\n", encoding="utf-8")
+        endpoint_args = {
+            "host": "local", "port": 22, "root": str(self.root), "cwd": str(self.root),
+        }
+        args = {
+            **endpoint_args, "path": "bounded.txt", "n_lines": 1, "max_chars": 500,
+        }
+        seen_lines: set[int] = set()
+        first_chars = ""
+        pages = 0
+        while True:
+            payload = mcp_tools.call_tool("remote_Read", args, profile="kimi")
+            body = self._page_body(payload["text"])
+            for raw in body.split("\n") if body else []:
+                match = re.match(r"^(\d+) \| (.*)$", raw)
+                self.assertIsNotNone(match, raw)
+                line_no = int(match.group(1))
+                seen_lines.add(line_no)
+                if line_no == 1:
+                    first_chars += match.group(2)
+                else:
+                    self.fail(f"continuation escaped the requested n_lines=1 range: {raw}")
+            next_args = payload["result"].get("next")
+            footer = re.search(r"Next Read: (\{.*\})", payload["text"])
+            if next_args is None:
+                self.assertIsNone(footer)
+                break
+            self.assertIsNotNone(footer)
+            self.assertEqual(json.loads(footer.group(1)), next_args)
+            self.assertEqual(next_args.get("n_lines"), 1)
+            self.assertEqual(payload["result"]["file"].get("next_offset"), next_args["line_offset"])
+            self.assertEqual(payload["result"]["file"].get("next_column_offset"), next_args["column_offset"])
+            args = {
+                **endpoint_args,
+                "path": "bounded.txt",
+                "n_lines": next_args["n_lines"],
+                "line_offset": next_args["line_offset"],
+                "column_offset": next_args["column_offset"],
+                "max_chars": 500,
+            }
+            pages += 1
+            self.assertLess(pages, 20)
+        self.assertEqual(seen_lines, {1})
+        self.assertEqual(first_chars, source)
+        self.assertNotIn("OUTSIDE_REQUEST", payload["text"])
+
     def test_negative_offset_reads_the_tail(self) -> None:
         lines = [f"line-{index}" for index in range(1, 11)]
         (self.root / "tail.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
