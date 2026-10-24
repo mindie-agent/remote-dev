@@ -28,6 +28,7 @@ def _dsh_read(args: dict[str, Any]) -> dict[str, Any]:
     out["limit"] = limit
     out["strict_offset"] = True
     out["max_chars"] = 51200
+    out["utf8_only"] = True
     return out
 
 def _dsh_write(args: dict[str, Any]) -> dict[str, Any]:

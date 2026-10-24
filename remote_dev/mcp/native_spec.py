@@ -95,7 +95,7 @@ def native_input_schema(spec: NativeToolSpec, endpoint_props: Mapping[str, Any])
         "type": "object",
         "properties": {**endpoint_props, **spec.properties},
         "required": list(spec.required),
-        "additionalProperties": (None if spec.additional_properties is None else bool(spec.additional_properties)),
+        **({"additionalProperties": bool(spec.additional_properties)} if spec.additional_properties is not None else {}),
     }
 
 _TYPE_NAMES = {

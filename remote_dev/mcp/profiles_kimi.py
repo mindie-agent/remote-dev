@@ -23,7 +23,7 @@ def _kimi_read(args: dict[str, Any]) -> dict[str, Any]:
         # for realistic line lengths.
         out["limit"] = 1000000
     if args.get("max_chars") is not None:
-        out["max_chars"] = int(args["max_chars"])
+        out["max_chars"] = min(int(args["max_chars"]), 500000)
     if args.get("column_offset") is not None:
         out["column_offset"] = int(args["column_offset"])
     out["utf16_units"] = True
@@ -140,7 +140,6 @@ KIMI_WRITE = NativeToolSpec(
     },
     required=("path", "content"),
     defaults={"mode": "overwrite"},
-    require_prior_read=True,
     normalize=_kimi_write,
 )
 
@@ -156,7 +155,6 @@ KIMI_EDIT = NativeToolSpec(
     },
     required=("path", "old_string", "new_string"),
     defaults={"replace_all": False},
-    require_prior_read=True,
     normalize=_kimi_edit,
 )
 

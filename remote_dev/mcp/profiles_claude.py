@@ -16,6 +16,7 @@ def _claude_read(args: dict[str, Any]) -> dict[str, Any]:
     out["offset"] = int(args.get("offset") or 1)
     out["limit"] = min(int(args.get("limit") or 2000), 2000)
     out["max_chars"] = 262144
+    out["utf8_only"] = True
     if args.get("pages") is not None:
         out["pages"] = str(args["pages"])
     return out
@@ -150,7 +151,7 @@ CLAUDE_BASH = NativeToolSpec(
     description="Run a shell command (Claude Code Bash; timeout in milliseconds, 120000 default, 600000 max).",
     properties={
         "command": {"type": "string", "description": "The command to execute."},
-        "timeout": {"type": "integer", "default": 120000, "description": "Optional timeout in milliseconds (max 600000; default 120000)."},
+        "timeout": {"type": "number", "description": "Optional timeout in milliseconds (max 600000; default 120000)."},
         "description": {"type": "string", "description": "Clear, concise description of what this command does in active voice."},
         "run_in_background": {"type": "boolean", "description": "Set to true to run this command in the background."},
         "dangerouslyDisableSandbox": {"type": "boolean", "description": "Local host sandbox override; rejected for remote calls."},

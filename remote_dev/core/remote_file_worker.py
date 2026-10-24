@@ -413,7 +413,7 @@ def main() -> None:
         node_paths = payload.get("node_paths")
         before = path.stat()
 
-        encoding = _detect_utf16(path)
+        encoding = None if payload.get("utf8_only") else _detect_utf16(path)
         kimi_encoding = bool(payload.get("utf16_units"))
         if kimi_encoding and encoding in {"utf-16-le", "utf-16-be"} and path.stat().st_size > 10485760:
             fail("file_too_large", "Kimi Read rejects UTF-16 files larger than 10485760 bytes")
@@ -431,6 +431,8 @@ def main() -> None:
             selected_units = 0
             collecting = True
             for line_no, (line_text, lossy) in enumerate(_utf16_lines(path, encoding), 1):
+                if line_no == 1 and line_text.startswith("\ufeff"):
+                    line_text = line_text[1:]
                 total = line_no
                 lossy_total += lossy
                 if forward:
@@ -682,6 +684,10 @@ def main() -> None:
             if truncated_by_chars:
                 end = selected[-1][0] if selected else start
         truncated_lines = sum(clipped for _, _, clipped in selected)
+        if truncated_lines and next_offset is None and selected:
+            last_index, last_body, _last_clipped = selected[-1]
+            next_offset = last_index
+            next_column_offset = _utf16_width(last_body) if utf16_units else len(last_body)
         numbered = "\n".join(f"{index} | {body}" + ("<remote-dev line truncated>" if clipped else "")
                              for index, body, clipped in selected)
         info = {"path": str(path), "resolved_path": str(resolved), "size": after.st_size,
