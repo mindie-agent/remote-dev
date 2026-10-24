@@ -1228,7 +1228,6 @@ CODEX_VIEW_IMAGE = NativeToolSpec(
     description="View a local image file from the filesystem when visual inspection is needed (Codex view_image).",
     properties={
         "path": {"type": "string", "minLength": 1, "description": "Local filesystem path to an image file."},
-        "detail": {"type": "string", "enum": ["high", "original"], "description": "Image detail level. Defaults to high."},
     },
     required=("path",),
     handler="codex_view_image",

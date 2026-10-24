@@ -822,6 +822,7 @@ def kimi_read_media(profile: str, spec: NativeToolSpec, native: dict[str, Any], 
 @handler("claude_notebook_edit")
 def claude_notebook_edit(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
     import json
+    import uuid
     from remote_dev.core.endpoint import resolve_endpoint
     from remote_dev.core.text_ops import remote_read_utf8_text
     from remote_dev.mcp.tools import _call_canonical
