@@ -75,6 +75,10 @@ def exists_in_virtual(path):
 created_dirs = []
 
 def atomic_write(path, data, mode=None):
+    if mode is None:
+        mask = os.umask(0)
+        os.umask(mask)
+        mode = 0o666 & ~mask
     if path.is_symlink():
         fail("symlink_not_allowed", f"refusing to patch symlink: {path}")
     if path.exists() and not path.is_file():
@@ -140,6 +144,7 @@ changed = []
 diffs = []
 virtual = {}
 touched_paths = []
+mode_overrides = {}
 for op in ops:
     kind = op["kind"]
     path = resolve_path(op["path"], parent_ok=True)
@@ -164,6 +169,11 @@ for op in ops:
         if op.get("move_to"):
             if exists_in_virtual(target_path) or target_path.exists() or target_path.is_symlink():
                 fail("file_exists", f"move target already exists: {target_path}")
+            # A move keeps the source file's permission bits instead of
+            # creating the destination with the temp-file default. A source
+            # added earlier in this same patch is still virtual, so fall back
+            # to the new-file default for it.
+            mode_overrides[target_path] = path.stat().st_mode & 0o777 if path.exists() else None
         after_text = before_text
         for hunk_index, hunk in enumerate(op.get("hunks", [])):
             old = hunk["old"]
@@ -216,7 +226,7 @@ try:
     for path, data in virtual.items():
         if data is DELETED:
             continue
-        mode = before_state.get(path, {}).get("mode")
+        mode = mode_overrides.get(path, before_state.get(path, {}).get("mode"))
         atomic_write(path, data, mode)
     for path, data in virtual.items():
         if data is DELETED and (path.exists() or path.is_symlink()):
