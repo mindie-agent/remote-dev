@@ -42,6 +42,7 @@ from remote_dev.mcp.schemas import (
     harness_catalog,
 )
 import remote_dev.mcp.tools as tools
+import remote_dev.mcp.native_common as native_common
 
 
 HERE = Path(__file__).resolve().parent
@@ -72,6 +73,12 @@ EMBEDDED_BASELINE_JSON = r'''{"harnesses":[{"harness":"codex","tools":[{"name":"
 
 BASELINE = _load_baseline()
 BY_HARNESS = {item["harness"]: item for item in BASELINE["harnesses"]}
+# Claude TaskList is a host session task/plan registry (high-level host
+# interface), intentionally not projected as a remote-job list. Kimi TaskList
+# is a background-process roster and remains in scope.
+BY_HARNESS["claude"]["tools"] = [
+    tool for tool in BY_HARNESS["claude"]["tools"] if tool["name"] != "TaskList"
+]
 
 CORE_DIR = Path(remote_dev.__file__).resolve().parent / "core"
 FILE_WORKER = CORE_DIR / "remote_file_worker.py"
@@ -448,14 +455,17 @@ class NormalizationTests(unittest.TestCase):
         )
         self.assertEqual(args["yield_time_ms"], 30000)
 
-        for bad in (
-            {"cmd": "true", "shell": "bash"},
-            {"cmd": "true", "login": True},
-            {"cmd": "true", "sandbox_permissions": "require_escalated"},
-        ):
-            with self.subTest(args=bad):
-                with self.assertRaises(HarnessProfileError):
-                    tools.call_tool("remote_exec_command", bad, profile="codex")
+        _canonical, args = self._call(
+            "remote_exec_command", {"cmd": "true", "shell": "bash", "login": False}, "codex"
+        )
+        self.assertEqual(args["shell"], "bash")
+        self.assertFalse(args["login"])
+        with self.assertRaises(HarnessProfileError):
+            tools.call_tool(
+                "remote_exec_command",
+                {"cmd": "true", "sandbox_permissions": "require_escalated"},
+                profile="codex",
+            )
 
     def test_codex_write_stdin_defaults(self) -> None:
         canonical, args = self._call("remote_write_stdin", {"session_id": 7}, "codex")
@@ -600,9 +610,11 @@ class NormalizationTests(unittest.TestCase):
             return {"text": "delta", "result": {"state": "running", "job_id": job_id}}
 
         record = {"job_id": "j", "session_scope": "scope", "state": "running", "description": "demo"}
+        import remote_dev.mcp.native_handlers_dsh as dsh_handlers
+
         with (
-            mock.patch.object(harness_native, "_job_record", return_value=record),
-            mock.patch.object(harness_native, "_assert_visible", return_value=None),
+            mock.patch.object(dsh_handlers, "_job_record", return_value=record),
+            mock.patch.object(dsh_handlers, "_assert_visible", return_value=None),
             mock.patch(
                 "remote_dev.core.job_ops.remote_job_output_incremental",
                 fake_incremental,
@@ -629,14 +641,16 @@ class NormalizationTests(unittest.TestCase):
             return {"text": "", "result": {"job": {"state": "running"}}}
 
         record = {"job_id": "j", "session_scope": "scope", "state": "running"}
+        import remote_dev.mcp.native_handlers_claude as claude_handlers
+
         with (
             mock.patch(
                 "remote_dev.core.state_store.find_job_record",
                 return_value=(Path("/tmp/fake-job.json"), record),
             ),
-            mock.patch.object(harness_native, "_assert_visible", return_value=None),
-            mock.patch.object(harness_native, "_job_file", return_value=Path("/tmp/fake-stdout.log")),
-            mock.patch.object(harness_native, "_tail_text", return_value=("out", False)),
+            mock.patch.object(claude_handlers, "_assert_visible", return_value=None),
+            mock.patch.object(claude_handlers, "_job_file", return_value=Path("/tmp/fake-stdout.log")),
+            mock.patch.object(claude_handlers, "_tail_text", return_value=("out", False)),
             mock.patch.object(tools, "_call_canonical", fake),
         ):
             payload = tools.call_tool(
@@ -688,17 +702,13 @@ class NativeGapTests(unittest.TestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
 
-    def test_claude_read_pdf_pages_are_normalized_before_explicit_unsupported(self) -> None:
-        # The profile must preserve native `pages` through normalization; the
-        # canonical worker then returns an explicit `pdf_unsupported` status
-        # (covered by WorkerFileTests.test_read_pdf_is_explicitly_unsupported).
-        tools.call_tool(
-            "remote_Read",
-            {"file_path": "/tmp/doc.pdf", "pages": "1-2"},
-            profile="claude",
-        )
-        self.assertEqual(self.fake.last[0], "remote.read")
-        self.assertEqual(self.fake.last[1]["pages"], "1-2")
+    def test_claude_read_pdf_pages_are_normalized(self) -> None:
+        from remote_dev.mcp.harness_profiles import spec_by_wire
+
+        spec = spec_by_wire("claude", "remote_Read")
+        self.assertIsNotNone(spec)
+        args = spec.normalize({"file_path": "/tmp/doc.pdf", "pages": "1-2"})
+        self.assertEqual(args["pages"], "1-2")
 
     def test_grep_head_limit_zero_is_unlimited(self) -> None:
         """Native Kimi/Claude `head_limit=0` means unlimited; the worker caps at 5000."""

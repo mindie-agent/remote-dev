@@ -79,7 +79,7 @@ class RemoteReadTests(unittest.TestCase):
                     }
 
                 file_ops.run_remote_python = fake_run_remote_python  # type: ignore[assignment]
-                payload = file_ops.remote_read(endpoint, file_path="/vllm-workspace/big.log", limit=200000)
+                payload = file_ops.remote_read(endpoint, file_path="/vllm-workspace/big.log", limit=2000000)
                 self.assertEqual(captured["limit"], file_ops.MAX_READ_LINES)
                 self.assertIn("clamped", payload["result"]["warnings"][0])
                 self.assertLessEqual(len(payload["text"]), MAX_TEXT_CHARS)

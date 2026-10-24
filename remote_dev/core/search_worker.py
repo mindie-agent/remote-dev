@@ -302,6 +302,7 @@ def collect_page(cmd, output_mode, offset, limit, max_line_chars, *, skip_zeros=
     import contextlib
     matches, count, truncated_lines = [], 0, 0
     used_chars = 0
+    next_offset = None
     total_matches = 0 if output_mode == "count_matches" else None
     cap = max_line_chars if output_mode == "content" else 32768
     with contextlib.closing(command_lines(cmd, cap)) as rows:
@@ -316,12 +317,14 @@ def collect_page(cmd, output_mode, offset, limit, max_line_chars, *, skip_zeros=
                     line += "<remote-dev line truncated>"
                     truncated_lines += 1
                 if used_chars + len(line) + 1 > char_budget and matches:
+                    next_offset = offset + len(matches)
                     break
                 matches.append(line)
                 used_chars += len(line) + 1
             elif total_matches is None:
+                next_offset = offset + len(matches)
                 break
-    return matches, count > limit or used_chars >= char_budget, total_matches, truncated_lines
+    return matches, count > limit or next_offset is not None, total_matches, truncated_lines, next_offset
 
 
 if op == "glob":
@@ -331,7 +334,7 @@ if op == "glob":
     pattern = payload.get("pattern") or "*"
     limit = int(payload["limit"]) if payload.get("limit") is not None else 100
     if limit == 0:
-        limit = 100000
+        limit = 1000000
     offset = int(payload.get("offset") or 0)
     if offset < 0:
         fail("invalid_pagination", "offset must be >= 0")
@@ -407,7 +410,10 @@ if op == "glob":
     else:
         matches = [row for _, _, row in sorted(matches, reverse=True)]
     page = matches[offset:offset + limit]
-    print(json.dumps({"status": "ok", "matches": page, "offset": offset, "truncated": len(matches) > offset + limit, "warnings": warnings}, sort_keys=True))
+    truncated = len(matches) > offset + limit
+    print(json.dumps({"status": "ok", "matches": page, "offset": offset,
+                      "next_offset": offset + len(page) if truncated else None,
+                      "truncated": truncated, "warnings": warnings}, sort_keys=True))
     raise SystemExit(0)
 
 if op == "grep":
@@ -419,7 +425,7 @@ if op == "grep":
         fail("pattern_required", "RemoteGrep requires pattern")
     limit = int(payload["limit"]) if payload.get("limit") is not None else 100
     if limit == 0:
-        limit = 100000
+        limit = 1000000
     offset = int(payload.get("offset") or 0)
     if offset < 0:
         fail("invalid_pagination", "offset must be >= 0")
@@ -495,10 +501,11 @@ if op == "grep":
             if after_context:
                 cmd.extend(["-A", str(after_context)])
         cmd.extend(["--", pattern, str(base)])
-        lines, truncated, total_matches, clipped = collect_page(cmd, output_mode, offset, limit, max_line_chars)
+        lines, truncated, total_matches, clipped, next_offset = collect_page(cmd, output_mode, offset, limit, max_line_chars)
         if clipped:
             warnings.append(f"{clipped} line(s) truncated to {max_line_chars} chars")
         print(json.dumps({"status": "ok", "engine": "rg", "output_mode": output_mode, "offset": offset,
+                          "next_offset": next_offset,
                           "matches": lines, "total_matches": total_matches, "truncated": truncated,
                           "warnings": warnings}, sort_keys=True))
         raise SystemExit(0)
@@ -570,11 +577,12 @@ if op == "grep":
         if after_context:
             cmd.append(f"-A{after_context}")
     cmd.extend(["--", pattern, str(base)])
-    lines, truncated, _, clipped = collect_page(cmd, output_mode, offset, limit, max_line_chars,
+    lines, truncated, _, clipped, next_offset = collect_page(cmd, output_mode, offset, limit, max_line_chars,
                                                 skip_zeros=output_mode == "count")
     if clipped:
         warnings.append(f"{clipped} line(s) truncated to {max_line_chars} chars")
     print(json.dumps({"status": "ok", "engine": "grep", "output_mode": output_mode, "offset": offset,
+                      "next_offset": next_offset,
                       "matches": lines, "total_matches": None, "truncated": truncated, "warnings": warnings}, sort_keys=True))
     raise SystemExit(0)
 

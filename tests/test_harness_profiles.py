@@ -45,7 +45,7 @@ class CatalogTests(unittest.TestCase):
     def test_canonical_table_stays_19(self) -> None:
         self.assertEqual(len(tools.harness_catalog("canonical")), 19)
         self.assertEqual(len(tools.harness_catalog("kimi")), 29)
-        self.assertEqual(len(tools.harness_catalog("claude")), 31)
+        self.assertEqual(len(tools.harness_catalog("claude")), 30)
         self.assertEqual(len(tools.harness_catalog("dsh")), 22)
         self.assertEqual(len(tools.harness_catalog("codex")), 22)
 
@@ -89,7 +89,7 @@ class CatalogTests(unittest.TestCase):
         self.assertNotIn("lines", job["properties"])
         read = by_name["remote_read"]["inputSchema"]
         self.assertEqual(read["properties"]["limit"]["default"], 2000)
-        self.assertEqual(read["properties"]["limit"]["maximum"], 2000)
+        self.assertNotIn("maximum", read["properties"]["limit"])
 
     def test_kimi_seconds_and_claude_milliseconds_are_not_guessed(self) -> None:
         calls: list[tuple[str, dict]] = []
@@ -122,7 +122,7 @@ class CatalogTests(unittest.TestCase):
 
         with mock.patch.object(tools, "_call_canonical", fake):
             tools.call_tool("remote_Read", {"path": "/tmp/x"}, profile="kimi")
-            self.assertEqual(calls[-1][1]["limit"], 100000)
+            self.assertEqual(calls[-1][1]["limit"], 1000000)
             self.assertEqual(calls[-1][1]["max_chars"], 100000)
             tools.call_tool("remote_Write", {"path": "/tmp/x", "content": "x"}, profile="kimi")
             self.assertTrue(calls[-1][1]["overwrite"])
@@ -164,20 +164,13 @@ class CatalogTests(unittest.TestCase):
                 "remote_Bash", {"command": "x", "dangerouslyDisableSandbox": True}, profile="claude"
             )
 
-    def test_canonical_compatibility_fields_still_route_canonical(self) -> None:
-        calls: list[tuple[str, dict]] = []
-
-        def fake(name, args, *, profile="canonical"):
-            calls.append((name, dict(args)))
-            return {"text": "ok", "result": {"outcome": "success", "status": "ok"}}
-
-        with mock.patch.object(tools, "_call_canonical", fake):
+    def test_native_names_reject_canonical_only_fields(self) -> None:
+        with self.assertRaises((HarnessProfileError, ValueError)):
             tools.call_tool("remote_job_output", {"job_id": "j", "lines": 20}, profile="dsh")
-            self.assertEqual(calls[-1][0], "remote.job_output")
-            self.assertEqual(calls[-1][1]["lines"], 20)
+        with self.assertRaises((HarnessProfileError, ValueError)):
             tools.call_tool("remote_read", {"path": "/tmp/x", "start_line": 2}, profile="dsh")
-            self.assertEqual(calls[-1][0], "remote.read")
-            self.assertEqual(calls[-1][1]["start_line"], 2)
+        with self.assertRaises((HarnessProfileError, ValueError)):
+            tools.call_tool("remote_exec_command", {"cmd": "x", "timeout_ms": 5}, profile="codex")
 
     def test_native_name_from_another_profile_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

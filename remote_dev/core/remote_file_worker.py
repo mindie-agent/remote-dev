@@ -32,6 +32,133 @@ def fail(status: str, error: str | None = None, **extra: object) -> None:
     raise SystemExit(0)
 
 
+def _stream_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _detect_utf16(path):
+    import unicodedata
+
+    with path.open("rb") as stream:
+        head = stream.read(4096)
+    if head.startswith(b"\xff\xfe"):
+        return "utf-16-le"
+    if head.startswith(b"\xfe\xff"):
+        return "utf-16-be"
+    if len(head) < 4 or path.stat().st_size % 2:
+        return None
+    if head.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"%PDF", b"RIFF")):
+        return None
+    sample = head[: len(head) - (len(head) % 2)]
+    has_nul = b"\x00" in sample
+    even_nul = sum(1 for i in range(0, len(sample), 2) if sample[i:i+1] == b"\x00")
+    odd_nul = sum(1 for i in range(1, len(sample), 2) if sample[i:i+1] == b"\x00")
+    for encoding in ("utf-16-le", "utf-16-be"):
+        try:
+            decoded = sample.decode(encoding, errors="strict")
+        except UnicodeDecodeError:
+            continue
+        if not decoded:
+            continue
+        printable = 0
+        controls = 0
+        common = 0
+        ascii_alnum = 0
+        non_ascii = 0
+        for char in decoded:
+            code = ord(char)
+            if char in "\n\r\t":
+                printable += 1
+            elif unicodedata.category(char).startswith("C"):
+                controls += 1
+                continue
+            else:
+                printable += 1
+            if char.isascii():
+                if char.isalnum():
+                    ascii_alnum += 1
+            else:
+                non_ascii += 1
+            if (
+                char.isspace()
+                or char.isascii()
+                or 0x3000 <= code <= 0x30FF
+                or 0x3400 <= code <= 0x9FFF
+                or 0xAC00 <= code <= 0xD7AF
+                or 0xF900 <= code <= 0xFAFF
+                or 0xFF00 <= code <= 0xFFEF
+                or 0x1F000 <= code <= 0x1FAFF
+            ):
+                common += 1
+        if controls or printable < max(1, len(decoded) * 0.9):
+            continue
+        if has_nul:
+            # ASCII-bearing UTF-16 has NUL padding on one byte position.
+            if encoding == "utf-16-le" and odd_nul >= max(2, even_nul * 3):
+                return encoding
+            if encoding == "utf-16-be" and even_nul >= max(2, odd_nul * 3):
+                return encoding
+        # No dominant NUL padding. Prefer UTF-8 whenever it decodes strictly; this
+        # keeps ordinary text safe. A BOM-less CJK/emoji UTF-16 file usually
+        # fails strict UTF-8, and only then accept a fully common-script body.
+        try:
+            sample.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            if common == len(decoded) and non_ascii and ascii_alnum == 0:
+                return encoding
+    return None
+
+
+def _utf16_lines(path, encoding):
+    decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+    pending = ""
+    lossy = 0
+    with path.open("rb") as stream:
+        while True:
+            chunk = stream.read(65536)
+            text = decoder.decode(chunk, final=not chunk)
+            if text:
+                lossy += text.count("\ufffd")
+                pending += text
+                while "\n" in pending:
+                    line, pending = pending.split("\n", 1)
+                    if line.endswith("\r"):
+                        line = line[:-1]
+                    yield line, lossy
+                    lossy = 0
+            if not chunk:
+                break
+    if pending:
+        if pending.endswith("\r"):
+            pending = pending[:-1]
+        yield pending, lossy
+
+
+def _utf16_width(text):
+    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in text)
+
+
+def _utf16_index(text, units, label="column_offset"):
+    consumed = 0
+    for index, ch in enumerate(text):
+        if consumed == units:
+            return index
+        width = 2 if ord(ch) > 0xFFFF else 1
+        if consumed + width > units:
+            fail("invalid_pagination", f"{label} {units} falls inside a Unicode surrogate pair")
+        consumed += width
+    if consumed == units:
+        return len(text)
+    fail("invalid_pagination", f"{label} {units} is past the end of the line")
+
+
 def resolve_path(
     raw: str,
     root: pathlib.Path,
@@ -295,6 +422,7 @@ def main() -> None:
         max_line_chars = int(payload.get("max_line_chars") or 2000)
         max_chars = int(payload["max_chars"]) if payload.get("max_chars") is not None else None
         column_offset = int(payload.get("column_offset") or 0)
+        utf16_units = bool(payload.get("utf16_units", False))
         if column_offset and offset < 0:
             fail("invalid_pagination", "column_offset is only supported for forward reads")
         if column_offset < 0:
@@ -304,47 +432,74 @@ def main() -> None:
         node_paths = payload.get("node_paths")
         before = path.stat()
 
-        with path.open("rb") as prefix_stream:
-            raw_prefix = prefix_stream.read(2)
-        if raw_prefix in (b"\xff\xfe", b"\xfe\xff"):
-            raw_bytes = path.read_bytes()
-            try:
-                text = raw_bytes.decode("utf-16")
-            except UnicodeDecodeError as exc:
-                fail("binary_file", f"file has a UTF-16 BOM but does not decode as UTF-16: {exc}")
+        encoding = _detect_utf16(path)
+        if encoding is not None:
+            digest_hex = _stream_sha256(path) if verify else None
+            total = 0
+            selected_lines = []
+            used = 0
+            warnings = []
+            lossy_total = 0
+            forward = offset > 0
+            start_index = max(0, offset - 1) if forward else 0
+            selected_units = 0
+            collecting = True
+            for line_no, (line_text, lossy) in enumerate(_utf16_lines(path, encoding), 1):
+                total = line_no
+                lossy_total += lossy
+                if forward:
+                    if start_index < line_no <= start_index + limit and collecting:
+                        selected_lines.append((line_no, line_text))
+                        selected_units += _utf16_width(line_text) + len(str(line_no)) + 4
+                        if max_chars is not None and selected_units > max_chars:
+                            collecting = False
+                else:
+                    selected_lines.append((line_no, line_text))
+                    if len(selected_lines) > abs(offset) + limit:
+                        selected_lines.pop(0)
+            if not forward:
+                start_index = max(0, total + offset)
+                selected_lines = selected_lines[:limit]
+            if lossy_total:
+                warnings.append(f"{lossy_total} invalid UTF-16 sequence(s) replaced with U+FFFD")
+            numbered_lines = []
+            line_start = line_end = 0
+            for position, (line_no, line_text) in enumerate(selected_lines):
+                body_text = line_text
+                if position == 0 and column_offset:
+                    cut = _utf16_index(body_text, column_offset)
+                    body_text = body_text[cut:]
+                if _utf16_width(body_text) > max_line_chars:
+                    body_text = body_text[:_utf16_index(body_text, max_line_chars)]
+                rendered = f"{line_no} | {body_text}"
+                if max_chars is not None and numbered_lines and used + _utf16_width(rendered) + 1 > max_chars:
+                    break
+                numbered_lines.append(rendered)
+                used += _utf16_width(rendered) + 1
+                line_start = line_no if not line_start else line_start
+                line_end = line_no
             after = path.stat()
             if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
                 fail("file_changed", "file changed during read; retry to obtain a consistent read")
-            all_lines = text.splitlines()
-            total = len(all_lines)
-            start_index = max(0, offset - 1) if offset > 0 else max(0, total + offset)
-            selected_lines = all_lines[start_index:start_index + limit]
-            if column_offset and selected_lines:
-                selected_lines[0] = selected_lines[0][column_offset:]
-            numbered_lines = []
-            used = 0
-            for number, body_text in enumerate(selected_lines, start_index + 1):
-                body_text = body_text[:max_line_chars]
-                rendered = f"{number} | {body_text}"
-                if max_chars is not None and used + len(rendered) + 1 > max_chars and numbered_lines:
-                    break
-                numbered_lines.append(rendered)
-                used += len(rendered) + 1
-            start_line_no = start_index + 1 if total else 0
-            end_line_no = start_index + len(numbered_lines)
+            if payload.get("strict_offset") and forward and offset > total:
+                fail("invalid_pagination", f"offset {offset} is past the end of the file ({total} lines)")
             info = {
                 "path": str(path), "resolved_path": str(resolved), "size": after.st_size,
-                "mtime_ns": after.st_mtime_ns,
-                "sha256": sha256_bytes(raw_bytes) if verify else None,
+                "mtime_ns": after.st_mtime_ns, "sha256": digest_hex,
                 "total_lines": total, "offset": offset, "limit": limit,
-                "line_start": start_line_no, "line_end": end_line_no,
-                "partial": start_index > 0 or end_line_no < total,
+                "line_start": line_start, "line_end": line_end,
+                "partial": (line_start > 1 if forward else start_index > 0) or line_end < total,
                 "content": "\n".join(numbered_lines),
                 "truncated_line_count": 0, "symlink": path.is_symlink(),
-                "content_verified": verify, "encoding": "utf-16",
+                "content_verified": verify, "encoding": encoding,
             }
-            print(json.dumps({"status": "partial" if info["partial"] else "ok", "file": info}, sort_keys=True))
+            print(json.dumps({"status": "partial" if info["partial"] else "ok", "file": info, "warnings": warnings}, sort_keys=True))
             raise SystemExit(0)
+
+        with path.open("rb") as binary_probe:
+            head_bytes = binary_probe.read(8192)
+        if b"\x00" in head_bytes:
+            fail("binary_file", "remote.read returns UTF-8/UTF-16 text; use remote.artifact_pull for binary/image files")
 
         if outline or (isinstance(node_paths, list) and node_paths):
             raw_bytes = path.read_bytes()
@@ -463,15 +618,20 @@ def main() -> None:
             raise SystemExit(0)
 
         scan_limit = content_offset + max_line_chars if content_offset > 0 else max_line_chars
-        digest = hashlib.sha256() if verify else None
+        digest_hex = _stream_sha256(path) if verify else None
         selected, total, more = [], 0, False
-        for index, line in enumerate(scan_text_lines(path, scan_limit, digest), 1):
+        selected_chars = 0
+        collecting = True
+        for index, line in enumerate(scan_text_lines(path, scan_limit, None), 1):
             total = index
-            if offset > 0 and offset <= index < offset + limit:
+            if offset > 0 and offset <= index < offset + limit and collecting:
                 body, clipped = line
                 if content_offset > 0:
                     body = body[content_offset : content_offset + max_line_chars]
                 selected.append((index, body, clipped))
+                selected_chars += len(body) + len(str(index)) + 4
+                if max_chars is not None and selected_chars > max_chars:
+                    collecting = False
             if not verify and offset > 0 and index >= offset + limit:
                 more = True
                 break
@@ -495,9 +655,13 @@ def main() -> None:
         end = min(start + limit, total)
         if column_offset and selected:
             first_index, first_body, first_clipped = selected[0]
-            if column_offset > len(first_body):
-                fail("invalid_pagination", f"column_offset {column_offset} is past the end of line {first_index}")
-            selected[0] = (first_index, first_body[column_offset:], first_clipped or len(first_body) - column_offset > max_line_chars)
+            if utf16_units:
+                cut = _utf16_index(first_body, column_offset)
+            else:
+                if column_offset > len(first_body):
+                    fail("invalid_pagination", f"column_offset {column_offset} is past the end of line {first_index}")
+                cut = column_offset
+            selected[0] = (first_index, first_body[cut:], first_clipped or len(first_body) - cut > max_line_chars)
         next_offset = None
         next_column_offset = None
         if max_chars is not None:
@@ -505,7 +669,10 @@ def main() -> None:
             used = 0
             truncated_by_chars = False
             for index, body, clipped in selected:
-                rendered_len = len(str(index)) + 3 + len(body) + 1
+                if utf16_units and _utf16_width(body) > max_line_chars:
+                    body = body[:_utf16_index(body, max_line_chars)]
+                    clipped = True
+                rendered_len = (len(str(index)) + 3 + _utf16_width(body) + 1) if utf16_units else (len(str(index)) + 3 + len(body) + 1)
                 if used + rendered_len > max_chars:
                     if not budgeted:
                         room = max(1, max_chars - used - len(str(index)) - 4)
@@ -528,7 +695,7 @@ def main() -> None:
         numbered = "\n".join(f"{index} | {body}" + ("<remote-dev line truncated>" if clipped else "")
                              for index, body, clipped in selected)
         info = {"path": str(path), "resolved_path": str(resolved), "size": after.st_size,
-                "mtime_ns": after.st_mtime_ns, "sha256": digest.hexdigest() if digest else None,
+                "mtime_ns": after.st_mtime_ns, "sha256": digest_hex,
                 "total_lines": total_lines, "offset": offset, "limit": limit,
                 "line_start": start + 1 if total else 0, "line_end": end,
                 "partial": start > 0 or more or end < total or content_offset > 0 or (max_chars is not None and next_offset is not None), "content": numbered,

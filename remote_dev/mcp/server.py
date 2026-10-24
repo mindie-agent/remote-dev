@@ -108,6 +108,19 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
             error_outcome = details.get("outcome")
             if details.get("status") == "local_recording_failed" and details.get("operation_completed") is True:
                 error_outcome = details.get("execution_outcome", error_outcome)
+            # A command that really ran and returned a nonzero exit code is a
+            # native tool result, not an MCP/helper failure. Keep the exit code
+            # in structuredContent and only flag start/status/transport errors.
+            completed_command = (
+                details.get("state") in {"succeeded", "failed", "timeout", "cancelled"}
+                and isinstance(details.get("exit_code"), int)
+                and not isinstance(details.get("exit_code"), bool)
+                and (name.endswith("bash") or name.endswith("job_stdin")
+                     or name.endswith("exec_command") or name.endswith("write_stdin")
+                     or name.endswith("shell"))
+            )
+            if completed_command:
+                error_outcome = "success"
             blocks = payload.get("content")
             if not isinstance(blocks, list) or not blocks:
                 blocks = [{"type": "text", "text": tool_text(payload)}]

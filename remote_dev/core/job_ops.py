@@ -101,13 +101,19 @@ def _timeout_seconds(timeout_ms: int | None) -> float | None:
     return timeout_ms / 1000
 
 
-def _job_command(endpoint: Endpoint, command: str, runtime_enabled: bool) -> str:
+def _job_command(endpoint: Endpoint, command: str, runtime_enabled: bool,
+                 shell: str | None = None, login: bool | None = None) -> str:
     preamble = runtime_env_lines(endpoint, runtime_enabled)
+    executed = command
+    if shell is not None or login is not None:
+        chosen = shell or "bash"
+        login_flag = "-l " if login else ""
+        executed = f"exec {shlex.quote(chosen)} {login_flag}-c {shlex.quote(command)}"
     if not preamble:
-        return command
+        return executed
     # Parse the user's command after initialization, in the same shell. This
     # preserves runtime functions/options and avoids a second SSH .bashrc load.
-    return "\n".join([*preamble, f"eval -- {shlex.quote(command)}"])
+    return "\n".join([*preamble, f"eval -- {shlex.quote(executed)}"])
 
 
 _PUBLIC_JOB_KEYS = (
@@ -343,6 +349,7 @@ def start_remote_job(
     runtime_env: bool | None = None, description: str | None = None,
     job_id: str | None = None, yield_time_ms: int | None = None,
     max_output_tokens: int | None = None, tty: bool = False, wait: bool = False,
+    shell: str | None = None, login: bool | None = None,
 ) -> dict[str, Any]:
     started, start = utc_now_iso(), time.monotonic()
     env = env or {}
@@ -350,7 +357,7 @@ def start_remote_job(
     job_id = require_job_id(job_id or new_job_id())
     cwd = cwd or endpoint.effective_cwd
     path = job_record_path(endpoint, job_id)
-    spec = {"command": _job_command(endpoint, command, runtime_enabled), "cwd": cwd,
+    spec = {"command": _job_command(endpoint, command, runtime_enabled, shell=shell, login=login), "cwd": cwd,
             "env": {require_env_name(key): str(value) for key, value in env.items()},
             "timeout_seconds": _timeout_seconds(timeout_ms), "interactive": not wait, "tty": bool(tty)}
     record = {"schema_version": "remote-dev.job.v1", "job_id": job_id,
@@ -359,6 +366,7 @@ def start_remote_job(
               "cwd": cwd, "env_keys": sorted(env), "runtime_env": runtime_enabled,
               "runtime_env_file": endpoint.runtime_env_file, "remote_dir": remote_job_dir(endpoint, job_id),
               "started_at": started, "timeout_ms": timeout_ms, "tty": bool(tty),
+              "shell": shell, "login": login,
               "session_scope": resolve_ledger_scope(),
               "authorization": {"token": uuid.uuid4().hex, "job_id": job_id}}
     budget = _output_budget_bytes(max_output_tokens)

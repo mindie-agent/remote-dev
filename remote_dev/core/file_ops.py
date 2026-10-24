@@ -72,6 +72,7 @@ def remote_read(
     column_offset: int = 0,
     pages: str | None = None,
     strict_offset: bool = False,
+    utf16_units: bool = False,
     client_context_id: str | None = None,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -113,6 +114,8 @@ def remote_read(
         payload_req["pages"] = str(pages)
     if strict_offset:
         payload_req["strict_offset"] = True
+    if utf16_units:
+        payload_req["utf16_units"] = True
     if start_line is not None:
         payload_req["start_line"] = int(start_line)
     if end_line is not None:
@@ -487,13 +490,18 @@ def _format_read_text(
     *,
     max_chars: int | None = None,
 ) -> str:
+    body = (
+        str(file_info.get("content", ""))
+        if max_chars is not None
+        else str(result.get("preview", {}).get("content", ""))
+    )
     lines = [
         f"RemoteRead on {_format_endpoint(endpoint)}",
         f"file: {file_info.get('path', '')}",
         f"lines: {file_info.get('line_start', 0)}-{file_info.get('line_end', 0)} of {file_info.get('total_lines', 0)}",
         f"partial: {str(file_info.get('partial', False)).lower()}",
         "",
-        str(result.get("preview", {}).get("content", "")),
+        body,
     ]
     if result.get("error"):
         lines.append(f"error: {result['error']}")

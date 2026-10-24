@@ -10,7 +10,7 @@ never by inspecting tool arguments.
 | :--- | :--- | :--- |
 | `canonical` | standalone default | none; 19 portable `remote_*` names |
 | `codex` | Codex plugin MCP launcher | `remote_exec_command`, `remote_write_stdin`, `remote_view_image`; `remote_apply_patch` is the canonical tool with a `patch` string because native `apply_patch` is freeform |
-| `claude` | Claude Code plugin MCP launcher | `remote_Read`, `remote_Write`, `remote_Edit`, `remote_NotebookEdit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_TaskOutput`, `remote_BashOutput`, `remote_TaskList`, `remote_TaskStop`, `remote_KillShell` |
+| `claude` | Claude Code plugin MCP launcher | `remote_Read`, `remote_Write`, `remote_Edit`, `remote_NotebookEdit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_TaskOutput`, `remote_BashOutput`, `remote_TaskStop`, `remote_KillShell` |
 | `kimi` | Kimi Code plugin MCP launcher | `remote_Read`, `remote_Write`, `remote_Edit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_ReadMediaFile`, `remote_TaskOutput`, `remote_TaskStop`, `remote_TaskList` |
 | `dsh` | DSH plugin launcher | `remote_read`, `remote_write`, `remote_edit`, `remote_bash`, `remote_glob`, `remote_grep`, `remote_read_image`, `remote_job_output`, `remote_job_list`, `remote_job_kill` |
 
@@ -80,10 +80,7 @@ are not implemented remotely; the tools return an explicit error instead of
 pretending success. Images are returned at original resolution unless the
 native size bound is exceeded; automatic downscaling is not replicated.
 
-Claude `TaskList` is the host task registry in the native client; over
-remote-dev it lists the scoped remote jobs (the remote task registry), not
-unrelated host subagent tasks. `TaskOutput` remains the background-output
-tool.
+Claude `TaskList` is the host session task/plan registry, a high-level host interface outside the remote-file/process scope; it is intentionally not exposed as a native projection. Kimi `TaskList` is a background-process roster and remains in scope. `TaskOutput` remains the background-output tool.
 
 Host-local permission/escalation arguments are never interpreted as remote
 authorization. Claude `dangerouslyDisableSandbox`, DSH `sandbox_permissions`/
@@ -98,3 +95,27 @@ Without `REMOTE_DEV_HARNESS_PROFILE`, only the 19 canonical portable names are
 guaranteed. Native-case aliases such as `remote_Edit` require the owning
 profile; legacy aliases that do not belong to one of the four profiles (for
 example `remote_replace_file_content`) keep their canonical mapping.
+
+## Scope boundary (user-defined)
+
+Only tools whose operation target is the remote machine are projected: files,
+directories, search, edits, patches, processes, commands, stdin, and background
+jobs. Subagent creation, plan/task registries, conversation/UI, host approvals
+and browser tools stay local to the Harness. Claude `TaskList` is therefore
+**not** exposed as a remote-job list; Kimi `TaskList` is a background-process
+roster and remains in scope.
+
+Media is different: the remote file is pulled through the bounded streaming
+artifact path, then converted/rendered **locally** with `sips`, `pdftoppm`,
+`qlmanage`, optional Pillow/pypdfium2/PyMuPDF, or `ffmpeg` when available.
+No renderer is installed on the remote host and no model weights are loaded.
+
+## Name collisions and canonical compatibility
+
+Standalone remote-dev keeps the 19 canonical portable `remote_*` names. In a
+native profile a wire name that collides with a canonical portable alias (DSH
+`remote_read`, Codex `remote_apply_patch`, …) is the **native** tool with the
+strict native schema; canonical dotted names (`remote.read`) remain callable.
+Native names do not accept canonical-only fields: `remote_exec_command` rejects
+`timeout_ms`, `remote_write_stdin` rejects `eof`, and DSH native names reject
+`cmd`/`timeout_ms`/`lines`. There is no compatibility bypass.
