@@ -312,17 +312,9 @@ def _format_tail_read(
     text, page = _render_read_page(
         endpoint_label, path, total, delivered, next_cursor, content_offset, max_chars,
     )
-    for _ in range(16):
-        if _read_text_units(text, utf16_units) <= max_chars:
-            return _finalize_read_page(result, file_info, text, page, utf16_units)
-        if len(delivered) <= 1 or any(entry["clipped"] for entry in delivered):
-            return _read_too_small(result, file_info, max_chars)
-        delivered.pop(0)
-        next_cursor = _read_next_cursor(delivered, entries, file_info, range_end)
-        text, page = _render_read_page(
-            endpoint_label, path, total, delivered, next_cursor, content_offset, max_chars,
-        )
-    return _read_too_small(result, file_info, max_chars)
+    if _read_text_units(text, utf16_units) > max_chars:
+        return _read_too_small(result, file_info, max_chars)
+    return _finalize_read_page(result, file_info, text, page, utf16_units)
 
 
 def _format_paged_read(
@@ -376,7 +368,11 @@ def _format_paged_read(
     # spend the rest of the budget on body content without ever cutting the
     # status text or advertising a cursor that does not match the body.
     header_width = _read_text_units(
-        _read_header(endpoint_label, path, 0, 0, total, True), utf16_units
+        _read_header(
+            endpoint_label, path,
+            int(entries[-1]["line"]), int(entries[-1]["line"]), total, True,
+        ),
+        utf16_units,
     )
     footer_probe = _next_read_footer(_next_read_arguments(path, 10**9, 10**9, max_chars))
     body_budget = int(max_chars) - header_width - 1 - 1 - _read_text_units(footer_probe, utf16_units) - 1
@@ -409,27 +405,8 @@ def _format_paged_read(
     text, page = _render_read_page(
         endpoint_label, path, total, delivered, next_cursor, content_offset, max_chars,
     )
-    # The footer probe is an upper bound, but keep this loop as a hard guard
-    # against any future status/header shape change.
-    for _ in range(16):
-        if _read_text_units(text, utf16_units) <= max_chars:
-            break
-        last = delivered[-1]
-        if last["units"] > 0:
-            part, consumed = _take_read_units(last["text"], last["units"] - 1, utf16_units)
-            if consumed > 0:
-                last["text"] = part
-                last["units"] = consumed
-            else:
-                delivered.pop()
-        else:
-            delivered.pop()
-        if not delivered:
-            return _read_too_small(result, file_info, max_chars)
-        next_cursor = _read_next_cursor(delivered, entries, file_info, range_end)
-        text, page = _render_read_page(
-            endpoint_label, path, total, delivered, next_cursor, content_offset, max_chars,
-        )
+    if _read_text_units(text, utf16_units) > max_chars:
+        return _read_too_small(result, file_info, max_chars)
     return _finalize_read_page(result, file_info, text, page, utf16_units)
 
 
