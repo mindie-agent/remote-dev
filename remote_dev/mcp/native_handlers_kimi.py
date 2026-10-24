@@ -174,11 +174,6 @@ def kimi_read_media(profile: str, spec: NativeToolSpec, native: dict[str, Any], 
 
     suffix = Path(str(normalized["file_path"])).suffix.lower()
     if suffix in {".mp4", ".webm", ".mov", ".m4v"}:
-        if native.get("region") is not None:
-            return _media_failure(spec.wire, {
-                "status": "region_not_supported",
-                "error": "ReadMediaFile.region is only valid for images, not video",
-            })
         endpoint = resolve_endpoint(dict(normalized))
         # The native Kimi host caps an inline video part at 10 MiB of base64,
         # so keep the raw pull below ~7.5 MiB and fail explicitly above it.
@@ -213,7 +208,7 @@ def kimi_read_media(profile: str, spec: NativeToolSpec, native: dict[str, Any], 
         normalized,
         spec_wire=spec.wire,
         region=native.get("region"),
-        max_edge=None if native.get("full_resolution") is True else 1568,
+        max_edge=None if native.get("full_resolution") is True else 2000,
     )
     payload["result"]["full_resolution"] = bool(native.get("full_resolution", False))
     return payload

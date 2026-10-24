@@ -173,9 +173,12 @@ def claude_read(profile: str, spec: NativeToolSpec, native: dict[str, Any], norm
                     "text": text,
                     "result": result,
                     "content": [{
-                        "type": "pdf",
-                        "data": base64.b64encode(fetched["data"]).decode("ascii"),
-                        "mimeType": "application/pdf",
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": base64.b64encode(fetched["data"]).decode("ascii"),
+                        },
                     }],
                 }
             rendered = render_pdf(

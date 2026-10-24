@@ -217,6 +217,7 @@ def dsh_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normali
     if kind == "background":
         job_id = native_result["jobId"]
         payload["result"] = {"kind": "background", "jobId": job_id}
+        payload["_native_minimal"] = True
         return payload
     result.update(native_result)
     return payload
