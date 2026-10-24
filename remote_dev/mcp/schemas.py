@@ -200,6 +200,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "-n": {"type": "boolean", "description": "Alias of line_numbers."},
             "offset": {"type": "integer", "description": "Skip the first N result lines before applying the limit (pagination)."},
             "head_limit": {"type": "integer", "description": "Alias of limit (Kimi/Claude native Grep habit)."},
+            "hidden": {"type": "boolean", "description": "Search hidden dotfiles even when include_ignored is false (native Kimi Grep default)."},
             "include_ignored": {
                 "type": "boolean",
                 "description": (
@@ -209,7 +210,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                     "directory excludes and reports a warning."
                 ),
             },
-            "limit": {"type": "integer", "minimum": 0, "maximum": 5000, "description": "Maximum lines/entries after offset. 0 means no match-count limit for native Kimi Grep."},
+            "limit": {"type": "integer", "minimum": 0, "maximum": 100000, "description": "Maximum lines/entries after offset. 0 means no match-count limit for native Kimi Grep."},
         },
         ["pattern"],
     ),

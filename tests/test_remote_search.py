@@ -43,7 +43,7 @@ class RemoteSearchTests(unittest.TestCase):
                 }
 
             search_ops.run_remote_python = fake_run_remote_python  # type: ignore[assignment]
-            payload = search_ops.remote_grep(endpoint, pattern="x", path="/vllm-workspace", output_mode="content", limit=100000)
+            payload = search_ops.remote_grep(endpoint, pattern="x", path="/vllm-workspace", output_mode="content", limit=200000)
             self.assertEqual(captured["limit"], MAX_GREP_MATCHES)
             self.assertIn("clamped", payload["result"]["warnings"][0])
             self.assertLessEqual(len(payload["text"]), MAX_TEXT_CHARS)

@@ -716,12 +716,19 @@ def codex_write_stdin(profile: str, spec: NativeToolSpec, native: dict[str, Any]
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
-def _read_image_payload(normalized: Mapping[str, Any]) -> dict[str, Any]:
+def _read_image_payload(
+    normalized: Mapping[str, Any],
+    *,
+    region: dict[str, Any] | None = None,
+    max_edge: int | None = 1568,
+) -> dict[str, Any]:
     from remote_dev.core.endpoint import resolve_endpoint
     from remote_dev.core.image_ops import remote_read_image
 
     endpoint = resolve_endpoint(dict(normalized))
-    return remote_read_image(endpoint, file_path=str(normalized["file_path"]))
+    return remote_read_image(
+        endpoint, file_path=str(normalized["file_path"]), region=region, max_edge=max_edge
+    )
 
 
 @handler("dsh_read_image")
@@ -733,7 +740,7 @@ def dsh_read_image(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
 
 @handler("codex_view_image")
 def codex_view_image(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
-    payload = _read_image_payload(normalized)
+    payload = _read_image_payload(normalized, max_edge=None if native.get("detail") == "original" else 1568)
     if payload.get("content"):
         mime = payload["result"].get("extra", {}).get("mime_type") or "image/png"
         data = payload["content"][0]["data"]
@@ -808,12 +815,11 @@ def claude_read(profile: str, spec: NativeToolSpec, native: dict[str, Any], norm
 
 @handler("kimi_read_media")
 def kimi_read_media(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
-    if native.get("region") is not None:
-        raise caller_error(
-            "remote_ReadMediaFile does not crop a remote image region; read the full image "
-            "or pull the artifact and crop locally"
-        )
-    payload = _read_image_payload(normalized)
+    payload = _read_image_payload(
+        normalized,
+        region=native.get("region"),
+        max_edge=None if native.get("full_resolution") is True else 1568,
+    )
     payload["result"]["tool"] = spec.wire
     payload["result"]["full_resolution"] = bool(native.get("full_resolution", False))
     return payload
@@ -976,7 +982,10 @@ def dsh_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normali
     if exit_code not in (None, 0):
         markers.append(f"[exit code: {exit_code}]")
     text = body.rstrip() if body else "(no output)"
-    if kind in {"background", "promoted"}:
+    if kind == "background":
+        job_id = result.get("job_id") or result.get("session_id")
+        text = f"background job {job_id}"
+    elif kind == "promoted":
         job_id = result.get("job_id") or result.get("session_id")
         text += f"\n[still running after {timeout_ms}ms; moved to background job {job_id}]"
     if markers:

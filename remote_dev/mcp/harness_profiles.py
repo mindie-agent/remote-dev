@@ -201,6 +201,7 @@ def _kimi_grep(args: dict[str, Any]) -> dict[str, Any]:
     out["case_insensitive"] = bool(args.get("-i", False))
     out["multiline"] = bool(args.get("multiline", False))
     out["include_ignored"] = bool(args.get("include_ignored", False))
+    out["hidden"] = True
     if args.get("-A") is not None:
         out["after_context"] = int(args["-A"])
     if args.get("-B") is not None:
@@ -1085,6 +1086,7 @@ CLAUDE_NOTEBOOK_EDIT = NativeToolSpec(
     },
     required=("notebook_path", "new_source"),
     defaults={"edit_mode": "replace"},
+    require_prior_read=True,
     handler="claude_notebook_edit",
     normalize=lambda args: {"file_path": args["notebook_path"], **_endpoint_args(args)},
 )

@@ -358,6 +358,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             context_lines=int(args.get("context_lines") or 0),
             line_numbers=args.get("line_numbers") if args.get("line_numbers") is None else bool(args.get("line_numbers")),
             include_ignored=bool(args.get("include_ignored", False)),
+            hidden=bool(args.get("hidden", False)),
             offset=int(args.get("offset") or 0),
             limit=int(args.get("limit")) if args.get("limit") is not None else 100,
             timeout_ms=timeout_ms,

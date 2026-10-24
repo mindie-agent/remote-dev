@@ -298,7 +298,7 @@ def command_lines(cmd, max_chars=32768):
         proc.stderr.close()
 
 
-def collect_page(cmd, output_mode, offset, limit, max_line_chars, *, skip_zeros=False, char_budget=1000000):
+def collect_page(cmd, output_mode, offset, limit, max_line_chars, *, skip_zeros=False, char_budget=5000000):
     import contextlib
     matches, count, truncated_lines = [], 0, 0
     used_chars = 0
@@ -419,7 +419,7 @@ if op == "grep":
         fail("pattern_required", "RemoteGrep requires pattern")
     limit = int(payload["limit"]) if payload.get("limit") is not None else 100
     if limit == 0:
-        limit = 20000
+        limit = 100000
     offset = int(payload.get("offset") or 0)
     if offset < 0:
         fail("invalid_pagination", "offset must be >= 0")
@@ -441,6 +441,7 @@ if op == "grep":
     after_context = int(payload.get("after_context") or 0)
     context_lines = int(payload.get("context_lines") or 0)
     include_ignored = bool(payload.get("include_ignored", False))
+    hidden = bool(payload.get("hidden", False))
     line_numbers = payload.get("line_numbers")
     line_numbers = True if line_numbers is None else bool(line_numbers)
     if output_mode != "content" and (before_context or after_context or context_lines or only_matching):
@@ -461,6 +462,8 @@ if op == "grep":
             cmd.append("-i")
         if include_ignored:
             cmd.extend(["--no-ignore", "--hidden"])
+        elif hidden:
+            cmd.append("--hidden")
         if glob_pattern:
             cmd.extend(["--glob", glob_pattern])
         for inc in includes:

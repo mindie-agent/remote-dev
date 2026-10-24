@@ -22,6 +22,7 @@ from remote_dev.result import make_result, utc_now_iso
 
 REMOTE_IMAGE_PY = r'''
 import base64
+import io
 import json
 import pathlib
 import sys
@@ -29,6 +30,8 @@ import sys
 request = json.loads(sys.stdin.read())
 path = pathlib.Path(request["path"])
 limit = int(request["max_bytes"])
+region = request.get("region")
+max_edge = request.get("max_edge")
 if path.is_symlink():
     print(json.dumps({"status": "symlink_not_allowed", "error": "refusing to read a symlink as an image"})); raise SystemExit(0)
 if not path.is_file():
@@ -47,7 +50,64 @@ elif len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
     mime = "image/webp"
 else:
     print(json.dumps({"status": "unsupported_format", "error": "not a PNG, JPEG, GIF, or WebP image", "size": size})); raise SystemExit(0)
-print(json.dumps({"status": "ok", "mime_type": mime, "size": size, "data": base64.b64encode(data).decode("ascii")}))
+width = height = None
+original_width = original_height = None
+resized = False
+cropped = False
+if region is not None or max_edge is not None:
+    try:
+        from PIL import Image
+    except ImportError:
+        if region is not None:
+            print(json.dumps({"status": "region_unsupported", "error": "remote image region crops require Pillow on the target host; Pillow is unavailable under the isolated worker"}))
+            raise SystemExit(0)
+        print(json.dumps({"status": "ok", "mime_type": mime, "size": size,
+                          "data": base64.b64encode(data).decode("ascii"),
+                          "warning": "Pillow unavailable on the remote host; image was not downscaled"}))
+        raise SystemExit(0)
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+        original_width, original_height = image.size
+        if region is not None:
+            box = (int(region["x"]), int(region["y"]),
+                   int(region["x"]) + int(region["width"]),
+                   int(region["y"]) + int(region["height"]))
+            if box[0] < 0 or box[1] < 0 or box[2] > image.width or box[3] > image.height or box[2] <= box[0] or box[3] <= box[1]:
+                print(json.dumps({"status": "invalid_region", "error": f"region {region!r} is outside the {image.width}x{image.height} image"})); raise SystemExit(0)
+            image = image.crop(box)
+            cropped = True
+        if max_edge is not None and max(image.size) > int(max_edge):
+            image.thumbnail((int(max_edge), int(max_edge)), Image.Resampling.LANCZOS)
+            resized = True
+        width, height = image.size
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGBA" if "A" in image.mode else "RGB")
+        out = io.BytesIO()
+        if mime == "image/jpeg" and image.mode == "RGBA":
+            image = image.convert("RGB")
+        if mime == "image/png":
+            image.save(out, format="PNG", optimize=True)
+        elif mime == "image/gif":
+            image.save(out, format="PNG")
+            mime = "image/png"
+        elif mime == "image/webp":
+            image.save(out, format="WEBP", quality=85)
+        else:
+            image.save(out, format="JPEG", quality=85)
+        encoded = out.getvalue()
+        if len(encoded) > limit:
+            print(json.dumps({"status": "too_large", "error": f"processed image is {len(encoded)} bytes, over the {limit}-byte bound"})); raise SystemExit(0)
+        data = encoded
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(json.dumps({"status": "decode_failed", "error": f"failed to crop/downscale image: {exc}"})); raise SystemExit(0)
+print(json.dumps({"status": "ok", "mime_type": mime, "size": len(data),
+                  "data": base64.b64encode(data).decode("ascii"),
+                  "width": width, "height": height,
+                  "original_width": original_width, "original_height": original_height,
+                  "resized": resized, "cropped": cropped}))
 '''
 
 
@@ -56,6 +116,8 @@ def remote_read_image(
     *,
     file_path: str,
     max_bytes: int = 8 * 1024 * 1024,
+    region: dict[str, Any] | None = None,
+    max_edge: int | None = None,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started, start = utc_now_iso(), time.monotonic()
@@ -75,7 +137,7 @@ def remote_read_image(
     data = run_remote_python(
         endpoint,
         REMOTE_IMAGE_PY,
-        {"path": path, "max_bytes": int(max_bytes)},
+        {"path": path, "max_bytes": int(max_bytes), "region": region, "max_edge": max_edge},
         timeout_ms=timeout_ms,
     )
     status = str(data.get("status") or "failed")
@@ -102,7 +164,12 @@ def remote_read_image(
         started_at=started,
         duration_ms=int(round((time.monotonic() - start) * 1000)),
         preview={"content": f"image: {path} ({mime}, {size} bytes)"},
-        extra={"path": path, "mime_type": mime, "size": size},
+        extra={"path": path, "mime_type": mime, "size": size,
+               "width": data.get("width"), "height": data.get("height"),
+               "original_width": data.get("original_width"),
+               "original_height": data.get("original_height"),
+               "resized": bool(data.get("resized")), "cropped": bool(data.get("cropped")),
+               **({"warning": data["warning"]} if data.get("warning") else {})},
     )
     return {
         "text": result["summary"] + "\n",

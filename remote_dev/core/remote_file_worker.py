@@ -304,6 +304,48 @@ def main() -> None:
         node_paths = payload.get("node_paths")
         before = path.stat()
 
+        with path.open("rb") as prefix_stream:
+            raw_prefix = prefix_stream.read(2)
+        if raw_prefix in (b"\xff\xfe", b"\xfe\xff"):
+            raw_bytes = path.read_bytes()
+            try:
+                text = raw_bytes.decode("utf-16")
+            except UnicodeDecodeError as exc:
+                fail("binary_file", f"file has a UTF-16 BOM but does not decode as UTF-16: {exc}")
+            after = path.stat()
+            if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+                fail("file_changed", "file changed during read; retry to obtain a consistent read")
+            all_lines = text.splitlines()
+            total = len(all_lines)
+            start_index = max(0, offset - 1) if offset > 0 else max(0, total + offset)
+            selected_lines = all_lines[start_index:start_index + limit]
+            if column_offset and selected_lines:
+                selected_lines[0] = selected_lines[0][column_offset:]
+            numbered_lines = []
+            used = 0
+            for number, body_text in enumerate(selected_lines, start_index + 1):
+                body_text = body_text[:max_line_chars]
+                rendered = f"{number} | {body_text}"
+                if max_chars is not None and used + len(rendered) + 1 > max_chars and numbered_lines:
+                    break
+                numbered_lines.append(rendered)
+                used += len(rendered) + 1
+            start_line_no = start_index + 1 if total else 0
+            end_line_no = start_index + len(numbered_lines)
+            info = {
+                "path": str(path), "resolved_path": str(resolved), "size": after.st_size,
+                "mtime_ns": after.st_mtime_ns,
+                "sha256": sha256_bytes(raw_bytes) if verify else None,
+                "total_lines": total, "offset": offset, "limit": limit,
+                "line_start": start_line_no, "line_end": end_line_no,
+                "partial": start_index > 0 or end_line_no < total,
+                "content": "\n".join(numbered_lines),
+                "truncated_line_count": 0, "symlink": path.is_symlink(),
+                "content_verified": verify, "encoding": "utf-16",
+            }
+            print(json.dumps({"status": "partial" if info["partial"] else "ok", "file": info}, sort_keys=True))
+            raise SystemExit(0)
+
         if outline or (isinstance(node_paths, list) and node_paths):
             raw_bytes = path.read_bytes()
             if b"\x00" in raw_bytes[:8192]:
