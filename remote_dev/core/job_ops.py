@@ -333,8 +333,10 @@ def _recording_failure(endpoint, record, path, row, error, *, tool, started, sta
         "error_details": error_details(error),
         "observed_cursors": {name + "_offset": row.get(name + "_offset") for name in ("stdout", "stderr")},
     }
+    completed = bool(row.get("quiet")) and row.get("state") in TERMINAL_JOB_STATES
+    result["operation_completed"] = completed
     result.setdefault("error_details", {"category": "local_recording", "submission_state": "acknowledged", "retryable": False})
-    result["error_details"]["operation_completed"] = bool(row.get("quiet")) and row.get("state") in TERMINAL_JOB_STATES
+    result["error_details"]["operation_completed"] = completed
     message = "Remote result was received, but local output/cursor recording failed. Do not relaunch the command or resend acknowledged input."
     result["summary"] += " " + message
     result["warnings"].append(message)

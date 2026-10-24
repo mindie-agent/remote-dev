@@ -106,7 +106,12 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
             # execution outcome, keeping the recording_failure diagnostic in
             # structuredContent.
             error_outcome = details.get("outcome")
-            if details.get("status") == "local_recording_failed" and details.get("operation_completed") is True:
+            error_details = details.get("error_details") if isinstance(details.get("error_details"), dict) else {}
+            completed_locally = (
+                details.get("operation_completed") is True
+                or error_details.get("operation_completed") is True
+            )
+            if details.get("status") == "local_recording_failed" and completed_locally:
                 error_outcome = details.get("execution_outcome", error_outcome)
             # A command that really ran and returned a nonzero exit code is a
             # native tool result, not an MCP/helper failure. Keep the exit code

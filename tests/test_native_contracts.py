@@ -977,7 +977,8 @@ class FinalLogStopTests(unittest.TestCase):
             "result": {
                 "tool": "remote.job_stdin", "outcome": "failed",
                 "status": "local_recording_failed", "state": "failed", "exit_code": 7,
-                "execution_outcome": "success", "operation_completed": True,
+                "execution_outcome": "failed",
+                "error_details": {"operation_completed": True},
                 "local_recording": {"status": "failed", "stage": "save_output"},
             },
         }

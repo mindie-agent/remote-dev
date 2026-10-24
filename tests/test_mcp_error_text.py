@@ -52,6 +52,44 @@ class McpErrorTextTests(unittest.TestCase):
             "Remote command failed. Exit code: 3.\ncodex-final-ok\n",
         )
 
+    def test_local_recording_success_keeps_mcp_success(self) -> None:
+        result = {
+            "tool": "remote.job_stdin",
+            "outcome": "failed",
+            "status": "local_recording_failed",
+            "state": "succeeded",
+            "exit_code": 0,
+            "execution_outcome": "success",
+            "execution_status": "succeeded",
+            "error_details": {"operation_completed": True, "category": "local_recording"},
+            "local_recording": {"status": "failed", "stage": "save_output"},
+        }
+        payload = {"text": "Remote command completed.\nTASKOUTPUT_ZERO\nLocal output recording failed.\n", "result": result}
+        with patch.object(server, "call_tool", return_value=payload), \
+                patch.object(server, "runtime_status", return_value={}), patch.object(server, "send") as send:
+            server.handle({"jsonrpc": "2.0", "id": 0, "method": "tools/call", "params": {"name": "remote_TaskOutput"}})
+        sent = send.call_args.args[0]["result"]
+        self.assertFalse(sent["isError"])
+        self.assertIn("Local output recording failed", sent["content"][0]["text"])
+        self.assertEqual(sent["structuredContent"]["outcome"], "failed")
+
+    def test_local_recording_failure_keeps_mcp_error_for_exit7(self) -> None:
+        result = {
+            "tool": "remote.job_stdin",
+            "outcome": "failed",
+            "status": "local_recording_failed",
+            "state": "failed",
+            "exit_code": 7,
+            "execution_outcome": "failed",
+            "error_details": {"operation_completed": True, "category": "local_recording"},
+        }
+        payload = {"text": "Remote command failed. Exit code: 7.\nLocal output recording failed.\n", "result": result}
+        with patch.object(server, "call_tool", return_value=payload), \
+                patch.object(server, "runtime_status", return_value={}), patch.object(server, "send") as send:
+            server.handle({"jsonrpc": "2.0", "id": 0, "method": "tools/call", "params": {"name": "remote_TaskOutput"}})
+        sent = send.call_args.args[0]["result"]
+        self.assertTrue(sent["isError"])
+
     def test_cancellation_requested_is_not_an_mcp_error(self) -> None:
         payload = {
             "text": "cancellation-requested\njob killed\n",
