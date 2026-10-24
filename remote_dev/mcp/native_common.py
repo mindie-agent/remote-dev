@@ -130,7 +130,12 @@ def _refresh_job_output(job_id: str) -> dict[str, Any] | None:
     result = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(result, dict):
         return payload if isinstance(payload, dict) else None
-    if _status_query_failed(result) or result.get("outcome") == "failed":
+    completed_command = (
+        str(result.get("tool") or "").endswith(("bash", "job_stdin", "exec_command", "write_stdin", "shell"))
+        and result.get("state") in {"succeeded", "failed", "timeout", "cancelled"}
+        and type(result.get("exit_code")) is int
+    )
+    if result.get("outcome") == "failed" and not completed_command:
         return payload
     return None
 

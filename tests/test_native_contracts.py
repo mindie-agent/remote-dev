@@ -960,6 +960,17 @@ class FinalLogStopTests(unittest.TestCase):
         self.assertTrue(text.endswith("TAIL-LINE\n"))
         self.assertLessEqual(len(text.encode("utf-8")), 4096)
 
+    def test_refresh_job_output_accepts_completed_nonzero_command(self):
+        completed = {
+            "text": "Remote command failed. Exit code: 7.\n",
+            "result": {
+                "tool": "remote.job_stdin", "outcome": "failed", "status": "failed",
+                "state": "failed", "exit_code": 7,
+            },
+        }
+        with mock.patch("remote_dev.mcp.tools._call_canonical", return_value=completed):
+            self.assertIsNone(native_common._refresh_job_output("j"))
+
     def test_refresh_job_output_preserves_canonical_failure(self):
         failure = {
             "text": "Remote job j: failed\n",
