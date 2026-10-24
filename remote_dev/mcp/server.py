@@ -119,6 +119,15 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
                      or name.endswith("exec_command") or name.endswith("write_stdin")
                      or name.endswith("shell"))
             )
+            background_started = (
+                details.get("kind") == "background"
+                and details.get("jobId") not in (None, "")
+            )
+            if background_started:
+                # DSH's native background result is intentionally the minimal
+                # {kind:"background", jobId} shape and therefore has no
+                # outcome field. Starting a supervised job is a success.
+                error_outcome = "success"
             if completed_command:
                 error_outcome = "success"
             blocks = payload.get("content")
