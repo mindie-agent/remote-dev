@@ -843,7 +843,7 @@ def main() -> None:
                     prepared, max_chars, utf16_units, column_offset
                 )
         truncated_lines = sum(clipped for _, _, clipped in selected)
-        if truncated_lines and next_offset is None and selected:
+        if truncated_lines and next_offset is None and selected and not tail_read:
             last_index, last_body, _last_clipped = selected[-1]
             next_offset = last_index
             next_column_offset = _text_width(last_body, utf16_units)

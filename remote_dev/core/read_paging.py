@@ -280,7 +280,7 @@ def _format_tail_read(
         delivered.append({**entry, "text": entry["full_text"], "units": entry["full_units"]})
         remaining -= separator + prefix_width + entry["full_units"]
     delivered.reverse()
-    if not delivered:
+    if not delivered or any(entry["clipped"] for entry in delivered):
         return _read_too_small(result, file_info, max_chars)
     next_cursor = _read_next_cursor(delivered, entries, file_info, range_end)
     text, page = _render_read_page(
@@ -289,7 +289,7 @@ def _format_tail_read(
     for _ in range(16):
         if _read_text_units(text, utf16_units) <= max_chars:
             return _finalize_read_page(result, file_info, text, page, utf16_units)
-        if len(delivered) <= 1:
+        if len(delivered) <= 1 or any(entry["clipped"] for entry in delivered):
             return _read_too_small(result, file_info, max_chars)
         delivered.pop(0)
         next_cursor = _read_next_cursor(delivered, entries, file_info, range_end)
