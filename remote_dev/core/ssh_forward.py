@@ -227,7 +227,7 @@ class LocalForward:
         except Exception as cleanup_error:
             if error is None:
                 raise
-            transport.record_cleanup_failure(error, cleanup_error)
+            record_cleanup_failure(error, cleanup_error)
 
 
 def open_local_forward(

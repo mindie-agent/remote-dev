@@ -479,12 +479,7 @@ def _read_attached(
                 # grandchildren can close stdout/stderr while the child still
                 # has work left.
                 if proc.poll() is not None:
-                    try:
-                        returncode = proc.wait(timeout=5.0)
-                    except _resolve("subprocess").TimeoutExpired:
-                        with contextlib.suppress(OSError):
-                            proc.kill()
-                        returncode = proc.wait(timeout=5.0)
+                    returncode = proc.wait(timeout=5.0)
                     return _resolve("RemoteCompleted")(
                         returncode,
                         captured_stdout() if capture else "",
@@ -567,12 +562,7 @@ def _read_attached(
                 )
                 open_fds.discard(fd)
                 close_channel(channel)
-            try:
-                returncode = proc.wait(timeout=5.0)
-            except _resolve("subprocess").TimeoutExpired:
-                with contextlib.suppress(OSError):
-                    proc.kill()
-                returncode = proc.wait(timeout=5.0)
+            returncode = proc.wait(timeout=5.0)
             return _resolve("RemoteCompleted")(
                 returncode,
                 captured_stdout() if capture else "",

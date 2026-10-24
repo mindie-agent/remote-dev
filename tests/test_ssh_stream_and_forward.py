@@ -484,6 +484,22 @@ class LocalForwardTests(unittest.TestCase):
         self.assertIs(caught.exception, primary)
         self.assertIn("cleanup fixture", error_details(primary)["cleanup_error"])
 
+    def test_context_exit_preserves_primary_error_when_close_fails(self) -> None:
+        # `with <forward> as fwd:` that raises must keep the body error and
+        # attach the cleanup failure to it, never mask it with a NameError.
+        from remote_dev.core.errors import error_details
+        forward = ssh_transport.LocalForward(
+            owner=mock.Mock(),
+            local_host="127.0.0.1",
+            local_port=1,
+            remote_host="127.0.0.1",
+            remote_port=2,
+        )
+        primary = RuntimeError("tunnel consumer failed")
+        with mock.patch.object(ssh_transport.LocalForward, "close", side_effect=OSError("close fixture")):
+            forward.__exit__(type(primary), primary, primary.__traceback__)
+        self.assertIn("close fixture", error_details(primary)["cleanup_error"])
+
     def test_forward_argv_is_long_stream_plus_exit_on_forward_failure(self) -> None:
         with mock.patch.object(ssh_transport, "_MUX_READY", True):
             with mock.patch.dict(os.environ):
