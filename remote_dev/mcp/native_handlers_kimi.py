@@ -65,6 +65,8 @@ def kimi_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any],
         lines.append(f"pid: {pid}")
     exit_code = remote_status.get("exit_code")
     if exit_code is None:
+        exit_code = (remote_status.get("result") or {}).get("exit_code")
+    if exit_code is None:
         exit_code = result.get("exit_code")
     if exit_code is not None:
         lines.append(f"exit_code: {exit_code}")
