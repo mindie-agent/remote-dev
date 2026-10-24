@@ -214,6 +214,10 @@ def dsh_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normali
         })
         if kind == "promoted":
             native_result["jobId"] = result.get("job_id") or result.get("session_id")
+    if kind == "background":
+        job_id = native_result["jobId"]
+        payload["result"] = {"kind": "background", "jobId": job_id}
+        return payload
     result.update(native_result)
     return payload
 
