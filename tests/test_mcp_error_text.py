@@ -35,6 +35,18 @@ class McpErrorTextTests(unittest.TestCase):
         self.assertEqual(result["structuredContent"]["kind"], "background")
         self.assertEqual(result["structuredContent"]["jobId"], "job-final")
 
+    def test_cancellation_requested_is_not_an_mcp_error(self) -> None:
+        payload = {
+            "text": "cancellation-requested\njob killed\n",
+            "result": {"outcome": "cancellation-requested", "status": "cancelled"},
+        }
+        with patch.object(server, "call_tool", return_value=payload), \
+                patch.object(server, "runtime_status", return_value={}), patch.object(server, "send") as send:
+            server.handle({"jsonrpc": "2.0", "id": 0, "method": "tools/call", "params": {"name": "remote_job_kill"}})
+        result = send.call_args.args[0]["result"]
+        self.assertFalse(result["isError"])
+        self.assertTrue(result["content"][0]["text"].startswith("cancellation-requested"))
+
     def test_succeeded_remote_result_survives_local_recording_failure(self) -> None:
         payload = {
             "text": "remote write completed\nlocal recording failed\n",
