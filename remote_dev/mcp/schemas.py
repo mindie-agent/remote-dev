@@ -71,7 +71,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "verify_content": {"type": "boolean", "default": True, "description": "Compute full SHA256 and exact line count for edit concurrency. False bounds positive-offset log reads to the requested window and reports unknown total_lines when more data exists."},
             "allow_symlink": {"type": "boolean", "default": False},
             "offset": {"type": "integer", "default": 1, "description": "1-based first line. Negative values count back from the end of the file."},
-            "limit": {"type": "integer", "default": 200, "maximum": 5000},
+            "limit": {"type": "integer", "default": 200, "maximum": 20000},
             "max_chars": {"type": "integer", "minimum": 1, "description": "Optional character budget for the returned text, including line-number prefixes. Native Kimi Read advertises 100000 by default and 500000 maximum; canonical calls leave it unset."},
             "column_offset": {"type": "integer", "minimum": 0, "description": "Zero-based character offset within the first selected line of a forward read, excluding the line-number prefix."},
             "line_offset": {"type": "integer", "description": "Alias of offset (Kimi native Read habit)."},

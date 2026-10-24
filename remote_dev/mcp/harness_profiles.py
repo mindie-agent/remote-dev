@@ -114,8 +114,9 @@ def _kimi_read(args: dict[str, Any]) -> dict[str, Any]:
         out["limit"] = int(args["n_lines"])
     else:
         # Native Read has no fixed line-count cap; the character budget bounds
-        # the page. This is a transport guard, not a native default.
-        out["limit"] = 2000
+        # the page. This is a transport guard large enough for the 500000-char
+        # native maximum even on one-character lines.
+        out["limit"] = 20000
     if args.get("max_chars") is not None:
         out["max_chars"] = int(args["max_chars"])
     if args.get("column_offset") is not None:
@@ -1180,8 +1181,24 @@ CODEX_VIEW_IMAGE = NativeToolSpec(
     normalize=lambda args: {"file_path": args["path"], **_endpoint_args(args)},
 )
 
+CODEX_APPLY_PATCH = NativeToolSpec(
+    native_name="apply_patch",
+    canonical="remote.apply_patch",
+    description="Apply a Codex apply_patch payload. Native apply_patch is freeform; over MCP the raw patch text is passed in `patch`.",
+    properties={
+        "patch": {"type": "string", "minLength": 1, "description": "Raw *** Begin Patch ... *** End Patch text."},
+    },
+    required=("patch",),
+    compat_properties={
+        "command": {"type": "string"},
+        "cwd": {"type": "string"},
+        "timeout_ms": {"type": "integer"},
+    },
+    normalize=lambda args: {"patch": args["patch"], **_endpoint_args(args)},
+)
+
 NATIVE_TOOLS["codex"] = {
-    spec.native_name: spec for spec in (CODEX_EXEC, CODEX_WRITE_STDIN, CODEX_VIEW_IMAGE)
+    spec.native_name: spec for spec in (CODEX_EXEC, CODEX_WRITE_STDIN, CODEX_VIEW_IMAGE, CODEX_APPLY_PATCH)
 }
 
 NATIVE_TOOLS["claude"] = {

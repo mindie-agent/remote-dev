@@ -149,13 +149,20 @@ def kimi_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any],
     job = status_payload["result"].get("job") or {}
     state = str(job.get("state") or status_payload["result"].get("status") or "unknown")
     native_status = _native_job_status(state)
-    tail_payload = _call_canonical(
-        "remote.job_tail", {"job_id": job_id, "lines": 300, "stream": "both", "yield_time_ms": 0}
-    )
-    tail = str(tail_payload.get("text") or "")
-    # The canonical tail is already bounded; expose only the body under the
-    # native [output] marker.
+    from remote_dev.core.state_store import find_job_record
+
+    found = find_job_record(job_id)
+    preview, truncated = ("", False)
     output_path = _record_output_path(record)
+    if found:
+        stdout, out_truncated = _tail_text(_job_file(found[0], "stdout"), 32768)
+        stderr, err_truncated = _tail_text(_job_file(found[0], "stderr"), 32768)
+        preview = stdout
+        if stderr:
+            if preview and not preview.endswith("\n"):
+                preview += "\n"
+            preview += stderr
+        truncated = out_truncated or err_truncated
     remote_status = job.get("remote_status") or {}
     result = job.get("result") or {}
     lines = [
@@ -180,12 +187,13 @@ def kimi_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any],
             lines.append(f"stop_reason: {reason}")
     if output_path:
         lines.append(f"output_path: {output_path}")
-    lines.extend(["", "[output]", tail.strip() or "[no output available]"])
+    lines.append(f"output_truncated: {str(truncated).lower()}")
+    lines.extend(["", "[output]", preview.strip() or "[no output available]"])
     text = "\n".join(lines)
-    result_payload = dict(tail_payload)
+    result_payload = dict(status_payload)
     result_payload["text"] = text
     result_payload["result"] = {
-        **tail_payload.get("result", {}),
+        **status_payload.get("result", {}),
         "tool": spec.wire,
         "status": native_status,
         "job_id": job_id,
@@ -666,10 +674,52 @@ def claude_read(profile: str, spec: NativeToolSpec, native: dict[str, Any], norm
             "use remote_artifact_pull to fetch the PDF and read it locally"
         )
     if suffix == ".ipynb":
-        raise caller_error(
-            "Claude Read notebook cell rendering is not available over remote-dev; "
-            "the .ipynb file is JSON text and can be read with remote_Read only as raw text"
+        from remote_dev.core.endpoint import resolve_endpoint
+        from remote_dev.core.text_ops import remote_read_utf8_text
+        from remote_dev.result import make_result
+
+        endpoint = resolve_endpoint(dict(normalized))
+        fetched = remote_read_utf8_text(endpoint, file_path=str(normalized["file_path"]))
+        if fetched["result"].get("status") != "ok":
+            return fetched
+        import json
+
+        try:
+            notebook = json.loads(fetched["raw_text"])
+            cells = notebook.get("cells") or []
+        except (ValueError, AttributeError) as exc:
+            raise caller_error(f"remote notebook is not valid .ipynb JSON: {exc}") from exc
+        sections = [f"Notebook {normalized['file_path']} ({len(cells)} cells)"]
+        for index, cell in enumerate(cells):
+            if not isinstance(cell, dict):
+                continue
+            source = cell.get("source") or []
+            if isinstance(source, list):
+                source = "".join(str(part) for part in source)
+            sections.extend(["", f"# Cell {index} [{cell.get('cell_type', 'unknown')}]", str(source)])
+            outputs = cell.get("outputs") or []
+            if outputs:
+                sections.append("Outputs:")
+                for output in outputs:
+                    if not isinstance(output, dict):
+                        continue
+                    text = output.get("text")
+                    if isinstance(text, list):
+                        text = "".join(str(part) for part in text)
+                    if text:
+                        sections.append(str(text).rstrip())
+        text = "\n".join(sections)
+        result = make_result(
+            tool=spec.wire,
+            target=endpoint.to_result_target(),
+            outcome="success",
+            status="ok",
+            summary=f"RemoteRead notebook {normalized['file_path']} ({len(cells)} cells).",
+            preview={"content": text[:4000]},
+            extra={"cells": len(cells), "path": normalized["file_path"]},
         )
+        result["file"] = {"path": normalized["file_path"], "cells": len(cells)}
+        return {"text": text, "result": result}
     payload = call_canonical("remote.read", normalized)
     payload["result"]["tool"] = spec.wire
     return payload
