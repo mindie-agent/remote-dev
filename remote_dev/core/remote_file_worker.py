@@ -250,6 +250,8 @@ def main() -> None:
         path, resolved = resolve_path(payload["file_path"], root, cwd)
         if path.is_dir():
             fail("is_directory", f"RemoteRead reads files, not directories: {path}")
+        if path.suffix.lower() == ".pdf":
+            fail("pdf_unsupported", "PDF page rendering is not available over remote-dev; use remote_artifact_pull and a local PDF reader")
         start_line = payload.get("start_line")
         end_line = payload.get("end_line")
         offset = int(payload.get("offset") or 1)

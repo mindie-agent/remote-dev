@@ -277,6 +277,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             yield_time_ms=int(args["yield_time_ms"]) if args.get("yield_time_ms") is not None else None,
             max_output_tokens=int(args["max_output_tokens"]) if args.get("max_output_tokens") is not None else None,
             tty=bool(args.get("tty", False)),
+            job_id=args.get("job_id"),
         )
     if name == "remote.read":
         assert endpoint is not None
@@ -295,6 +296,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             verify_content=bool(args.get("verify_content", True)),
             max_chars=int(args["max_chars"]) if args.get("max_chars") is not None else None,
             column_offset=int(args.get("column_offset") or 0),
+            pages=args.get("pages"),
             client_context_id=args.get("client_context_id"),
             timeout_ms=timeout_ms,
         )

@@ -70,6 +70,7 @@ def remote_read(
     verify_content: bool = True,
     max_chars: int | None = None,
     column_offset: int = 0,
+    pages: str | None = None,
     client_context_id: str | None = None,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -107,6 +108,8 @@ def remote_read(
         payload_req["max_chars"] = int(max_chars)
     if column_offset:
         payload_req["column_offset"] = int(column_offset)
+    if pages is not None:
+        payload_req["pages"] = str(pages)
     if start_line is not None:
         payload_req["start_line"] = int(start_line)
     if end_line is not None:

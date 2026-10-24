@@ -45,7 +45,7 @@ class CatalogTests(unittest.TestCase):
     def test_canonical_table_stays_19(self) -> None:
         self.assertEqual(len(tools.harness_catalog("canonical")), 19)
         self.assertEqual(len(tools.harness_catalog("kimi")), 29)
-        self.assertEqual(len(tools.harness_catalog("claude")), 29)
+        self.assertEqual(len(tools.harness_catalog("claude")), 31)
         self.assertEqual(len(tools.harness_catalog("dsh")), 22)
         self.assertEqual(len(tools.harness_catalog("codex")), 22)
 
@@ -84,9 +84,9 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(job["required"], ["job_id"])
         self.assertIn("wait", job["properties"])
         self.assertIn("timeout_ms", job["properties"])
-        # Canonical-compatibility fields stay accepted and advertised on a
-        # colliding portable alias; native fields above remain authoritative.
-        self.assertIn("lines", job["properties"])
+        # Canonical-compatibility fields are accepted server-side but never
+        # advertised on the native wire schema.
+        self.assertNotIn("lines", job["properties"])
         read = by_name["remote_read"]["inputSchema"]
         self.assertEqual(read["properties"]["limit"]["default"], 2000)
         self.assertEqual(read["properties"]["limit"]["maximum"], 2000)

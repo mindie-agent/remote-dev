@@ -10,7 +10,7 @@ never by inspecting tool arguments.
 | :--- | :--- | :--- |
 | `canonical` | standalone default | none; 19 portable `remote_*` names |
 | `codex` | Codex plugin MCP launcher | `remote_exec_command`, `remote_write_stdin`, `remote_view_image`; `remote_apply_patch` is the canonical tool with a `patch` string because native `apply_patch` is freeform |
-| `claude` | Claude Code plugin MCP launcher | `remote_Read`, `remote_Write`, `remote_Edit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_TaskOutput`, `remote_BashOutput`, `remote_TaskStop`, `remote_KillShell` |
+| `claude` | Claude Code plugin MCP launcher | `remote_Read`, `remote_Write`, `remote_Edit`, `remote_NotebookEdit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_TaskOutput`, `remote_BashOutput`, `remote_TaskList`, `remote_TaskStop`, `remote_KillShell` |
 | `kimi` | Kimi Code plugin MCP launcher | `remote_Read`, `remote_Write`, `remote_Edit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_ReadMediaFile`, `remote_TaskOutput`, `remote_TaskStop`, `remote_TaskList` |
 | `dsh` | DSH plugin launcher | `remote_read`, `remote_write`, `remote_edit`, `remote_bash`, `remote_glob`, `remote_grep`, `remote_read_image`, `remote_job_output`, `remote_job_list`, `remote_job_kill` |
 
@@ -73,10 +73,17 @@ existing `remote_*` call does not break.
 
 Image reads (Claude `Read` on PNG/JPEG/GIF/WebP, Kimi `ReadMediaFile`, DSH
 `read_image`, Codex `view_image`) return a bounded MCP image block plus a text
-receipt. PDF page rendering and Kimi image-region crops are not implemented
-remotely; the tools return an explicit error instead of pretending success.
-Notebook cell rendering/editing is not implemented; `.ipynb` is readable as
-JSON text, not as native cells.
+receipt. Claude `Read` renders `.ipynb` cells and outputs as text, and
+`NotebookEdit` replaces/inserts/deletes cells by reading and atomically
+rewriting the notebook JSON. PDF page rendering and Kimi image-region crops
+are not implemented remotely; the tools return an explicit error instead of
+pretending success. Images are returned at original resolution unless the
+native size bound is exceeded; automatic downscaling is not replicated.
+
+Claude `TaskList` is the host task registry in the native client; over
+remote-dev it lists the scoped remote jobs (the remote task registry), not
+unrelated host subagent tasks. `TaskOutput` remains the background-output
+tool.
 
 Host-local permission/escalation arguments are never interpreted as remote
 authorization. Claude `dangerouslyDisableSandbox`, DSH `sandbox_permissions`/

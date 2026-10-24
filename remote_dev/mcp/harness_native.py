@@ -130,6 +130,16 @@ def _record_output_path(record: dict[str, Any], stream: str = "stdout") -> str |
     return f"{remote_dir}/{stream}.log"
 
 
+def _live_job(job_id: str) -> tuple[str, dict[str, Any]]:
+    from remote_dev.mcp.tools import _call_canonical
+
+    payload = _call_canonical("remote.job_status", {"job_id": job_id})
+    result = payload.get("result") or {}
+    job = result.get("job") or {}
+    state = str(result.get("status") or job.get("state") or "unknown")
+    return state, job
+
+
 def _job_result(job_id: str) -> dict[str, Any]:
     from remote_dev.mcp.tools import _call_canonical
 
@@ -147,10 +157,11 @@ def kimi_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any],
     _assert_visible(record)
     status_payload = _call_canonical("remote.job_status", {"job_id": job_id})
     job = status_payload["result"].get("job") or {}
-    state = str(job.get("state") or status_payload["result"].get("status") or "unknown")
+    state = str(status_payload["result"].get("status") or job.get("state") or "unknown")
     native_status = _native_job_status(state)
     from remote_dev.core.state_store import find_job_record
 
+    _refresh_job_output(job_id)
     found = find_job_record(job_id)
     preview, truncated = ("", False)
     output_path = _record_output_path(record)
@@ -215,7 +226,7 @@ def kimi_task_stop(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
     _assert_visible(record)
     status_payload = _call_canonical("remote.job_status", {"job_id": job_id})
     job = status_payload["result"].get("job") or {}
-    state = str(job.get("state") or status_payload["result"].get("status") or "unknown")
+    state = str(status_payload["result"].get("status") or job.get("state") or "unknown")
     if state in _TERMINAL:
         payload = dict(status_payload)
         payload["text"] = f"task_id: {job_id}\nstatus: {_native_job_status(state)}\nreason: {reason}\n"
@@ -249,9 +260,11 @@ def kimi_task_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
         for record in list_job_records(endpoint_id):
             if record.get("session_scope") != scope:
                 continue
-            state = str(record.get("state") or "unknown")
-            # The local record is not authoritative for live state; the
-            # supervisor status is. Only use it for ordering here.
+            try:
+                state, _job = _live_job(str(record.get("job_id")))
+            except (ValueError, TimeoutError, OSError):
+                state = str(record.get("state") or "unknown")
+            record = {**record, "state": state}
             if active_only and state in _TERMINAL:
                 continue
             jobs.append(record)
@@ -381,7 +394,11 @@ def dsh_job_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], nor
         for record in list_job_records(endpoint_id):
             if record.get("session_scope") != scope:
                 continue
-            jobs.append(record)
+            try:
+                state, _job = _live_job(str(record.get("job_id")))
+            except (ValueError, TimeoutError, OSError):
+                state = str(record.get("state") or "unknown")
+            jobs.append({**record, "state": state})
     jobs.sort(key=lambda item: str(item.get("started_at") or ""))
     projections = [_dsh_job(record) for record in jobs]
     text = "(no background jobs)" if not projections else "\n".join(
@@ -408,7 +425,10 @@ def dsh_job_kill(profile: str, spec: NativeToolSpec, native: dict[str, Any], nor
     reason = str(native.get("reason") or "")
     record = _job_record(job_id)
     _assert_visible(record)
-    state = str(record.get("state") or "unknown")
+    try:
+        state, _live = _live_job(job_id)
+    except (ValueError, TimeoutError, OSError):
+        state = str(record.get("state") or "unknown")
     if state in _TERMINAL:
         outcome = "already-finished"
         payload = _call_canonical("remote.job_status", {"job_id": job_id})
@@ -428,6 +448,27 @@ def dsh_job_kill(profile: str, spec: NativeToolSpec, native: dict[str, Any], nor
 # ---------------------------------------------------------------------------
 # Claude Code native task tools
 # ---------------------------------------------------------------------------
+
+def _refresh_job_output(job_id: str) -> None:
+    """Pull pending supervisor output into the local job logs once.
+
+    Native TaskOutput/TaskList read the task's current output without taking
+    over the DSH-style consuming cursor. The canonical stdin poll with empty
+    chars is the non-mutating observation path that commits new bytes to the
+    local log files.
+    """
+    from remote_dev.mcp.tools import _call_canonical
+
+    try:
+        _call_canonical(
+            "remote.job_stdin",
+            {"job_id": job_id, "chars": "", "yield_time_ms": 0, "max_output_tokens": 8192},
+        )
+    except (ValueError, TimeoutError, OSError):
+        # The status call below still reports the job; output may be
+        # unavailable. Never synthesize a success body.
+        return
+
 
 def _job_file(path: Any, stream: str) -> Any:
     from pathlib import Path
@@ -470,7 +511,7 @@ def claude_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any
     while True:
         status_payload = _call_canonical("remote.job_status", {"job_id": job_id})
         job = status_payload["result"].get("job") or {}
-        state = str(job.get("state") or status_payload["result"].get("status") or "unknown")
+        state = str(status_payload["result"].get("status") or job.get("state") or "unknown")
         if state in _TERMINAL:
             retrieval = "success"
             break
@@ -482,6 +523,7 @@ def claude_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any
     exit_code = remote_status.get("exit_code")
     if exit_code is None:
         exit_code = ((remote_status.get("result") or {}).get("exit_code"))
+    _refresh_job_output(job_id)
     stdout, stdout_truncated = _tail_text(_job_file(record_path, "stdout"))
     stderr, stderr_truncated = _tail_text(_job_file(record_path, "stderr"))
     output = stdout
@@ -531,7 +573,7 @@ def claude_task_stop(profile: str, spec: NativeToolSpec, native: dict[str, Any],
     _assert_visible(record)
     status_payload = _call_canonical("remote.job_status", {"job_id": job_id})
     job = status_payload["result"].get("job") or {}
-    state = str(job.get("state") or status_payload["result"].get("status") or "unknown")
+    state = str(status_payload["result"].get("status") or job.get("state") or "unknown")
     if state in _TERMINAL:
         # Claude TaskStop treats an already-terminal task as a successful
         # no-op and returns its current status.
@@ -570,6 +612,13 @@ def _codex_output(result: Mapping[str, Any]) -> str:
 
 @handler("codex_exec")
 def codex_exec(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
+    import time
+
+    # Codex models sessions with a numeric id. Allocate one at launch so
+    # write_stdin can round-trip the exact native type instead of inventing a
+    # string alias.
+    normalized = dict(normalized)
+    normalized.setdefault("job_id", str(time.time_ns()))
     payload = call_canonical("remote.bash", normalized)
     result = payload.get("result") or {}
     state = str(result.get("state") or result.get("status") or "unknown")
@@ -668,11 +717,6 @@ def claude_read(profile: str, spec: NativeToolSpec, native: dict[str, Any], norm
         payload = _read_image_payload(normalized)
         payload["result"]["tool"] = spec.wire
         return payload
-    if suffix == ".pdf":
-        raise caller_error(
-            "Claude Read PDF page rendering is not available over remote-dev; "
-            "use remote_artifact_pull to fetch the PDF and read it locally"
-        )
     if suffix == ".ipynb":
         from remote_dev.core.endpoint import resolve_endpoint
         from remote_dev.core.text_ops import remote_read_utf8_text
@@ -736,3 +780,128 @@ def kimi_read_media(profile: str, spec: NativeToolSpec, native: dict[str, Any], 
     payload["result"]["tool"] = spec.wire
     payload["result"]["full_resolution"] = bool(native.get("full_resolution", False))
     return payload
+
+
+@handler("claude_notebook_edit")
+def claude_notebook_edit(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
+    import json
+    from remote_dev.core.endpoint import resolve_endpoint
+    from remote_dev.core.text_ops import remote_read_utf8_text
+    from remote_dev.mcp.tools import _call_canonical
+    from remote_dev.result import make_result
+
+    endpoint = resolve_endpoint(dict(normalized))
+    fetched = remote_read_utf8_text(endpoint, file_path=str(normalized["file_path"]))
+    if fetched["result"].get("status") != "ok":
+        return fetched
+    try:
+        notebook = json.loads(fetched["raw_text"])
+    except ValueError as exc:
+        raise caller_error(f"remote notebook is not valid .ipynb JSON: {exc}") from exc
+    cells = notebook.get("cells")
+    if not isinstance(cells, list):
+        raise caller_error("remote .ipynb has no cells array")
+    cell_id = native.get("cell_id")
+    mode = str(native.get("edit_mode") or "replace")
+
+    def index_of() -> int:
+        if not cell_id:
+            raise caller_error(f"NotebookEdit edit_mode={mode} requires cell_id")
+        for index, cell in enumerate(cells):
+            if isinstance(cell, dict) and (cell.get("id") == cell_id or f"cell-{index}" == cell_id):
+                return index
+        raise caller_error(f"NotebookEdit cell_id {cell_id!r} was not found")
+
+    if mode == "delete":
+        del cells[index_of()]
+    elif mode == "insert":
+        cell_type = native.get("cell_type")
+        if cell_type not in {"code", "markdown"}:
+            raise caller_error("NotebookEdit insert requires cell_type code or markdown")
+        new_cell: dict[str, Any] = {
+            "cell_type": cell_type,
+            "metadata": {},
+            "source": [str(native["new_source"])],
+        }
+        if cell_type == "code":
+            new_cell["execution_count"] = None
+            new_cell["outputs"] = []
+        if cell_id:
+            cells.insert(index_of() + 1, new_cell)
+        else:
+            cells.insert(0, new_cell)
+    elif mode == "replace":
+        index = index_of()
+        cell = cells[index]
+        if not isinstance(cell, dict):
+            raise caller_error("NotebookEdit target cell is not an object")
+        cell["source"] = [str(native["new_source"])]
+        if native.get("cell_type") is not None:
+            cell["cell_type"] = native["cell_type"]
+    else:
+        raise caller_error(f"NotebookEdit unknown edit_mode {mode!r}")
+    content = json.dumps(notebook, ensure_ascii=False, indent=1) + "\n"
+    write_payload = _call_canonical(
+        "remote.write",
+        {
+            **{key: normalized[key] for key in ("host", "port", "user", "container", "root", "cwd", "runtime_env", "identity_file", "connect_timeout_ms", "runtime_env_file", "alias") if key in normalized},
+            "file_path": normalized["file_path"],
+            "content": content,
+            "overwrite": True,
+            "create_dirs": True,
+        },
+    )
+    if write_payload.get("result", {}).get("outcome") != "success":
+        return write_payload
+    text = f"Updated notebook {normalized['file_path']} ({len(cells)} cells, {mode})."
+    result = make_result(
+        tool=spec.wire,
+        target=endpoint.to_result_target(),
+        outcome="success",
+        status="ok",
+        summary=text,
+        preview={"content": text},
+        extra={"cells": len(cells), "edit_mode": mode, "path": normalized["file_path"]},
+    )
+    return {"text": text + "\n", "result": result}
+
+
+@handler("claude_task_list")
+def claude_task_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
+    from remote_dev.core.state_store import list_endpoint_records, list_job_records, resolve_ledger_scope
+    from remote_dev.result import make_result
+
+    scope = resolve_ledger_scope()
+    tasks = []
+    for endpoint_record in list_endpoint_records():
+        endpoint_id = str(endpoint_record.get("endpoint_id") or "")
+        if not endpoint_id:
+            continue
+        for record in list_job_records(endpoint_id):
+            if record.get("session_scope") != scope:
+                continue
+            job_id = str(record.get("job_id"))
+            try:
+                state, _job = _live_job(job_id)
+            except (ValueError, TimeoutError, OSError):
+                state = str(record.get("state") or "unknown")
+            status = "in_progress" if state in {"prepared", "running"} else "completed"
+            tasks.append({
+                "id": job_id,
+                "subject": str(record.get("description") or record.get("command_preview") or job_id),
+                "status": status,
+                "owner": None,
+                "blockedBy": [],
+            })
+    text = "\n".join(f"#{task['id']} [{task['status']}] {task['subject']}" for task in tasks) or "No tasks found."
+    return {
+        "text": text + "\n",
+        "result": make_result(
+            tool=spec.wire,
+            target={"kind": "local_state"},
+            outcome="success",
+            status="ok",
+            summary=f"Listed {len(tasks)} task(s).",
+            extra={"tasks": tasks, "task_count": len(tasks)},
+        ),
+    }

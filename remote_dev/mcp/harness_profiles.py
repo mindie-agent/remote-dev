@@ -71,6 +71,7 @@ class NativeToolSpec:
     defaults: Mapping[str, Any] = field(default_factory=dict)
     handler: str = "canonical"
     compat_properties: Mapping[str, Any] = field(default_factory=dict)
+    additional_properties: bool = False
     normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     @property
@@ -154,15 +155,21 @@ def _kimi_bash(args: dict[str, Any]) -> dict[str, Any]:
     if timeout_s is None:
         timeout_s = 600 if background else 60
     timeout_s = int(timeout_s)
-    if background and args.get("disable_timeout") is True:
-        out.pop("timeout_ms", None)
+    cap = 86400 if background else 300
+    if timeout_s > cap:
+        raise HarnessProfileError(
+            f"remote_Bash timeout must be <= {cap}s for {'background' if background else 'foreground'} calls"
+        )
+    if background:
+        if args.get("disable_timeout") is True:
+            out.pop("timeout_ms", None)
+        else:
+            out["timeout_ms"] = timeout_s * 1000
     else:
-        cap = 86400 if background else 300
-        if timeout_s > cap:
-            raise HarnessProfileError(
-                f"remote_Bash timeout must be <= {cap}s for {'background' if background else 'foreground'} calls"
-            )
-        out["timeout_ms"] = timeout_s * 1000
+        # Kimi auto-backgrounds a foreground command that reaches its timeout
+        # when task tools are active (remote-dev always has a job supervisor),
+        # so the native timeout is a yield/promotion budget, not a kill.
+        out["yield_time_ms"] = timeout_s * 1000
     if args.get("description") is not None:
         out["description"] = args["description"]
     if background:
@@ -400,14 +407,14 @@ def spec_by_wire_any_profile(name: str) -> tuple[str, NativeToolSpec] | None:
 
 
 def native_input_schema(spec: NativeToolSpec, endpoint_props: Mapping[str, Any]) -> dict[str, Any]:
-    properties: dict[str, Any] = {**endpoint_props, **spec.properties}
-    for key, value in spec.compat_properties.items():
-        properties.setdefault(key, value)
+    # Compatibility fields are accepted by the server but are not advertised
+    # on the native wire schema. Only the native fields and the explicit remote
+    # target fields belong in tools/list.
     return {
         "type": "object",
-        "properties": properties,
+        "properties": {**endpoint_props, **spec.properties},
         "required": list(spec.required),
-        "additionalProperties": False,
+        "additionalProperties": bool(spec.additional_properties),
     }
 
 
@@ -647,6 +654,7 @@ DSH_READ = NativeToolSpec(
         "node_paths": {"type": "array", "items": {"type": "string"}},
         "client_context_id": {"type": "string"},
     },
+    additional_properties=True,
     normalize=_dsh_read,
 )
 
@@ -657,7 +665,6 @@ DSH_WRITE = NativeToolSpec(
     properties={
         "file_path": {"type": "string", "minLength": 1},
         "content": {"type": "string"},
-        **_DSH_SANDBOX_PROPERTIES,
     },
     required=("file_path", "content"),
     compat_properties={
@@ -669,6 +676,7 @@ DSH_WRITE = NativeToolSpec(
         "description": {"type": "string"},
         "client_context_id": {"type": "string"},
     },
+    additional_properties=True,
     normalize=_dsh_write,
 )
 
@@ -681,7 +689,6 @@ DSH_EDIT = NativeToolSpec(
         "old_string": {"type": "string", "minLength": 1},
         "new_string": {"type": "string"},
         "replace_all": {"type": "boolean", "default": False},
-        **_DSH_SANDBOX_PROPERTIES,
     },
     required=("file_path", "old_string", "new_string"),
     defaults={"replace_all": False},
@@ -693,6 +700,7 @@ DSH_EDIT = NativeToolSpec(
         "description": {"type": "string"},
         "client_context_id": {"type": "string"},
     },
+    additional_properties=True,
     normalize=_dsh_edit,
 )
 
@@ -715,9 +723,9 @@ DSH_BASH = NativeToolSpec(
         "yield_time_ms": {"type": "integer"},
         "max_output_tokens": {"type": "integer"},
         "env": {"type": "object"},
-        "runtime_env": {"type": "boolean"},
         "tty": {"type": "boolean"},
     },
+    additional_properties=True,
     normalize=_dsh_bash,
 )
 
@@ -741,6 +749,7 @@ DSH_GLOB = NativeToolSpec(
         "max_depth": {"type": "integer"},
         "full_path": {"type": "boolean"},
     },
+    additional_properties=True,
     normalize=_dsh_glob,
 )
 
@@ -771,6 +780,7 @@ DSH_GREP = NativeToolSpec(
         "offset": {"type": "integer"},
         "limit": {"type": "integer"},
     },
+    additional_properties=True,
     normalize=_dsh_grep,
 )
 
@@ -793,6 +803,7 @@ DSH_JOB_OUTPUT = NativeToolSpec(
         "max_output_tokens": {"type": "integer"},
         "session_id": {"type": "string"},
     },
+    additional_properties=True,
     normalize=lambda args: {"job_id": args["job_id"], **_endpoint_args(args)},
 )
 
@@ -802,6 +813,7 @@ DSH_JOB_LIST = NativeToolSpec(
     description="List your background jobs (running and finished) with ids, kinds, and statuses (DSH job_list).",
     properties={},
     handler="dsh_job_list",
+    additional_properties=True,
     normalize=lambda args: dict(args),
 )
 
@@ -815,6 +827,7 @@ DSH_JOB_KILL = NativeToolSpec(
     },
     required=("job_id",),
     handler="dsh_job_kill",
+    additional_properties=True,
     normalize=lambda args: {"job_id": args["job_id"], **_endpoint_args(args)},
 )
 
@@ -824,14 +837,12 @@ DSH_JOB_KILL = NativeToolSpec(
 # ---------------------------------------------------------------------------
 
 def _claude_read(args: dict[str, Any]) -> dict[str, Any]:
-    if args.get("pages") is not None:
-        raise HarnessProfileError(
-            "remote_Read cannot render PDF page ranges; use remote_artifact_pull and a local PDF reader"
-        )
     out = _endpoint_args(args)
     out["file_path"] = args["file_path"]
     out["offset"] = int(args.get("offset") or 1)
     out["limit"] = int(args.get("limit") or 2000)
+    if args.get("pages") is not None:
+        out["pages"] = str(args["pages"])
     return out
 
 
@@ -1041,6 +1052,32 @@ CLAUDE_BASH_OUTPUT = NativeToolSpec(
     normalize=_claude_task_output,
 )
 
+CLAUDE_NOTEBOOK_EDIT = NativeToolSpec(
+    native_name="NotebookEdit",
+    canonical="remote.write",
+    description="Edit .ipynb cells (Claude Code NotebookEdit; replace/insert/delete).",
+    properties={
+        "notebook_path": {"type": "string", "minLength": 1, "description": "The absolute path to the Jupyter notebook file."},
+        "new_source": {"type": "string", "description": "The new source for the cell."},
+        "cell_id": {"type": "string", "description": "The ID of the cell to edit."},
+        "cell_type": {"type": "string", "enum": ["code", "markdown"], "description": "The type of the cell."},
+        "edit_mode": {"type": "string", "enum": ["replace", "insert", "delete"], "default": "replace"},
+    },
+    required=("notebook_path", "new_source"),
+    defaults={"edit_mode": "replace"},
+    handler="claude_notebook_edit",
+    normalize=lambda args: {"file_path": args["notebook_path"], **_endpoint_args(args)},
+)
+
+CLAUDE_TASK_LIST = NativeToolSpec(
+    native_name="TaskList",
+    canonical="remote.job_status",
+    description="List the session task list (Claude Code TaskList; remote jobs are the remote task registry).",
+    properties={},
+    handler="claude_task_list",
+    normalize=lambda args: dict(args),
+)
+
 CLAUDE_TASK_STOP = NativeToolSpec(
     native_name="TaskStop",
     canonical="remote.job_stop",
@@ -1067,7 +1104,7 @@ CLAUDE_KILL_SHELL = NativeToolSpec(
 # Codex CLI 0.153.4 (installed binary + rust-v0.153.4 shell_spec.rs)
 # ---------------------------------------------------------------------------
 
-_CODEX_SANDBOX_VALUES = ["use_default", "with_additional_permissions", "require_escalated"]
+_CODEX_SANDBOX_VALUES = ["use_default", "require_escalated"]
 
 
 def _codex_permissions(args: Mapping[str, Any]) -> None:
@@ -1142,8 +1179,6 @@ CODEX_EXEC = NativeToolSpec(
     compat_properties={
         "timeout_ms": {"type": "integer"},
         "timeout": {"type": "integer"},
-        "runtime_env": {"type": "boolean"},
-        "env": {"type": "object"},
     },
     normalize=_codex_exec,
 )
@@ -1205,7 +1240,8 @@ NATIVE_TOOLS["claude"] = {
     spec.native_name: spec
     for spec in (
         CLAUDE_READ, CLAUDE_WRITE, CLAUDE_EDIT, CLAUDE_BASH, CLAUDE_GLOB, CLAUDE_GREP,
-        CLAUDE_TASK_OUTPUT, CLAUDE_BASH_OUTPUT, CLAUDE_TASK_STOP, CLAUDE_KILL_SHELL,
+        CLAUDE_TASK_OUTPUT, CLAUDE_BASH_OUTPUT, CLAUDE_NOTEBOOK_EDIT, CLAUDE_TASK_LIST,
+        CLAUDE_TASK_STOP, CLAUDE_KILL_SHELL,
     )
 }
 
@@ -1218,6 +1254,7 @@ DSH_READ_IMAGE = NativeToolSpec(
     },
     required=("file_path",),
     handler="dsh_read_image",
+    additional_properties=True,
     normalize=lambda args: {"file_path": args["file_path"], **_endpoint_args(args)},
 )
 

@@ -298,9 +298,10 @@ def command_lines(cmd, max_chars=32768):
         proc.stderr.close()
 
 
-def collect_page(cmd, output_mode, offset, limit, max_line_chars, *, skip_zeros=False):
+def collect_page(cmd, output_mode, offset, limit, max_line_chars, *, skip_zeros=False, char_budget=1000000):
     import contextlib
     matches, count, truncated_lines = [], 0, 0
+    used_chars = 0
     total_matches = 0 if output_mode == "count_matches" else None
     cap = max_line_chars if output_mode == "content" else 32768
     with contextlib.closing(command_lines(cmd, cap)) as rows:
@@ -314,10 +315,13 @@ def collect_page(cmd, output_mode, offset, limit, max_line_chars, *, skip_zeros=
                 if clipped:
                     line += "<remote-dev line truncated>"
                     truncated_lines += 1
+                if used_chars + len(line) + 1 > char_budget and matches:
+                    break
                 matches.append(line)
+                used_chars += len(line) + 1
             elif total_matches is None:
                 break
-    return matches, count > limit, total_matches, truncated_lines
+    return matches, count > limit or used_chars >= char_budget, total_matches, truncated_lines
 
 
 if op == "glob":
@@ -415,7 +419,7 @@ if op == "grep":
         fail("pattern_required", "RemoteGrep requires pattern")
     limit = int(payload["limit"]) if payload.get("limit") is not None else 100
     if limit == 0:
-        limit = 5000
+        limit = 20000
     offset = int(payload.get("offset") or 0)
     if offset < 0:
         fail("invalid_pagination", "offset must be >= 0")
