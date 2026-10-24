@@ -35,7 +35,9 @@ def kimi_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any],
     native_status = _native_job_status(state)
     from remote_dev.core.state_store import find_job_record
 
-    _refresh_job_output(job_id)
+    refresh_failure = _refresh_job_output(job_id)
+    if refresh_failure is not None:
+        return refresh_failure
     found = find_job_record(job_id)
     preview, truncated = ("", False)
     output_path = _record_output_path(record)
@@ -109,7 +111,10 @@ def kimi_task_stop(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
         payload["text"] = f"task_id: {job_id}\nstatus: {_native_job_status(state)}\nreason: {reason}\n"
         return payload
     payload = _call_canonical("remote.job_stop", {"job_id": job_id})
-    final_state = str(payload["result"].get("status") or "unknown")
+    stop_result = payload.get("result") or {}
+    if _status_query_failed(stop_result) or stop_result.get("outcome") == "failed":
+        return payload
+    final_state = str(stop_result.get("status") or "unknown")
     payload["text"] = f"task_id: {job_id}\nstatus: {_native_job_status(final_state)}\nreason: {reason}\n"
     payload["result"]["reason"] = reason
     return payload

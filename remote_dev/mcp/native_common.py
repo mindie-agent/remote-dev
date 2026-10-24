@@ -95,25 +95,44 @@ def _job_result(job_id: str) -> dict[str, Any]:
     payload["result"].setdefault("job", {})
     return payload
 
-def _refresh_job_output(job_id: str) -> None:
+def _refresh_job_output(job_id: str) -> dict[str, Any] | None:
     """Pull pending supervisor output into the local job logs once.
 
     Native TaskOutput/TaskList read the task's current output without taking
     over the DSH-style consuming cursor. The canonical stdin poll with empty
     chars is the non-mutating observation path that commits new bytes to the
-    local log files.
+    local log files.  A failed pull is returned to the caller as the actual
+    canonical failure; it must not be silently replaced by stale cached text.
     """
     from remote_dev.mcp.tools import _call_canonical
 
     try:
-        _call_canonical(
+        payload = _call_canonical(
             "remote.job_stdin",
             {"job_id": job_id, "chars": "", "yield_time_ms": 0, "max_output_tokens": 8192},
         )
-    except (ValueError, TimeoutError, OSError):
-        # The status call below still reports the job; output may be
-        # unavailable. Never synthesize a success body.
-        return
+    except (ValueError, TimeoutError, OSError) as exc:
+        from remote_dev.result import make_result
+
+        message = f"task output unavailable: {type(exc).__name__}: {exc}"
+        return {
+            "text": message + "\n",
+            "result": make_result(
+                tool="remote.job_stdin",
+                target={"kind": "local_state"},
+                outcome="failed",
+                status="output_unavailable",
+                summary=message,
+                preview={"stderr": message},
+                extra={"error": str(exc)},
+            ),
+        }
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict):
+        return payload if isinstance(payload, dict) else None
+    if _status_query_failed(result) or result.get("outcome") == "failed":
+        return payload
+    return None
 
 def _job_file(path: Any, stream: str) -> Any:
     from pathlib import Path
@@ -126,12 +145,27 @@ def _tail_text(path: Any, limit: int = 32000) -> tuple[str, bool]:
 
     path = Path(path)
     try:
-        data = path.read_bytes()
+        size = path.stat().st_size
     except FileNotFoundError:
         return "", False
-    if len(data) > limit:
-        return data[-limit:].decode("utf-8", errors="replace"), True
-    return data.decode("utf-8", errors="replace"), False
+    if size <= limit:
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return "", False
+        return data.decode("utf-8", errors="replace"), False
+    try:
+        with path.open("rb") as stream:
+            stream.seek(size - limit)
+            data = stream.read(limit)
+    except FileNotFoundError:
+        return "", False
+    # The slice may begin inside a UTF-8 code point. Drop leading continuation
+    # bytes so the retained tail decodes without a synthetic replacement char.
+    offset = 0
+    while offset < len(data) and (data[offset] & 0xC0) == 0x80:
+        offset += 1
+    return data[offset:].decode("utf-8", errors="replace"), True
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 

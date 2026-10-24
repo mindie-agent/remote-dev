@@ -54,7 +54,9 @@ def claude_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any
     exit_code = remote_status.get("exit_code")
     if exit_code is None:
         exit_code = ((remote_status.get("result") or {}).get("exit_code"))
-    _refresh_job_output(job_id)
+    refresh_failure = _refresh_job_output(job_id)
+    if refresh_failure is not None:
+        return refresh_failure
     stdout, stdout_truncated = _tail_text(_job_file(record_path, "stdout"))
     stderr, stderr_truncated = _tail_text(_job_file(record_path, "stderr"))
     output = stdout
@@ -127,6 +129,9 @@ def claude_task_stop(profile: str, spec: NativeToolSpec, native: dict[str, Any],
             ),
         }
     payload = _call_canonical("remote.job_stop", {"job_id": job_id})
+    stop_result = payload.get("result") or {}
+    if _status_query_failed(stop_result) or stop_result.get("outcome") == "failed":
+        return payload
     message = f"Successfully stopped task: {job_id} ({record.get('command_preview') or record.get('description') or ''})"
     payload["text"] = message + "\n"
     payload["result"].update({

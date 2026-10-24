@@ -947,6 +947,93 @@ class BackgroundHonestyTests(unittest.TestCase):
 # 4. Known native gaps that must fail loudly (not weakened)
 # ---------------------------------------------------------------------------
 
+class FinalLogStopTests(unittest.TestCase):
+    def test_tail_text_reads_bounded_suffix_without_whole_file(self):
+        directory = tempfile.mkdtemp(prefix="tail-bounded-")
+        path = Path(directory) / "large.log"
+        with path.open("wb") as stream:
+            stream.seek(64 * 1024 * 1024)
+            stream.write(b"TAIL-LINE\n")
+        with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("whole file read")):
+            text, truncated = native_common._tail_text(path, 4096)
+        self.assertTrue(truncated)
+        self.assertTrue(text.endswith("TAIL-LINE\n"))
+        self.assertLessEqual(len(text.encode("utf-8")), 4096)
+
+    def test_refresh_job_output_preserves_canonical_failure(self):
+        failure = {
+            "text": "Remote job j: failed\n",
+            "result": {"outcome": "failed", "status": "failed", "error": "pull failed"},
+        }
+        with mock.patch("remote_dev.mcp.tools._call_canonical", return_value=failure):
+            self.assertIs(native_common._refresh_job_output("j"), failure)
+        with mock.patch("remote_dev.mcp.tools._call_canonical", side_effect=OSError("down")):
+            out = native_common._refresh_job_output("j")
+        self.assertEqual(out["result"]["outcome"], "failed")
+        self.assertIn("task output unavailable", out["text"])
+
+    def test_native_task_output_does_not_hide_refresh_failure(self):
+        import remote_dev.mcp.native_handlers_claude as claude_handlers
+        import remote_dev.mcp.native_handlers_kimi as kimi_handlers
+
+        record = {"job_id": "j", "session_scope": "scope", "state": "succeeded"}
+        status = {
+            "text": "Remote job j: succeeded\n",
+            "result": {"outcome": "success", "status": "succeeded", "job": {"state": "succeeded"}},
+        }
+        failure = {
+            "text": "task output unavailable: OSError: down\n",
+            "result": {"outcome": "failed", "status": "output_unavailable", "error": "down"},
+        }
+        for name, profile, module in (
+            ("remote_TaskOutput", "claude", claude_handlers),
+            ("remote_TaskOutput", "kimi", kimi_handlers),
+        ):
+            with self.subTest(profile=profile), \
+                    mock.patch("remote_dev.core.state_store.find_job_record",
+                               return_value=(Path("/tmp/fake-job.json"), record)), \
+                    mock.patch.object(module, "_refresh_job_output", return_value=failure), \
+                    mock.patch.object(module, "_assert_visible", return_value=None), \
+                    mock.patch("remote_dev.mcp.tools._call_canonical", return_value=status):
+                payload = tools.call_tool(name, {"task_id": "j"}, profile=profile)
+            self.assertEqual(payload["result"]["outcome"], "failed")
+            self.assertIn("output unavailable", payload["text"])
+
+    def test_task_stop_preserves_canonical_stop_failure_text(self):
+        import remote_dev.mcp.native_handlers_claude as claude_handlers
+        import remote_dev.mcp.native_handlers_kimi as kimi_handlers
+
+        record = {"job_id": "j", "session_scope": "scope", "state": "running",
+                  "description": "demo", "command_preview": "sleep 60"}
+        status = {
+            "text": "Remote job j: running\n",
+            "result": {"outcome": "success", "status": "running", "job": {"state": "running"}},
+        }
+        failure = {
+            "text": "Remote job j stop failed.\nConnection refused\n",
+            "result": {
+                "outcome": "failed", "status": "failed",
+                "summary": "Remote job j stop failed.", "error": "Connection refused",
+                "error_details": {"category": "transport", "submission_state": "not_sent"},
+            },
+        }
+
+        def canonical(name, args):
+            return status if name == "remote.job_status" else failure
+
+        for name, profile, module in (
+            ("remote_TaskStop", "claude", claude_handlers),
+            ("remote_TaskStop", "kimi", kimi_handlers),
+        ):
+            with self.subTest(profile=profile), \
+                    mock.patch.object(module, "_job_record", return_value=record), \
+                    mock.patch.object(module, "_assert_visible", return_value=None), \
+                    mock.patch("remote_dev.mcp.tools._call_canonical", side_effect=canonical):
+                payload = tools.call_tool(name, {"task_id": "j"}, profile=profile)
+            self.assertEqual(payload["result"]["outcome"], "failed")
+            self.assertIn("stop failed", payload["text"])
+            self.assertNotIn("Successfully stopped", payload["text"])
+
 class NativeGapTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fake = FakeCanonical()
