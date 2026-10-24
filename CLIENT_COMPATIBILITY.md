@@ -4,7 +4,7 @@
 
 Different AI coding Harnesses (**OpenAI Codex**, **Claude Code**, **Cursor**, **Kimi Code**, **DeepSeek Harness / DSH**, **Google Antigravity**, and **Grok Build**) have distinct native local tool names, parameter shapes, and behavioral expectations — some send `path` or `AbsolutePath` / `TargetFile` instead of `file_path`, some slice files with `StartLine` / `EndLine` or `line_offset` / `n_lines`, some scope file replacements to `[StartLine, EndLine]`, and some inspect AST symbols (`view_file_outline` / `view_code_item`).
 
-`remote-dev` handles all of these differences automatically through a unified normalization and execution layer (`remote_dev.mcp.schemas.normalize_arguments` + `HARNESS_TOOL_ALIASES`) shared by both the MCP server and the CLI `--input-json` interface. One server provides identical remote twins across every supported Harness.
+`remote-dev` keeps the 19 canonical `remote.*` tools available in every profile. Native basic-tool names (`remote_Read`, `remote_exec_command`, `remote_bash`, …) are exposed only when the server is launched with a trusted `REMOTE_DEV_HARNESS_PROFILE` (`codex`, `claude`, `kimi`, or `dsh`); a plugin binds that profile in its own MCP launcher, never from tool arguments. See [`docs/harness-profiles.md`](./docs/harness-profiles.md) for the per-profile tool list, units, defaults and media limits. Legacy aliases outside the four profiles keep their canonical mapping; native-case aliases such as `remote_Edit` require the owning profile.
 
 ---
 
