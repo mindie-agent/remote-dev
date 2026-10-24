@@ -153,7 +153,7 @@ def format_failure_text(payload: dict[str, Any]) -> str:
         details.get("kind") == "background"
         and details.get("jobId") not in (None, "")
     )
-    if details.get("outcome") in {"success", "cancelled", "cancellation-requested"} or completed_command or background_started:
+    if details.get("outcome") in {"success", "cancelled", "cancellation-requested", "already-finished"} or completed_command or background_started:
         # Exit status is already in the command's text. Its output has its own
         # byte budget/cursor: truncating it here would silently consume data.
         return text

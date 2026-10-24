@@ -123,11 +123,11 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
                 details.get("kind") == "background"
                 and details.get("jobId") not in (None, "")
             )
-            if background_started or error_outcome == "cancellation-requested":
+            if background_started or error_outcome in {"cancellation-requested", "already-finished"}:
                 # DSH's native background result is intentionally the minimal
                 # {kind:"background", jobId} shape and has no outcome field.
-                # Starting a supervised job, or accepting its cancellation
-                # request, is a success for the model-facing tool result.
+                # Starting a supervised job, accepting its cancellation, or
+                # observing that it already finished are successful results.
                 error_outcome = "success"
             if completed_command:
                 error_outcome = "success"
