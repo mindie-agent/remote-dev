@@ -9,18 +9,23 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from remote_dev.core.errors import caller_error
 from remote_dev.mcp.harness_profiles import NativeToolSpec
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
 from remote_dev.mcp.native_common import (
     _TERMINAL, _assert_visible, _job_record, _live_job, _media_failure, _read_media_payload,
+    _status_query_failed,
 )
 
 def _dsh_status(state: str) -> str:
+    # Native DSH background bash maps every settled non-signalled process to
+    # "completed"; a nonzero exit lives in the detail ("exit code: N"), not in
+    # the status. Only a real signal becomes "killed".
     return {
         "prepared": "running",
         "running": "running",
         "succeeded": "completed",
-        "failed": "failed",
+        "failed": "completed",
         "timeout": "failed",
         "cancelled": "killed",
         "absent": "failed",
@@ -54,15 +59,17 @@ def _dsh_job(record: dict[str, Any], *, state: str | None = None, detail: str | 
 
 def _dsh_detail(state: str, result: Mapping[str, Any] | None, stop_reason: str | None = None) -> str | None:
     result = result or {}
-    if stop_reason:
-        return stop_reason
+    if state == "cancelled":
+        return stop_reason or "killed before exit"
     if state == "timeout":
         return "timed out"
     if state in {"succeeded", "failed"}:
         exit_code = result.get("exit_code")
         if exit_code is not None:
             return f"exit code: {exit_code}"
-        return state
+    if state in {"absent", "unknown", "uncertain", "lost", "lost_outcome"}:
+        # Do not turn an unobservable/lost job into a fabricated terminal state.
+        return f"state: {state}"
     return None
 
 @handler("dsh_job_output")
@@ -77,9 +84,8 @@ def dsh_job_output(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
     payload = remote_job_output_incremental(None, job_id=job_id, wait=wait, timeout_ms=timeout_ms)
     state = str(payload["result"].get("state") or "unknown")
     result = payload["result"]
-    # remote_job_output_incremental settles on the last supervisor row; expose
-    # the recorded terminal detail when available.
-    detail = _dsh_detail(state, None)
+    # remote_job_output_incremental carries the observed terminal exit code.
+    detail = _dsh_detail(state, result)
     body = str(payload.get("text") or "")
     job = _dsh_job(record, state=state, detail=detail)
     status_line = f"[status: {job['status']}" + (f", {detail}]" if detail else "]")
@@ -105,13 +111,27 @@ def dsh_job_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], nor
         for record in list_job_records(endpoint_id):
             if record.get("session_scope") != scope:
                 continue
+            remote_status: Mapping[str, Any] = {}
+            status_detail = None
             try:
-                state, _job = _live_job(str(record.get("job_id")))
-            except (ValueError, TimeoutError, OSError):
+                state, live = _live_job(str(record.get("job_id")))
+                remote_status = live.get("remote_status") or {}
+            except (ValueError, TimeoutError, OSError) as exc:
                 state = str(record.get("state") or "unknown")
-            jobs.append({**record, "state": state})
+                status_detail = f"live status unavailable; last known: {state} ({type(exc).__name__})"
+            jobs.append({**record, "state": state, "remote_status": remote_status, "status_detail": status_detail})
     jobs.sort(key=lambda item: str(item.get("started_at") or ""))
-    projections = [_dsh_job(record) for record in jobs]
+    projections = [
+        _dsh_job(
+            record,
+            state=str(record.get("state") or "unknown"),
+            detail=record.get("status_detail") or _dsh_detail(
+                str(record.get("state") or "unknown"),
+                (record.get("remote_status") or {}).get("result"),
+            ),
+        )
+        for record in jobs
+    ]
     text = "(no background jobs)" if not projections else "\n".join(
         f"{job['id']} [{job['kind']}] {job['status']} — {job['label']}" for job in projections
     )
@@ -136,17 +156,29 @@ def dsh_job_kill(profile: str, spec: NativeToolSpec, native: dict[str, Any], nor
     record = _job_record(job_id)
     _assert_visible(record)
     try:
-        state, _live = _live_job(job_id)
+        state, live_job = _live_job(job_id)
+        live = live_job.get("remote_status") or {}
     except (ValueError, TimeoutError, OSError):
         state = str(record.get("state") or "unknown")
+        live = {}
     if state in _TERMINAL:
         outcome = "already-finished"
         payload = _call_canonical("remote.job_status", {"job_id": job_id})
+        status_result = payload["result"]
+        if _status_query_failed(status_result):
+            detail = status_result.get("error") or status_result.get("summary") or status_result.get("status")
+            raise caller_error(f"could not confirm job {job_id} is finished: {detail}")
+        live = (status_result.get("job") or {}).get("remote_status") or live
     else:
         outcome = "cancellation-requested"
         payload = _call_canonical("remote.job_stop", {"job_id": job_id})
         state = str(payload["result"].get("status") or state)
-    job = _dsh_job(record, state=state, detail=reason or None)
+        live = payload["result"].get("remote_status") or live
+    job = _dsh_job(
+        record,
+        state=state,
+        detail=_dsh_detail(state, (live or {}).get("result")),
+    )
     payload["text"] = f"{outcome}\n{job['id']} [{job['kind']}] {job['status']} — {job['label']}\n"
     payload["result"]["job"] = job
     payload["result"]["outcome"] = outcome

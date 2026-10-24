@@ -453,7 +453,9 @@ def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, An
         summary=f"Remote job {job_id} is {status}.",
         started_at=started,
         duration_ms=_duration_ms(start),
-        extra={"job": _public_job_record(record, remote_status=supervisor, quiet=supervisor.get("quiet"))},
+        extra={"job": _public_job_record(
+            record, state=status, remote_status=supervisor, quiet=supervisor.get("quiet")
+        )},
     )
     return {"text": f"Remote job {job_id}: {status}\n", "result": result}
 
@@ -610,6 +612,8 @@ def remote_job_output_incremental(
         if body and not body.endswith("\n"):
             body += "\n"
         body += "[stderr]\n" + stderr
+    state = str(row.get("state") or "unknown")
+    exit_code = (row.get("result") or {}).get("exit_code") if state in TERMINAL_JOB_STATES else None
     result = make_result(
         tool="remote.job_output",
         target=endpoint.to_result_target(),
@@ -619,7 +623,7 @@ def remote_job_output_incremental(
         started_at=started,
         duration_ms=_duration_ms(start),
         preview={"content": body},
-        extra={"job_id": job_id, "state": str(row.get("state") or "unknown"), "wait": bool(wait)},
+        extra={"job_id": job_id, "state": state, "wait": bool(wait), "exit_code": exit_code},
     )
     return {"text": body, "result": result}
 

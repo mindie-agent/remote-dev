@@ -59,13 +59,25 @@ def _record_output_path(record: dict[str, Any], stream: str = "stdout") -> str |
         return None
     return f"{remote_dir}/{stream}.log"
 
-def _live_job(job_id: str) -> tuple[str, dict[str, Any]]:
+def _status_query_failed(result: Mapping[str, Any]) -> bool:
+    """True only when status control failed and no job state was observed.
+
+    A normal ``absent``/``lost_outcome`` projection still carries a job state
+    and is reported as that honest state; a transport/control failure leaves
+    ``job.state`` unset and must not be mistaken for a terminal result.
+    """
+    return result.get("outcome") == "failed" and not (result.get("job") or {}).get("state")
+
+def _live_job(job_id: str, *, strict: bool = False) -> tuple[str, dict[str, Any]]:
     from remote_dev.mcp.tools import _call_canonical
 
     payload = _call_canonical("remote.job_status", {"job_id": job_id})
     result = payload.get("result") or {}
     job = result.get("job") or {}
     state = str(result.get("status") or job.get("state") or "unknown")
+    if strict and _status_query_failed(result):
+        detail = result.get("error") or result.get("summary") or state
+        raise caller_error(f"remote job {job_id} status query failed: {detail}")
     return state, job
 
 def _job_result(job_id: str) -> dict[str, Any]:

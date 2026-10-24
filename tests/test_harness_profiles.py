@@ -165,12 +165,21 @@ class CatalogTests(unittest.TestCase):
             )
 
     def test_native_names_reject_canonical_only_fields(self) -> None:
-        with self.assertRaises((HarnessProfileError, ValueError)):
-            tools.call_tool("remote_job_output", {"job_id": "j", "lines": 20}, profile="dsh")
-        with self.assertRaises((HarnessProfileError, ValueError)):
-            tools.call_tool("remote_read", {"path": "/tmp/x", "start_line": 2}, profile="dsh")
-        with self.assertRaises((HarnessProfileError, ValueError)):
-            tools.call_tool("remote_exec_command", {"cmd": "x", "timeout_ms": 5}, profile="codex")
+        cases = [
+            ("remote_job_output", {"job_id": "j", "lines": 20}, "dsh"),
+            ("remote_job_output", {"job_id": "j", "yield_time_ms": 20}, "dsh"),
+            ("remote_read", {"path": "/tmp/x", "start_line": 2}, "dsh"),
+            ("remote_exec_command", {"cmd": "x", "timeout_ms": 5}, "codex"),
+            ("remote_write_stdin", {"session_id": 1, "eof": True}, "codex"),
+            ("remote_Bash", {"command": "x", "cmd": "x"}, "claude"),
+            ("remote_Grep", {"pattern": "x", "cmd": "x"}, "claude"),
+            ("remote_TaskOutput", {"task_id": "j", "block": False}, "kimi"),
+            ("remote_Read", {"path": "/tmp/x", "file_path": "/tmp/x"}, "kimi"),
+        ]
+        for name, args, profile in cases:
+            with self.subTest(name=name, profile=profile):
+                with self.assertRaises((HarnessProfileError, ValueError)):
+                    tools.call_tool(name, args, profile=profile)
 
     def test_native_name_from_another_profile_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

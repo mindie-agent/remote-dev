@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from remote_dev.core.errors import caller_error
 from remote_dev.mcp.harness_profiles import NativeToolSpec
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
 from remote_dev.mcp.native_common import (
     _IMAGE_EXTENSIONS, _TERMINAL, _assert_visible, _job_file, _job_record,
-    _media_failure, _read_media_payload, _refresh_job_output, _tail_text,
+    _media_failure, _read_media_payload, _refresh_job_output, _status_query_failed, _tail_text,
 )
 
 @handler("claude_task_output")
@@ -36,8 +37,12 @@ def claude_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any
     state = str(record.get("state") or "unknown")
     while True:
         status_payload = _call_canonical("remote.job_status", {"job_id": job_id})
-        job = status_payload["result"].get("job") or {}
-        state = str(status_payload["result"].get("status") or job.get("state") or "unknown")
+        status_result = status_payload["result"]
+        if _status_query_failed(status_result):
+            detail = status_result.get("error") or status_result.get("summary") or status_result.get("status")
+            raise caller_error(f"Could not get output for task {job_id}: {detail}")
+        job = status_result.get("job") or {}
+        state = str(status_result.get("status") or job.get("state") or "unknown")
         if state in _TERMINAL:
             retrieval = "success"
             break
@@ -97,8 +102,12 @@ def claude_task_stop(profile: str, spec: NativeToolSpec, native: dict[str, Any],
     record = _job_record(job_id)
     _assert_visible(record)
     status_payload = _call_canonical("remote.job_status", {"job_id": job_id})
-    job = status_payload["result"].get("job") or {}
-    state = str(status_payload["result"].get("status") or job.get("state") or "unknown")
+    status_result = status_payload["result"]
+    if _status_query_failed(status_result):
+        detail = status_result.get("error") or status_result.get("summary") or status_result.get("status")
+        raise caller_error(f"Could not query task {job_id}: {detail}")
+    job = status_result.get("job") or {}
+    state = str(status_result.get("status") or job.get("state") or "unknown")
     if state in _TERMINAL:
         # Native Claude TaskStop validateInput rejects a non-running task with
         # result:false / errorCode:3, rather than treating it as a no-op.

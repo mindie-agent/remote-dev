@@ -691,6 +691,166 @@ class NormalizationTests(unittest.TestCase):
                     tools.call_tool(name, args, profile=profile)
 
 
+class BackgroundHonestyTests(unittest.TestCase):
+    """Unknown job ids and per-harness terminal states through real core paths."""
+
+    def test_claude_unknown_task_id_is_a_caller_error(self) -> None:
+        for name in ("remote_TaskOutput", "remote_TaskStop"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError) as raised:
+                    tools.call_tool(name, {"task_id": "job-missing-001"}, profile="claude")
+                self.assertIn("job-missing-001", str(raised.exception))
+
+    def test_kimi_task_list_query_failure_is_not_stale_success(self) -> None:
+        from remote_dev.core.endpoint import Endpoint
+        from remote_dev.core.job_ops import job_record_path
+        from remote_dev.core.state_store import (
+            atomic_write_json, ensure_endpoint_state, resolve_ledger_scope,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                os.environ,
+                {"REMOTE_DEV_STATE_DIR": tmp, "REMOTE_DEV_SESSION_ID": "test-session"},
+            ):
+                endpoint = Endpoint(
+                    host="127.0.0.1", port=1, user="root",
+                    root="/tmp/rnp-tl-root", cwd="/tmp/rnp-tl-root",
+                    connect_timeout_ms=1000,
+                )
+                job_id = "job-unreachable-001"
+                record = {
+                    "schema_version": "remote-dev.job.v1",
+                    "job_id": job_id,
+                    "description": "unreachable",
+                    "target": endpoint.to_result_target(),
+                    "connection": {**endpoint.__dict__, "cwd": endpoint.cwd},
+                    "command_preview": "sleep 1",
+                    "cwd": endpoint.cwd,
+                    "env_keys": [],
+                    "runtime_env": False,
+                    "runtime_env_file": None,
+                    "remote_dir": f"/tmp/rnp-tl-root/.remote-dev/jobs/{job_id}",
+                    "started_at": "2026-10-24T00:00:00Z",
+                    "timeout_ms": None,
+                    "tty": False,
+                    "session_scope": resolve_ledger_scope(),
+                    "authorization": {"token": "x", "job_id": job_id},
+                }
+                ensure_endpoint_state(endpoint)
+                path = job_record_path(endpoint, job_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_json(path, record)
+                with self.assertRaises(ValueError) as raised:
+                    tools.call_tool("remote_TaskList", {}, profile="kimi")
+                self.assertIn("could not query", str(raised.exception))
+
+    def test_status_query_failure_is_not_a_terminal_state(self) -> None:
+        import remote_dev.mcp.native_handlers_claude as claude_handlers
+        import remote_dev.mcp.native_handlers_kimi as kimi_handlers
+
+        failed = {
+            "text": "Remote job j status failed.\n",
+            "result": {
+                "outcome": "failed",
+                "status": "failed",
+                "summary": "Remote job j status failed.",
+            },
+        }
+        record = {"job_id": "j", "session_scope": "scope", "state": "running"}
+        calls = [
+            ("remote_TaskOutput", "claude", {"task_id": "j"}),
+            ("remote_TaskStop", "claude", {"task_id": "j"}),
+            ("remote_TaskOutput", "kimi", {"task_id": "j"}),
+            ("remote_TaskStop", "kimi", {"task_id": "j"}),
+        ]
+        with (
+            mock.patch(
+                "remote_dev.core.state_store.find_job_record",
+                return_value=(Path("/tmp/fake-job.json"), record),
+            ),
+            mock.patch.object(claude_handlers, "_assert_visible", return_value=None),
+            mock.patch.object(kimi_handlers, "_assert_visible", return_value=None),
+            mock.patch.object(claude_handlers, "_job_record", return_value=record),
+            mock.patch.object(kimi_handlers, "_job_record", return_value=record),
+            mock.patch("remote_dev.mcp.tools._call_canonical", return_value=failed),
+        ):
+            for name, profile, args in calls:
+                with self.subTest(name=name, profile=profile):
+                    with self.assertRaises(ValueError) as raised:
+                        tools.call_tool(name, args, profile=profile)
+                    self.assertIn("j", str(raised.exception))
+
+    def test_live_job_strict_keeps_an_honest_absent_state(self) -> None:
+        from remote_dev.mcp.native_common import _live_job
+
+        absent = {
+            "text": "Remote job j: absent\n",
+            "result": {
+                "outcome": "failed",
+                "status": "absent",
+                "job": {"job_id": "j", "state": "absent"},
+            },
+        }
+        with mock.patch("remote_dev.mcp.tools._call_canonical", return_value=absent):
+            state, job = _live_job("j", strict=True)
+        self.assertEqual(state, "absent")
+        self.assertEqual(job["state"], "absent")
+
+    def test_dsh_job_list_marks_unavailable_live_status(self) -> None:
+        from remote_dev.mcp import native_handlers_dsh as dsh_handlers
+
+        record = {
+            "job_id": "j", "session_scope": "scope", "description": "demo",
+            "started_at": "2026-10-24T00:00:00Z", "state": "running",
+        }
+        with (
+            mock.patch(
+                "remote_dev.core.state_store.list_endpoint_records",
+                return_value=[{"endpoint_id": "e"}],
+            ),
+            mock.patch(
+                "remote_dev.core.state_store.list_job_records", return_value=[record]
+            ),
+            mock.patch(
+                "remote_dev.core.state_store.resolve_ledger_scope", return_value="scope"
+            ),
+            mock.patch.object(
+                dsh_handlers, "_live_job", side_effect=OSError("transport closed")
+            ),
+        ):
+            payload = tools.call_tool("remote_job_list", {}, profile="dsh")
+        job = payload["result"]["jobs"][0]
+        self.assertEqual(job["status"], "running")
+        self.assertIn("live status unavailable", job["detail"])
+        self.assertIn("last known: running", job["detail"])
+
+    def test_dsh_background_nonzero_is_completed_with_exit_detail(self) -> None:
+        from remote_dev.mcp import native_handlers_dsh as dsh_handlers
+
+        record = {
+            "job_id": "j", "session_scope": "scope", "state": "failed",
+            "description": "demo", "started_at": "2026-10-24T00:00:00Z",
+        }
+        with (
+            mock.patch.object(dsh_handlers, "_job_record", return_value=record),
+            mock.patch.object(dsh_handlers, "_assert_visible", return_value=None),
+            mock.patch(
+                "remote_dev.core.job_ops.remote_job_output_incremental",
+                return_value={
+                    "text": "out",
+                    "result": {"state": "failed", "exit_code": 7, "job_id": "j"},
+                },
+            ),
+        ):
+            payload = tools.call_tool(
+                "remote_job_output", {"job_id": "j"}, profile="dsh"
+            )
+        self.assertEqual(payload["result"]["job"]["status"], "completed")
+        self.assertEqual(payload["result"]["job"]["detail"], "exit code: 7")
+        self.assertEqual(payload["result"]["status"], "completed")
+
+
 # ---------------------------------------------------------------------------
 # 4. Known native gaps that must fail loudly (not weakened)
 # ---------------------------------------------------------------------------
