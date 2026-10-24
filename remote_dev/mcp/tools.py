@@ -301,6 +301,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             pages=args.get("pages"),
             strict_offset=bool(args.get("strict_offset", False)),
             utf16_units=bool(args.get("utf16_units", False)),
+            utf8_only=bool(args.get("utf8_only", False)),
             client_context_id=args.get("client_context_id"),
             timeout_ms=timeout_ms,
         )

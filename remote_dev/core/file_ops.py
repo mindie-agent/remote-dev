@@ -73,6 +73,7 @@ def remote_read(
     pages: str | None = None,
     strict_offset: bool = False,
     utf16_units: bool = False,
+    utf8_only: bool = False,
     client_context_id: str | None = None,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -116,6 +117,8 @@ def remote_read(
         payload_req["strict_offset"] = True
     if utf16_units:
         payload_req["utf16_units"] = True
+    if utf8_only:
+        payload_req["utf8_only"] = True
     if start_line is not None:
         payload_req["start_line"] = int(start_line)
     if end_line is not None:

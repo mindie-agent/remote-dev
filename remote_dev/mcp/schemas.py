@@ -77,6 +77,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "pages": {"type": "string", "description": "PDF page range (native Claude Read pages). Remote-dev does not render PDF pages; a PDF read returns an explicit pdf_unsupported error."},
             "strict_offset": {"type": "boolean", "description": "Fail when offset is past EOF instead of returning an empty page (native DSH read)."},
             "utf16_units": {"type": "boolean", "description": "Measure column_offset/max_chars/line lengths in JavaScript UTF-16 code units (native Kimi Read)."},
+            "utf8_only": {"type": "boolean", "description": "Do not auto-detect UTF-16; native Claude/DSH Read are UTF-8 only."},
             "line_offset": {"type": "integer", "description": "Alias of offset (Kimi native Read habit)."},
             "n_lines": {"type": "integer", "description": "Alias of limit (Kimi native Read habit)."},
             "start_line": {"type": "integer", "description": "1-based inclusive start line (Antigravity StartLine / Cursor / DSH habit)."},
