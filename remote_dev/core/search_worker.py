@@ -325,7 +325,12 @@ if op == "glob":
     if not base.is_dir():
         fail("not_directory", f"RemoteGlob path is not a directory: {base}")
     pattern = payload.get("pattern") or "*"
-    limit = int(payload.get("limit") or 100)
+    limit = int(payload["limit"]) if payload.get("limit") is not None else 100
+    if limit == 0:
+        limit = 100000
+    offset = int(payload.get("offset") or 0)
+    if offset < 0:
+        fail("invalid_pagination", "offset must be >= 0")
     respect_gitignore = bool(payload.get("respect_gitignore"))
     extensions = payload.get("extensions") or []
     if isinstance(extensions, str):
@@ -388,7 +393,7 @@ if op == "glob":
             matches.append(row)
         else:
             heapq.heappush(matches, (st.st_mtime_ns, -seen, row))
-            if len(matches) > limit + 1:
+            if len(matches) > limit + offset + 1:
                 heapq.heappop(matches)
     if respect_gitignore:
         matches, gi_warnings = apply_gitignore(base, matches)
@@ -397,7 +402,8 @@ if op == "glob":
         matches.sort(key=lambda row: row["mtime_ns"], reverse=True)
     else:
         matches = [row for _, _, row in sorted(matches, reverse=True)]
-    print(json.dumps({"status": "ok", "matches": matches[:limit], "truncated": len(matches) > limit, "warnings": warnings}, sort_keys=True))
+    page = matches[offset:offset + limit]
+    print(json.dumps({"status": "ok", "matches": page, "offset": offset, "truncated": len(matches) > offset + limit, "warnings": warnings}, sort_keys=True))
     raise SystemExit(0)
 
 if op == "grep":
@@ -407,7 +413,9 @@ if op == "grep":
     pattern = payload.get("pattern")
     if not pattern:
         fail("pattern_required", "RemoteGrep requires pattern")
-    limit = int(payload.get("limit") or 100)
+    limit = int(payload["limit"]) if payload.get("limit") is not None else 100
+    if limit == 0:
+        limit = 5000
     offset = int(payload.get("offset") or 0)
     if offset < 0:
         fail("invalid_pagination", "offset must be >= 0")
@@ -424,14 +432,15 @@ if op == "grep":
     multiline = bool(payload.get("multiline", False))
     case_insensitive = bool(payload.get("case_insensitive", False))
     fixed_strings = bool(payload.get("fixed_strings", False))
+    only_matching = bool(payload.get("only_matching", False))
     before_context = int(payload.get("before_context") or 0)
     after_context = int(payload.get("after_context") or 0)
     context_lines = int(payload.get("context_lines") or 0)
     include_ignored = bool(payload.get("include_ignored", False))
     line_numbers = payload.get("line_numbers")
     line_numbers = True if line_numbers is None else bool(line_numbers)
-    if output_mode != "content" and (before_context or after_context or context_lines):
-        warnings_context = "context line options only apply to output_mode=content; ignoring them"
+    if output_mode != "content" and (before_context or after_context or context_lines or only_matching):
+        warnings_context = "context/only-matching options only apply to output_mode=content; ignoring them"
     else:
         warnings_context = ""
     warnings = []
@@ -469,6 +478,8 @@ if op == "grep":
             # several matches.
             cmd.extend(["--count-matches", "--with-filename"])
         else:
+            if only_matching:
+                cmd.append("-o")
             cmd.append("-n" if line_numbers else "--no-line-number")
             if context_lines:
                 cmd.extend(["-C", str(context_lines)])

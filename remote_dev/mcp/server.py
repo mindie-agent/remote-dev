@@ -108,10 +108,18 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
             error_outcome = details.get("outcome")
             if details.get("status") == "local_recording_failed" and details.get("operation_completed") is True:
                 error_outcome = details.get("execution_outcome", error_outcome)
+            blocks = payload.get("content")
+            if not isinstance(blocks, list) or not blocks:
+                blocks = [{"type": "text", "text": tool_text(payload)}]
+            else:
+                # Native image reads return an ordered MCP content array.
+                # Keep the textual receipt first so every client sees a
+                # human-readable result even when it cannot render images.
+                blocks = [{"type": "text", "text": tool_text(payload)}] + blocks
             result(
                 request_id,
                 {
-                    "content": [{"type": "text", "text": tool_text(payload)}],
+                    "content": blocks,
                     "structuredContent": details,
                     "isError": error_outcome not in {"success", "cancelled"},
                 },

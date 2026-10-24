@@ -64,7 +64,9 @@ def remote_glob(
     pattern: str = "*",
     path: str | None = None,
     limit: int = 100,
+    offset: int = 0,
     respect_gitignore: bool = False,
+    include_ignored: bool = False,
     extensions: list[str] | None = None,
     excludes: list[str] | None = None,
     entry_type: str | None = None,
@@ -86,7 +88,8 @@ def remote_glob(
         "path": base,
         "pattern": pattern or "*",
         "limit": limit,
-        "respect_gitignore": respect_gitignore,
+        "offset": offset,
+        "respect_gitignore": False if include_ignored else respect_gitignore,
     }
     if extensions:
         glob_req["extensions"] = [str(e) for e in extensions]
@@ -139,6 +142,7 @@ def remote_grep(
     multiline: bool = False,
     case_insensitive: bool = False,
     fixed_strings: bool = False,
+    only_matching: bool = False,
     before_context: int = 0,
     after_context: int = 0,
     context_lines: int = 0,
@@ -155,6 +159,8 @@ def remote_grep(
         output_mode = "files_with_matches"
     else:
         local_warnings = []
+    if limit == 0:
+        limit = MAX_GREP_MATCHES
     if limit > MAX_GREP_MATCHES:
         local_warnings.append(f"limit clamped from {limit} to {MAX_GREP_MATCHES}")
         limit = MAX_GREP_MATCHES

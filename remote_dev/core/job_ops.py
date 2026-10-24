@@ -31,7 +31,7 @@ from remote_dev.core.errors import RemoteExecutionError, caller_error
 from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS, compact_text
 from remote_dev.core.locking import record_lock
 from remote_dev.core.runtime_env import runtime_env_lines
-from remote_dev.core.state_store import atomic_write_json, find_job_record, job_record_path
+from remote_dev.core.state_store import atomic_write_json, find_job_record, job_record_path, resolve_ledger_scope
 from remote_dev.processes import control
 from remote_dev.result import make_result, tool_text, utc_now_iso
 from remote_dev.core.errors import error_details
@@ -59,7 +59,7 @@ def _stop_drain_seconds() -> float:
     return _default_stop_drain_seconds()
 
 
-MAX_YIELD_MS = 300000
+MAX_YIELD_MS = 600000
 MAX_INCREMENTAL_READ_BYTES = 32768
 UNKNOWN_JOB_STATES = frozenset({"unknown", "uncertain", "lost", "lost_outcome"})
 TERMINAL_JOB_STATES = frozenset({"succeeded", "failed", "timeout", "cancelled"})
@@ -235,14 +235,14 @@ def _yield_ms(value: int | None, default: int) -> int:
     return max(0, min(MAX_YIELD_MS, default if value is None else int(value)))
 
 
-def _save_output(record, path, row):
+def _save_output(record, path, row, *, cursor_key="stdin_cursors"):
     # Hold the record lock from read through exchange and cursor commit.
     # Overwrite from the committed length after a crash before cursor commit.
     # Do not expose a cursor that the local transaction did not commit. If a
     # file write or the receipt fails, the remote observation still exists and
     # the next read resumes the previous committed cursor without replaying input.
     updated = copy.deepcopy(record)
-    cursors = updated.setdefault("stdin_cursors", {})
+    cursors = updated.setdefault(cursor_key, {})
     local_offsets = updated.setdefault("local_output_offsets", {})
     for name in ("stdout", "stderr"):
         log = path.with_name(path.stem + "." + name + ".log")
@@ -359,6 +359,7 @@ def start_remote_job(
               "cwd": cwd, "env_keys": sorted(env), "runtime_env": runtime_enabled,
               "runtime_env_file": endpoint.runtime_env_file, "remote_dir": remote_job_dir(endpoint, job_id),
               "started_at": started, "timeout_ms": timeout_ms, "tty": bool(tty),
+              "session_scope": resolve_ledger_scope(),
               "authorization": {"token": uuid.uuid4().hex, "job_id": job_id}}
     budget = _output_budget_bytes(max_output_tokens)
     with record_lock(path):
@@ -542,6 +543,77 @@ def remote_job_output(
     endpoint: Endpoint | None, *, job_id: str, lines: int = 200, stream: str = "both", yield_time_ms: int | None = None
 ) -> dict[str, Any]:
     return _job_tail_impl(endpoint, job_id=job_id, lines=lines, stream=stream, yield_time_ms=yield_time_ms, tool="remote.job_output")
+
+
+@observed_tool("remote.job_output")
+@pinned_endpoint
+def remote_job_output_incremental(
+    endpoint: Endpoint | None,
+    *,
+    job_id: str,
+    wait: bool = False,
+    timeout_ms: int | None = None,
+    max_bytes: int = MAX_INCREMENTAL_READ_BYTES,
+) -> dict[str, Any]:
+    """Consuming read used by DSH ``job_output``.
+
+    Returns only bytes after this job's committed output cursor. With
+    ``wait=True`` it keeps polling until the job reaches a terminal state or
+    the caller's timeout budget expires; a timed-out wait leaves the job
+    running. Cursors are committed under the same record lock that guards
+    stdin, so concurrent readers never replay acknowledged output.
+    """
+    endpoint, _record, path = _load_record(endpoint, job_id)
+    started, start = utc_now_iso(), time.monotonic()
+    wait_ms = 30000 if timeout_ms is None else min(int(timeout_ms), 600000)
+    deadline = start + (max(0, wait_ms) / 1000.0) if wait else start
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    row: dict[str, Any] = {}
+    attempts = 0
+    while True:
+        with record_lock(path):
+            live = json.loads(path.read_text(encoding="utf-8"))
+            snapshot = dict(live.get("output_cursors") or {})
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000)) if wait else 0
+        delay = min(1000, remaining_ms) if wait else 0
+        row = control(
+            endpoint, job_id, "exchange", data="", eof=False,
+            stdout_offset=int(snapshot.get("stdout_offset") or 0),
+            stderr_offset=int(snapshot.get("stderr_offset") or 0),
+            max_bytes=max_bytes, shared_budget=True, yield_time_ms=delay,
+        )
+        with record_lock(path):
+            live = json.loads(path.read_text(encoding="utf-8"))
+            current = dict(live.get("output_cursors") or {})
+            if current != snapshot and attempts < 3:
+                attempts += 1
+                continue
+            _save_output(live, path, row, cursor_key="output_cursors")
+        stdout_parts.append(str(row.get("stdout") or ""))
+        stderr_parts.append(str(row.get("stderr") or ""))
+        state = str(row.get("state") or "unknown")
+        if not wait or state in TERMINAL_JOB_STATES or time.monotonic() >= deadline:
+            break
+    stdout = "".join(stdout_parts)
+    stderr = "".join(stderr_parts)
+    body = stdout
+    if stderr:
+        if body and not body.endswith("\n"):
+            body += "\n"
+        body += "[stderr]\n" + stderr
+    result = make_result(
+        tool="remote.job_output",
+        target=endpoint.to_result_target(),
+        outcome="success",
+        status="ok",
+        summary=f"Read output from remote job {job_id}.",
+        started_at=started,
+        duration_ms=_duration_ms(start),
+        preview={"content": body},
+        extra={"job_id": job_id, "state": str(row.get("state") or "unknown"), "wait": bool(wait)},
+    )
+    return {"text": body, "result": result}
 
 
 def _output_budget_bytes(max_output_tokens: int | None) -> int:

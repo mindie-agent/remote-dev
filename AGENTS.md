@@ -1,12 +1,12 @@
 # Remote Dev (`remote-dev`) — Agent-Native Architecture & Invariants
 
-`remote-dev` provides the shared remote workspace substrate (18 canonical `remote.*` tools + 40 native 6-Harness aliases over SSH JSON-RPC, durable background job supervision, and hash-verified binary artifact streaming) for MindIE Agent.
+`remote-dev` provides the shared remote workspace substrate (19 canonical `remote.*` tools + 60 native 6-Harness aliases over SSH JSON-RPC, durable background job supervision, and hash-verified binary artifact streaming) for MindIE Agent.
 
 ## 1. Module Navigation & Responsibilities
 
 | Module | Role | Key Entry Points |
 | :--- | :--- | :--- |
-| `remote_dev/mcp/tools.py` & `schemas.py` | MCP tool dispatcher, `remote://` resource reader, and 6-Harness alias normalizer (18 canonical tools + 40 native tool aliases across Claude Code, Codex, Kimi, Cursor, Antigravity, DSH) | `call_tool()`, `list_tools()`, `normalize_arguments()` |
+| `remote_dev/mcp/tools.py` & `schemas.py` | MCP tool dispatcher, `remote://` resource reader, and 6-Harness alias normalizer (19 canonical tools + 60 native tool aliases across Claude Code, Codex, Kimi, Cursor, Antigravity, DSH) | `call_tool()`, `list_tools()`, `normalize_arguments()` |
 | `remote_dev/mcp/server.py` | Stdio JSON-RPC 2.0 MCP server (`Content-Length` framed & newline-delimited) with dedicated short-control thread pool | `main()`, `Dispatcher`, `handle()` |
 | `remote_dev/cli.py` | Unified CLI entry point (`remote-dev <tool>`) sharing the MCP schema and dispatcher | `main()`, `run_tool()` |
 | `remote_dev/core/file_ops.py` & `remote_file_worker.py` | Remote `read`/`ls`/`write`/`edit`/`multi_edit` with read-ledger SHA-256 optimistic concurrency; `remote_file_worker.py` is a standalone `.py` file loaded via `lru_cache` | `remote_read()`, `remote_write()`, `remote_edit()`, `remote_multi_edit()`, `remote_ls()` |

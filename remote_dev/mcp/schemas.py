@@ -71,7 +71,9 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "verify_content": {"type": "boolean", "default": True, "description": "Compute full SHA256 and exact line count for edit concurrency. False bounds positive-offset log reads to the requested window and reports unknown total_lines when more data exists."},
             "allow_symlink": {"type": "boolean", "default": False},
             "offset": {"type": "integer", "default": 1, "description": "1-based first line. Negative values count back from the end of the file."},
-            "limit": {"type": "integer", "default": 200, "maximum": 500},
+            "limit": {"type": "integer", "default": 200, "maximum": 5000},
+            "max_chars": {"type": "integer", "minimum": 1, "description": "Optional character budget for the returned text, including line-number prefixes. Native Kimi Read advertises 100000 by default and 500000 maximum; canonical calls leave it unset."},
+            "column_offset": {"type": "integer", "minimum": 0, "description": "Zero-based character offset within the first selected line of a forward read, excluding the line-number prefix."},
             "line_offset": {"type": "integer", "description": "Alias of offset (Kimi native Read habit)."},
             "n_lines": {"type": "integer", "description": "Alias of limit (Kimi native Read habit)."},
             "start_line": {"type": "integer", "description": "1-based inclusive start line (Antigravity StartLine / Cursor / DSH habit)."},
@@ -147,7 +149,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional explicit execution limit in milliseconds. Omit to wait for completion, failure or cancellation."},
             "timeout": {"type": "integer", "minimum": 1, "description": "Alias of timeout_ms; values must agree if both are supplied."},
             "tty": {"type": "boolean", "default": False, "description": "Allocate a remote PTY (24x80). Ctrl-C signals its foreground process group; stderr is merged into stdout."},
-            "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 300000, "default": 10000, "description": "Remote wait for output/completion after connection and preparation. Returns session_id when running or unread output remains."},
+            "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 600000, "default": 10000, "description": "Remote wait for output/completion after connection and preparation. Returns session_id when running or unread output remains."},
             "run_in_background": {"type": "boolean", "description": "Launch in background and return job_id/session_id immediately (Claude Code run_in_background / Antigravity IsDaemon / Cursor is_background habit)."},
             "max_output_tokens": {"type": "integer", "minimum": 1, "description": "Approximate output budget at four UTF-8 bytes/token across text plus structured previews, shared by stdout/stderr. Status/refs metadata is separate. Unreturned bytes remain available through the session cursor."},
             "env": {"type": "object", "additionalProperties": {"type": "string"}},
@@ -158,8 +160,10 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         {
             "pattern": {"type": "string"},
             "path": {"type": "string"},
-            "limit": {"type": "integer"},
+            "limit": {"type": "integer", "minimum": 0, "description": "Maximum paths after offset. 0 means no match-count limit for native Kimi Glob; canonical callers normally use a positive page size."},
+            "offset": {"type": "integer", "minimum": 0, "description": "Number of matching paths to skip before the limit."},
             "respect_gitignore": {"type": "boolean", "description": "Omit paths ignored by .gitignore. Uses git check-ignore when the remote tree is a git worktree; otherwise applies .gitignore rules in-process."},
+            "include_ignored": {"type": "boolean", "description": "Include paths excluded by ignore files; inverse of respect_gitignore, provided for native Kimi/Claude habits."},
             "extensions": {"type": "array", "items": {"type": "string"}, "description": "Optional file extensions filter without leading dot (Antigravity find_by_name Extensions habit)."},
             "excludes": {"type": "array", "items": {"type": "string"}, "description": "Optional glob patterns to exclude (Antigravity Excludes / Cursor exclude_pattern habit)."},
             "entry_type": {"type": "string", "enum": ["file", "directory", "any"], "description": "Filter by entry type: file, directory, or any (Antigravity find_by_name Type habit)."},
@@ -179,6 +183,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "output_mode": {"type": "string", "enum": ["files_with_matches", "content", "count", "count_matches"], "description": "count = matching lines per file (Claude habit); count_matches = total matches per file (Kimi habit, rg --count-matches). They differ when one line holds several matches."},
             "multiline": {"type": "boolean"},
             "fixed_strings": {"type": "boolean", "description": "Treat pattern as a literal string instead of a regular expression (rg -F / grep -F; Antigravity IsRegex=false habit)."},
+            "only_matching": {"type": "boolean", "description": "Print only the matched non-empty parts, one per output line (rg -o; Claude Code Grep -o habit). Only applies to output_mode=content."},
             "case_insensitive": {"type": "boolean", "description": "Case-insensitive matching (rg -i / grep -i). Alias: -i."},
             "-i": {"type": "boolean", "description": "Alias of case_insensitive (Claude Code / Kimi native Grep parameter)."},
             "context_lines": {"type": "integer", "description": "Show N lines before and after each match in content mode (rg/grep -C). Alias: -C."},
@@ -200,7 +205,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                     "directory excludes and reports a warning."
                 ),
             },
-            "limit": {"type": "integer", "maximum": 500},
+            "limit": {"type": "integer", "minimum": 0, "maximum": 5000, "description": "Maximum lines/entries after offset. 0 means no match-count limit for native Kimi Grep."},
         },
         ["pattern"],
     ),
@@ -657,3 +662,68 @@ def normalize_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
             normalized["ignore_globs"] = [normalized["ignore_globs"]]
 
     return normalized
+
+
+CANONICAL_DESCRIPTIONS: dict[str, str] = {
+    "remote.read": "Read a remote file with native Read-like pagination and a read ledger.",
+    "remote.write": "Write a remote file with overwrite support and optional read-ledger concurrency checks.",
+    "remote.edit": "Edit a remote file with exact string replacement and optional read-ledger concurrency checks.",
+    "remote.multi_edit": "Apply multiple exact edits atomically to one remote file.",
+    "remote.bash": "Run a remote shell command with Bash-like semantics, logs, preview, and automatic yield, writable stdin and optional PTY.",
+    "remote.glob": "Find remote paths with ** glob semantics.",
+    "remote.grep": "Search remote files with rg-compatible semantics and a grep -E (POSIX ERE) fallback.",
+    "remote.ls": "List a remote directory without reading file contents.",
+    "remote.apply_patch": "Apply a Codex apply_patch payload or unified diff on a remote endpoint.",
+    "remote.job_status": "Check a remote background job through the shared process supervisor.",
+    "remote.job_tail": "Tail remote background job logs through the shared process supervisor.",
+    "remote.job_output": "Read remote background job output through the shared process supervisor.",
+    "remote.job_stop": "Stop a remote background job through the shared process supervisor.",
+    "remote.job_stdin": "Write to a remote session's stdin (Codex write_stdin habit), with optional EOF and output polling.",
+    "remote.artifact_manifest": "Build a remote artifact sha256 manifest.",
+    "remote.artifact_pull": "Pull a remote artifact through SSH streaming with hash verification; reject local overwrite by default.",
+    "remote.artifact_push": "Push a local artifact through SSH streaming with hash verification.",
+    "remote.context_snapshot": "Write a compact endpoint context snapshot.",
+    "remote.probe": "Probe basic endpoint facts.",
+}
+
+
+def harness_catalog(profile: str | None = None) -> list[dict[str, Any]]:
+    """Return the exact tools/list payload for a trusted harness profile.
+
+    Build-time catalog generators call this function; the MCP server and CLI
+    use the same function so discovery cannot drift from dispatch.
+    """
+    from .harness_profiles import (
+        CANONICAL_PROFILE,
+        native_input_schema,
+        resolve_profile,
+        specs_for,
+    )
+
+    resolved = resolve_profile(profile)
+    # Grok's session registry rejects dotted names even when its MCP doctor
+    # successfully lists them. Advertise the portable aliases to every client;
+    # call_tool still accepts canonical dotted names for existing integrations.
+    tools = [
+        {"name": alias, "description": CANONICAL_DESCRIPTIONS.get(name, name), "inputSchema": TOOL_SCHEMAS[name]}
+        for alias, name in ALIASES.items()
+    ]
+    if resolved == CANONICAL_PROFILE:
+        return tools
+    by_name = {tool["name"]: index for index, tool in enumerate(tools)}
+    for spec in specs_for(resolved).values():
+        entry = {
+            "name": spec.wire,
+            "description": spec.description,
+            "inputSchema": native_input_schema(spec, ENDPOINT_PROPS),
+        }
+        # A native name that equals a portable canonical alias (for example
+        # DSH ``read`` -> ``remote_read``) is the same wire name. Native
+        # semantics win on the advertised schema; the server still accepts the
+        # canonical fields for compatibility.
+        if spec.wire in by_name:
+            tools[by_name[spec.wire]] = entry
+        else:
+            by_name[spec.wire] = len(tools)
+            tools.append(entry)
+    return tools

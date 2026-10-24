@@ -279,6 +279,12 @@ def main() -> None:
         if limit < 1 or offset == 0:
             fail("invalid_pagination", "limit must be positive and offset must not be zero")
         max_line_chars = int(payload.get("max_line_chars") or 2000)
+        max_chars = int(payload["max_chars"]) if payload.get("max_chars") is not None else None
+        column_offset = int(payload.get("column_offset") or 0)
+        if column_offset and offset < 0:
+            fail("invalid_pagination", "column_offset is only supported for forward reads")
+        if column_offset < 0:
+            fail("invalid_pagination", "column_offset must be >= 0")
         verify = bool(payload.get("verify_content", True))
         outline = bool(payload.get("outline", False))
         node_paths = payload.get("node_paths")
@@ -429,6 +435,37 @@ def main() -> None:
             fail("file_changed", "file changed during read; retry to obtain a consistent read")
         start = min(offset - 1, total)
         end = min(start + limit, total)
+        if column_offset and selected:
+            first_index, first_body, first_clipped = selected[0]
+            if column_offset > len(first_body):
+                fail("invalid_pagination", f"column_offset {column_offset} is past the end of line {first_index}")
+            selected[0] = (first_index, first_body[column_offset:], first_clipped or len(first_body) - column_offset > max_line_chars)
+        next_offset = None
+        next_column_offset = None
+        if max_chars is not None:
+            budgeted = []
+            used = 0
+            truncated_by_chars = False
+            for index, body, clipped in selected:
+                rendered_len = len(str(index)) + 3 + len(body) + 1
+                if used + rendered_len > max_chars:
+                    if not budgeted:
+                        room = max(1, max_chars - used - len(str(index)) - 4)
+                        body = body[:room]
+                        clipped = True
+                        budgeted.append((index, body, clipped))
+                        next_offset = index
+                        next_column_offset = len(body)
+                    else:
+                        next_offset = index
+                        next_column_offset = 0
+                    truncated_by_chars = True
+                    break
+                budgeted.append((index, body, clipped))
+                used += rendered_len
+            selected = budgeted
+            if truncated_by_chars:
+                end = selected[-1][0] if selected else start
         truncated_lines = sum(clipped for _, _, clipped in selected)
         numbered = "\n".join(f"{index} | {body}" + ("<remote-dev line truncated>" if clipped else "")
                              for index, body, clipped in selected)
@@ -436,9 +473,14 @@ def main() -> None:
                 "mtime_ns": after.st_mtime_ns, "sha256": digest.hexdigest() if digest else None,
                 "total_lines": total_lines, "offset": offset, "limit": limit,
                 "line_start": start + 1 if total else 0, "line_end": end,
-                "partial": start > 0 or more or end < total or content_offset > 0, "content": numbered,
+                "partial": start > 0 or more or end < total or content_offset > 0 or (max_chars is not None and next_offset is not None), "content": numbered,
                 "truncated_line_count": truncated_lines, "symlink": path.is_symlink(),
                 "content_verified": verify}
+        if column_offset:
+            info["column_offset"] = column_offset
+        if next_offset is not None:
+            info["next_offset"] = next_offset
+            info["next_column_offset"] = next_column_offset or 0
         if content_offset > 0:
             info["content_offset"] = content_offset
         warnings = []

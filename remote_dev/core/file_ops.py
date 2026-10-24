@@ -68,6 +68,8 @@ def remote_read(
     node_paths: list[str] | None = None,
     allow_symlink: bool = False,
     verify_content: bool = True,
+    max_chars: int | None = None,
+    column_offset: int = 0,
     client_context_id: str | None = None,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -99,8 +101,12 @@ def remote_read(
         "limit": limit,
         "allow_symlink": allow_symlink,
         "verify_content": verify_content,
-        "max_line_chars": MAX_LINE_CHARS,
+        "max_line_chars": MAX_LINE_CHARS if max_chars is None else max(MAX_LINE_CHARS, min(int(max_chars), 500000)),
     }
+    if max_chars is not None:
+        payload_req["max_chars"] = int(max_chars)
+    if column_offset:
+        payload_req["column_offset"] = int(column_offset)
     if start_line is not None:
         payload_req["start_line"] = int(start_line)
     if end_line is not None:
@@ -145,7 +151,7 @@ def remote_read(
         warnings=warnings,
         extra={"file": {k: v for k, v in file_info.items() if k != "content"}, "error": data.get("error"), "error_details": data.get("error_details"), "ledger_scope": ledger_scope},
     )
-    text = _format_read_text(endpoint, result, file_info)
+    text = _format_read_text(endpoint, result, file_info, max_chars=max_chars)
     payload = {"text": text, "result": result}
     if recording_error:
         from remote_dev.result import recording_failure
@@ -447,7 +453,13 @@ def _format_endpoint(endpoint: Endpoint) -> str:
     return f"{endpoint.user}@{endpoint.host}:{endpoint.port}"
 
 
-def _format_read_text(endpoint: Endpoint, result: dict[str, Any], file_info: dict[str, Any]) -> str:
+def _format_read_text(
+    endpoint: Endpoint,
+    result: dict[str, Any],
+    file_info: dict[str, Any],
+    *,
+    max_chars: int | None = None,
+) -> str:
     lines = [
         f"RemoteRead on {_format_endpoint(endpoint)}",
         f"file: {file_info.get('path', '')}",
@@ -458,7 +470,12 @@ def _format_read_text(endpoint: Endpoint, result: dict[str, Any], file_info: dic
     ]
     if result.get("error"):
         lines.append(f"error: {result['error']}")
-    return compact_text("\n".join(lines).rstrip() + "\n")
+    rendered = "\n".join(lines).rstrip() + "\n"
+    if max_chars is None:
+        return compact_text(rendered)
+    # Native Read budgets characters across content plus status. Keep the
+    # canonical header but never fold or clip below the requested budget.
+    return rendered if len(rendered) <= int(max_chars) else rendered[: int(max_chars)].rstrip() + "\n"
 
 
 def _format_ls_text(endpoint: Endpoint, result: dict[str, Any]) -> str:
