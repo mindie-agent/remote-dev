@@ -985,6 +985,8 @@ def dsh_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normali
     if kind == "background":
         job_id = result.get("job_id") or result.get("session_id")
         text = f"background job {job_id}"
+        for key in ("timeoutMs", "output", "stdout", "stderr", "exitCode", "timedOut", "aborted"):
+            result.pop(key, None)
     elif kind == "promoted":
         job_id = result.get("job_id") or result.get("session_id")
         text += f"\n[still running after {timeout_ms}ms; moved to background job {job_id}]"
@@ -1004,4 +1006,48 @@ def dsh_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normali
     })
     if kind in {"background", "promoted"}:
         result["jobId"] = result.get("job_id") or result.get("session_id")
+    return payload
+
+
+@handler("kimi_bash")
+def kimi_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
+    payload = call_canonical("remote.bash", normalized)
+    result = payload.get("result") or {}
+    state = str(result.get("state") or result.get("status") or "unknown")
+    preview = result.get("preview") or {}
+    stdout = str(preview.get("stdout") or "")
+    stderr = str(preview.get("stderr") or "")
+    exit_code = result.get("exit_code")
+    job_id = result.get("job_id") or result.get("session_id")
+    body = stdout + stderr
+    if state in {"prepared", "running"}:
+        body = f"task_id: {job_id}\nstatus: running\n" + body
+    elif exit_code not in (None, 0):
+        body = body.rstrip() + f"\nCommand failed with exit code: {exit_code}."
+    payload["text"] = body if body.endswith("\n") else body + "\n"
+    result.update({"tool": spec.wire, "status": state, "task_id": job_id, "exit_code": exit_code})
+    return payload
+
+
+@handler("claude_bash")
+def claude_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
+    payload = call_canonical("remote.bash", normalized)
+    result = payload.get("result") or {}
+    state = str(result.get("state") or result.get("status") or "unknown")
+    preview = result.get("preview") or {}
+    stdout = str(preview.get("stdout") or "")
+    stderr = str(preview.get("stderr") or "")
+    exit_code = result.get("exit_code")
+    job_id = result.get("job_id") or result.get("session_id")
+    body = stdout
+    if stderr:
+        if body and not body.endswith("\n"):
+            body += "\n"
+        body += stderr
+    if state in {"prepared", "running"} and native.get("run_in_background") is True:
+        body = body.rstrip() + f"\nbackgroundTaskId: {job_id}"
+    elif exit_code not in (None, 0):
+        body = body.rstrip() + f"\n[exit code: {exit_code}]"
+    payload["text"] = body if body.endswith("\n") else body + "\n"
+    result.update({"tool": spec.wire, "status": state, "backgroundTaskId": job_id if state in {"prepared", "running"} else None, "exit_code": exit_code})
     return payload

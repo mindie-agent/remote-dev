@@ -275,6 +275,7 @@ KIMI_BASH = NativeToolSpec(
         "disable_timeout": {"type": "boolean", "description": "Do not apply a timeout; only meaningful with run_in_background=true."},
     },
     required=("command",),
+    handler="kimi_bash",
     normalize=_kimi_bash,
 )
 
@@ -1006,6 +1007,7 @@ CLAUDE_BASH = NativeToolSpec(
         "dangerouslyDisableSandbox": {"type": "boolean", "description": "Local host sandbox override; rejected for remote calls."},
     },
     required=("command",),
+    handler="claude_bash",
     normalize=_claude_bash,
 )
 
