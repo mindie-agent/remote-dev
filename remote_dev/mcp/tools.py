@@ -297,6 +297,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             max_chars=int(args["max_chars"]) if args.get("max_chars") is not None else None,
             column_offset=int(args.get("column_offset") or 0),
             pages=args.get("pages"),
+            strict_offset=bool(args.get("strict_offset", False)),
             client_context_id=args.get("client_context_id"),
             timeout_ms=timeout_ms,
         )
@@ -311,6 +312,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             old_string=str(_require(args, "old_string", name)),
             new_string=_require(args, "new_string", name, allow_empty=True),
             replace_all=bool(args.get("replace_all", False)),
+            normalize_crlf=bool(args.get("normalize_crlf", False)),
             start_line=int(args["start_line"]) if args.get("start_line") is not None else None,
             end_line=int(args["end_line"]) if args.get("end_line") is not None else None,
             client_context_id=args.get("client_context_id"),

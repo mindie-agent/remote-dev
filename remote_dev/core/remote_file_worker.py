@@ -246,6 +246,18 @@ def main() -> None:
     root = pathlib.Path(payload["root"]).resolve()
     cwd = pathlib.Path(payload.get("cwd") or payload["root"])
 
+    if op == "stat":
+        path, resolved = resolve_path(payload["file_path"], root, cwd)
+        if not path.exists() and not path.is_symlink():
+            print(json.dumps({"status": "missing", "path": str(path), "exists": False}, sort_keys=True))
+            raise SystemExit(0)
+        if path.is_symlink():
+            print(json.dumps({"status": "symlink", "path": str(path), "exists": True, "is_file": path.is_file()}, sort_keys=True))
+            raise SystemExit(0)
+        info = file_info(path) if path.is_file() else {"path": str(path)}
+        print(json.dumps({"status": "ok", "path": str(path), "exists": True, "is_file": path.is_file(), **info}, sort_keys=True))
+        raise SystemExit(0)
+
     if op == "read":
         path, resolved = resolve_path(payload["file_path"], root, cwd)
         if path.is_dir():
@@ -435,6 +447,8 @@ def main() -> None:
         after = path.stat()
         if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
             fail("file_changed", "file changed during read; retry to obtain a consistent read")
+        if payload.get("strict_offset") and offset > total:
+            fail("invalid_pagination", f"offset {offset} is past the end of the file ({total} lines)")
         start = min(offset - 1, total)
         end = min(start + limit, total)
         if column_offset and selected:
@@ -602,7 +616,11 @@ def main() -> None:
         expected_sha = payload.get("expected_sha256")
         if expected_sha and before_sha != expected_sha:
             fail("file_changed_since_read", "remote file changed since last RemoteRead", before_sha256=before_sha, expected_sha256=expected_sha)
+        pure_crlf = b"\r\n" in before_raw and before_raw.count(b"\n") == before_raw.count(b"\r\n")
+        normalize_crlf = bool(payload.get("normalize_crlf")) and pure_crlf
         before = before_raw.decode("utf-8", errors="replace")
+        if normalize_crlf:
+            before = before.replace("\r\n", "\n")
         after = before
         edits = payload.get("edits") if op == "multi_edit" else [{
             "old_string": payload.get("old_string", ""),
@@ -668,7 +686,8 @@ def main() -> None:
                 after = after.replace(old, new, -1 if replace_all else 1)
         if after == before:
             fail("no_change", "edit produced no file changes")
-        atomic_write(path, after.encode("utf-8"))
+        materialized = after.replace("\n", "\r\n") if normalize_crlf else after
+        atomic_write(path, materialized.encode("utf-8"))
         after_info = file_info(path)
         print(json.dumps({
             "status": "edited",

@@ -43,6 +43,37 @@ def _allowed_endpoint_fields() -> set[str]:
     return set(ENDPOINT_PROPS) | set(selector_fields())
 
 
+def _require_prior_read(normalized: Mapping[str, Any]) -> None:
+    """Enforce the native observation policy for existing files."""
+    from remote_dev.core.endpoint import resolve_endpoint
+    from remote_dev.core.errors import EndpointError
+    from remote_dev.core.file_ops import remote_stat
+    from remote_dev.core.path_policy import join_under_root
+    from remote_dev.core.state_store import load_read_ledger
+
+    file_path = normalized.get("file_path")
+    if not file_path:
+        return
+    try:
+        endpoint = resolve_endpoint(dict(normalized))
+    except EndpointError:
+        # Dispatch will report the missing/ambiguous endpoint itself.
+        return
+    try:
+        stat = remote_stat(endpoint, file_path=str(file_path))
+    except (ValueError, TimeoutError, OSError) as exc:
+        raise caller_error(f"cannot verify prior read for {file_path}: {exc}") from exc
+    if stat.get("status") == "path_outside_root":
+        raise caller_error(str(stat.get("error") or "path outside endpoint root"))
+    if not stat.get("exists"):
+        return
+    path = join_under_root(endpoint.root, endpoint.effective_cwd, str(file_path))
+    if not load_read_ledger(endpoint, str(path)):
+        raise caller_error(
+            f"{file_path} has not been read yet in this session; read it before writing or editing"
+        )
+
+
 def _native_defaults(spec: NativeToolSpec, args: Mapping[str, Any]) -> dict[str, Any]:
     merged = dict(spec.defaults)
     merged.update(args)
@@ -55,17 +86,22 @@ def dispatch_native(
     args: dict[str, Any],
     call_canonical: CanonicalCall,
 ) -> dict[str, Any]:
+    # Validate the native contract before any compatibility shortcut: a
+    # canonical field must never bypass a required native field or a native
+    # type/unit check.
+    validate_native_arguments(spec, args, _allowed_endpoint_fields())
     # A call that names a documented canonical-compatibility field is served
     # by the canonical contract (for example ``lines`` on DSH job_output or
-    # ``start_line`` on DSH read). The canonical dispatcher performs its own
-    # required/unknown/type validation, including canonical path aliases.
+    # ``start_line`` on DSH read). Required native fields and native types
+    # were already checked above.
     if spec.compat_properties and set(args) & set(spec.compat_properties):
         return call_canonical(spec.canonical, dict(args))
-    validate_native_arguments(spec, args, _allowed_endpoint_fields())
     native_args = _native_defaults(spec, args)
     normalized = spec.normalize(native_args) if spec.normalize is not None else native_args
     if not isinstance(normalized, dict):
         raise caller_error(f"{spec.wire} internal normalization did not produce an object")
+    if spec.require_prior_read:
+        _require_prior_read(normalized)
     if spec.handler == "canonical":
         return call_canonical(spec.canonical, normalized)
     try:
@@ -823,6 +859,7 @@ def claude_notebook_edit(profile: str, spec: NativeToolSpec, native: dict[str, A
             "cell_type": cell_type,
             "metadata": {},
             "source": [str(native["new_source"])],
+            "id": f"cell-{uuid.uuid4().hex[:12]}",
         }
         if cell_type == "code":
             new_cell["execution_count"] = None
@@ -906,3 +943,55 @@ def claude_task_list(profile: str, spec: NativeToolSpec, native: dict[str, Any],
             extra={"tasks": tasks, "task_count": len(tasks)},
         ),
     }
+
+
+@handler("dsh_bash")
+def dsh_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
+    payload = call_canonical("remote.bash", normalized)
+    result = payload.get("result") or {}
+    state = str(result.get("state") or result.get("status") or "unknown")
+    preview = result.get("preview") or {}
+    stdout = str(preview.get("stdout") or "")
+    stderr = str(preview.get("stderr") or "")
+    exit_code = result.get("exit_code")
+    background = native.get("run_in_background") is True
+    timeout_ms = int(native.get("timeoutMs", 120000))
+    if background:
+        kind = "background"
+    elif state in {"prepared", "running"}:
+        kind = "promoted"
+    else:
+        kind = "foreground"
+    body = stdout
+    if stderr:
+        if body and not body.endswith("\n"):
+            body += "\n"
+        body += "[stderr]\n" + stderr
+    markers = []
+    if state == "timeout":
+        markers.append(f"[timed out after {timeout_ms}ms]")
+    if state == "cancelled":
+        markers.append("[stopped]")
+    if exit_code not in (None, 0):
+        markers.append(f"[exit code: {exit_code}]")
+    text = body.rstrip() if body else "(no output)"
+    if kind in {"background", "promoted"}:
+        job_id = result.get("job_id") or result.get("session_id")
+        text += f"\n[still running after {timeout_ms}ms; moved to background job {job_id}]"
+    if markers:
+        text += "\n" + "\n".join(markers)
+    payload["text"] = text + "\n"
+    result.update({
+        "tool": spec.wire,
+        "kind": kind,
+        "timeoutMs": timeout_ms,
+        "output": body,
+        "stdout": stdout,
+        "stderr": stderr,
+        "exitCode": exit_code,
+        "timedOut": state == "timeout",
+        "aborted": state == "cancelled",
+    })
+    if kind in {"background", "promoted"}:
+        result["jobId"] = result.get("job_id") or result.get("session_id")
+    return payload

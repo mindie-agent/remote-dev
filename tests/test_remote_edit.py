@@ -159,6 +159,8 @@ class RemoteEditTests(unittest.TestCase):
             ]
             with mock.patch.object(state_store, "substrate_root", return_value=root / "state"), mock.patch.object(
                 file_ops, "run_remote_python", side_effect=local_remote_python
+            ), mock.patch.object(
+                file_ops, "remote_stat", return_value={"status": "missing", "exists": False}
             ):
                 for idx, (tool_name, make_args) in enumerate(cases):
                     with self.subTest(tool_name=tool_name):

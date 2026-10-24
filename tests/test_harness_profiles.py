@@ -122,7 +122,7 @@ class CatalogTests(unittest.TestCase):
 
         with mock.patch.object(tools, "_call_canonical", fake):
             tools.call_tool("remote_Read", {"path": "/tmp/x"}, profile="kimi")
-            self.assertEqual(calls[-1][1]["limit"], 20000)
+            self.assertEqual(calls[-1][1]["limit"], 100000)
             self.assertEqual(calls[-1][1]["max_chars"], 100000)
             tools.call_tool("remote_Write", {"path": "/tmp/x", "content": "x"}, profile="kimi")
             self.assertTrue(calls[-1][1]["overwrite"])

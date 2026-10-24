@@ -72,6 +72,7 @@ class NativeToolSpec:
     handler: str = "canonical"
     compat_properties: Mapping[str, Any] = field(default_factory=dict)
     additional_properties: bool = False
+    require_prior_read: bool = False
     normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     @property
@@ -115,9 +116,9 @@ def _kimi_read(args: dict[str, Any]) -> dict[str, Any]:
         out["limit"] = int(args["n_lines"])
     else:
         # Native Read has no fixed line-count cap; the character budget bounds
-        # the page. This is a transport guard large enough for the 500000-char
-        # native maximum even on one-character lines.
-        out["limit"] = 20000
+        # the page. This transport guard covers the 500000-char native maximum
+        # for realistic line lengths.
+        out["limit"] = 100000
     if args.get("max_chars") is not None:
         out["max_chars"] = int(args["max_chars"])
     if args.get("column_offset") is not None:
@@ -142,6 +143,7 @@ def _kimi_edit(args: dict[str, Any]) -> dict[str, Any]:
     out["old_string"] = args["old_string"]
     out["new_string"] = args["new_string"]
     out["replace_all"] = bool(args.get("replace_all", False))
+    out["normalize_crlf"] = True
     return out
 
 
@@ -239,6 +241,7 @@ KIMI_WRITE = NativeToolSpec(
     },
     required=("path", "content"),
     defaults={"mode": "overwrite"},
+    require_prior_read=True,
     normalize=_kimi_write,
 )
 
@@ -254,6 +257,7 @@ KIMI_EDIT = NativeToolSpec(
     },
     required=("path", "old_string", "new_string"),
     defaults={"replace_all": False},
+    require_prior_read=True,
     normalize=_kimi_edit,
 )
 
@@ -324,10 +328,10 @@ KIMI_READ_MEDIA = NativeToolSpec(
         "region": {
             "type": "object",
             "properties": {
-                "x": {"type": "number"},
-                "y": {"type": "number"},
-                "width": {"type": "number"},
-                "height": {"type": "number"},
+                "x": {"type": "integer", "minimum": 0},
+                "y": {"type": "integer", "minimum": 0},
+                "width": {"type": "integer", "minimum": 1},
+                "height": {"type": "integer", "minimum": 1},
             },
             "required": ["x", "y", "width", "height"],
             "additionalProperties": False,
@@ -522,8 +526,17 @@ def validate_native_arguments(spec: NativeToolSpec, args: Mapping[str, Any], all
         raise HarnessProfileError(
             f"{spec.wire} received unsupported argument(s): {', '.join(unknown)}"
         )
+    required_aliases = {
+        "file_path": ("path", "AbsolutePath", "TargetFile", "target_file"),
+        "command": ("cmd",),
+        "job_id": ("session_id", "task_id", "bash_id", "shell_id"),
+        "task_id": ("bash_id", "shell_id"),
+        "path": ("file_path",),
+    }
     for key in spec.required:
         if key not in args or args[key] is None:
+            if any(alias in args for alias in required_aliases.get(key, ())):
+                continue
             raise HarnessProfileError(f"{spec.wire} requires {key}")
     for key, value in args.items():
         schema = spec.properties.get(key)
@@ -563,6 +576,7 @@ def _dsh_read(args: dict[str, Any]) -> dict[str, Any]:
     out["file_path"] = args["file_path"]
     out["offset"] = int(args.get("offset", 1))
     out["limit"] = int(args.get("limit", 2000))
+    out["strict_offset"] = True
     return out
 
 
@@ -583,6 +597,7 @@ def _dsh_edit(args: dict[str, Any]) -> dict[str, Any]:
     out["old_string"] = args["old_string"]
     out["new_string"] = args["new_string"]
     out["replace_all"] = bool(args.get("replace_all", False))
+    out["normalize_crlf"] = True
     return out
 
 
@@ -677,6 +692,7 @@ DSH_WRITE = NativeToolSpec(
         "client_context_id": {"type": "string"},
     },
     additional_properties=True,
+    require_prior_read=True,
     normalize=_dsh_write,
 )
 
@@ -701,6 +717,7 @@ DSH_EDIT = NativeToolSpec(
         "client_context_id": {"type": "string"},
     },
     additional_properties=True,
+    require_prior_read=True,
     normalize=_dsh_edit,
 )
 
@@ -714,7 +731,6 @@ DSH_BASH = NativeToolSpec(
         "timeoutMs": {"type": "number", "minimum": 1},
         "workdir": {"type": "string"},
         "run_in_background": {"type": "boolean"},
-        **_DSH_SANDBOX_PROPERTIES,
     },
     required=("command", "description"),
     compat_properties={
@@ -726,6 +742,7 @@ DSH_BASH = NativeToolSpec(
         "tty": {"type": "boolean"},
     },
     additional_properties=True,
+    handler="dsh_bash",
     normalize=_dsh_bash,
 )
 
@@ -861,6 +878,7 @@ def _claude_edit(args: dict[str, Any]) -> dict[str, Any]:
     out["old_string"] = args["old_string"]
     out["new_string"] = args["new_string"]
     out["replace_all"] = bool(args.get("replace_all", False))
+    out["normalize_crlf"] = True
     return out
 
 
@@ -955,6 +973,7 @@ CLAUDE_WRITE = NativeToolSpec(
         "content": {"type": "string", "description": "The content to write to the file."},
     },
     required=("file_path", "content"),
+    require_prior_read=True,
     normalize=_claude_write,
 )
 
@@ -970,6 +989,7 @@ CLAUDE_EDIT = NativeToolSpec(
     },
     required=("file_path", "old_string", "new_string"),
     defaults={"replace_all": False},
+    require_prior_read=True,
     normalize=_claude_edit,
 )
 
@@ -1169,7 +1189,6 @@ CODEX_EXEC = NativeToolSpec(
         "login": {"type": "boolean", "description": "Host-local login-shell selection; rejected for remote calls."},
         "environment_id": {"type": "string", "description": "Environment id; remote-dev supports only the primary environment."},
         "sandbox_permissions": {"type": "string", "enum": _CODEX_SANDBOX_VALUES},
-        "additional_permissions": {"type": "object"},
         "justification": {"type": "string"},
         "prefix_rule": {"type": "array", "items": {"type": "string"}},
     },

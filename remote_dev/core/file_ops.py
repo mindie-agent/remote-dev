@@ -71,6 +71,7 @@ def remote_read(
     max_chars: int | None = None,
     column_offset: int = 0,
     pages: str | None = None,
+    strict_offset: bool = False,
     client_context_id: str | None = None,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -110,6 +111,8 @@ def remote_read(
         payload_req["column_offset"] = int(column_offset)
     if pages is not None:
         payload_req["pages"] = str(pages)
+    if strict_offset:
+        payload_req["strict_offset"] = True
     if start_line is not None:
         payload_req["start_line"] = int(start_line)
     if end_line is not None:
@@ -164,6 +167,25 @@ def remote_read(
 
 @observed_tool("remote.ls")
 @pinned_endpoint
+def remote_stat(
+    endpoint: Endpoint,
+    *,
+    file_path: str,
+    timeout_ms: int | None = None,
+) -> dict[str, Any]:
+    """Return remote file existence/metadata without reading content."""
+    try:
+        path = join_under_root(endpoint.root, endpoint.effective_cwd, file_path)
+    except PathPolicyError as exc:
+        return {"status": "path_outside_root", "error": str(exc), "exists": False}
+    return run_remote_python(
+        endpoint,
+        REMOTE_FILE_PY,
+        {"op": "stat", "root": endpoint.root, "cwd": endpoint.effective_cwd, "file_path": path},
+        timeout_ms=timeout_ms,
+    )
+
+
 def remote_ls(
     endpoint: Endpoint,
     *,
@@ -267,6 +289,7 @@ def remote_edit(
     old_string: str,
     new_string: str,
     replace_all: bool = False,
+    normalize_crlf: bool = False,
     start_line: int | None = None,
     end_line: int | None = None,
     client_context_id: str | None = None,
@@ -291,6 +314,7 @@ def remote_edit(
         "old_string": old_string,
         "new_string": new_string,
         "replace_all": replace_all,
+        "normalize_crlf": normalize_crlf,
         "expected_sha256": expected_sha,
     }
     if start_line is not None:
