@@ -10,6 +10,22 @@ from typing import Any, Mapping
 from .native_spec import HarnessProfileError, NativeToolSpec, _endpoint_args
 from .native_spec import _number  # noqa: F401 - shared helper for host specs
 
+# Native Kimi Glob/Grep use rg --hidden by default, always skip VCS metadata
+# directories, and always filter sensitive credential files.
+_KIMI_VCS_EXCLUDES = [
+    ".git", "**/.git", ".hg", "**/.hg", ".svn", "**/.svn",
+    ".bzr", "**/.bzr", ".jj", "**/.jj", ".sl", "**/.sl",
+]
+_KIMI_SENSITIVE_EXCLUDES = [
+    "**/.env",
+    "**/id_rsa", "**/id_rsa[-_]*",
+    "**/id_ed25519", "**/id_ed25519[-_]*",
+    "**/id_ecdsa", "**/id_ecdsa[-_]*",
+    "**/.aws/credentials", "**/.aws/credentials/**",
+    "**/.gcp/credentials", "**/.gcp/credentials/**",
+]
+_KIMI_SEARCH_EXCLUDES = _KIMI_VCS_EXCLUDES + _KIMI_SENSITIVE_EXCLUDES
+
 def _kimi_read(args: dict[str, Any]) -> dict[str, Any]:
     out = _endpoint_args(args)
     out["file_path"] = args["path"]
@@ -87,6 +103,9 @@ def _kimi_glob(args: dict[str, Any]) -> dict[str, Any]:
     out["limit"] = int(args.get("head_limit", 100))
     out["offset"] = int(args.get("offset", 0))
     out["respect_gitignore"] = not bool(args.get("include_ignored", False))
+    out["hidden"] = True
+    out["entry_type"] = "file"
+    out["excludes"] = list(_KIMI_SEARCH_EXCLUDES)
     # include_dirs is deprecated and ignored by the native tool.
     return out
 
@@ -111,6 +130,8 @@ def _kimi_grep(args: dict[str, Any]) -> dict[str, Any]:
         out["line_numbers"] = bool(args["-n"])
     out["offset"] = int(args.get("offset", 0))
     out["limit"] = int(args.get("head_limit", 250))
+    out["excludes"] = list(_KIMI_SEARCH_EXCLUDES)
+    out["sort_by_mtime"] = True
     return out
 
 KIMI_READ = NativeToolSpec(

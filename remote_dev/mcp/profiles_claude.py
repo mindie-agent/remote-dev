@@ -10,6 +10,13 @@ from typing import Any, Mapping
 from .native_spec import HarnessProfileError, NativeToolSpec, _endpoint_args
 from .native_spec import _number  # noqa: F401 - shared helper for host specs
 
+# Native Claude Glob/Grep always exclude VCS metadata directories. Glob also
+# passes --no-ignore/--hidden, while Grep passes --hidden and keeps ignore files.
+_CLAUDE_VCS_EXCLUDES = [
+    ".git", "**/.git", ".hg", "**/.hg", ".svn", "**/.svn",
+    ".bzr", "**/.bzr", ".jj", "**/.jj", ".sl", "**/.sl",
+]
+
 def _claude_read(args: dict[str, Any]) -> dict[str, Any]:
     out = _endpoint_args(args)
     out["file_path"] = args["file_path"]
@@ -65,7 +72,9 @@ def _claude_glob(args: dict[str, Any]) -> dict[str, Any]:
         out["path"] = args["path"]
     out["limit"] = 100
     out["respect_gitignore"] = False
-    out["excludes"] = [".git", "**/.git", ".hg", "**/.hg", ".svn", "**/.svn", ".bzr", "**/.bzr", ".jj", "**/.jj", ".sl", "**/.sl"]
+    out["hidden"] = True
+    out["entry_type"] = "file"
+    out["excludes"] = list(_CLAUDE_VCS_EXCLUDES)
     return out
 
 def _claude_grep(args: dict[str, Any]) -> dict[str, Any]:
@@ -90,6 +99,9 @@ def _claude_grep(args: dict[str, Any]) -> dict[str, Any]:
         out["after_context"] = int(args["-A"])
     out["offset"] = int(args.get("offset", 0))
     out["limit"] = int(args.get("head_limit", 250))
+    out["hidden"] = True
+    out["excludes"] = list(_CLAUDE_VCS_EXCLUDES)
+    out["sort_by_mtime"] = True
     return out
 
 def _claude_task_output(args: dict[str, Any]) -> dict[str, Any]:

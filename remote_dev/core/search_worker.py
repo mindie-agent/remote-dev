@@ -42,7 +42,31 @@ def resolve_path(raw):
         fail("path_outside_root", f"remote path is outside root: {resolved} not under {root}")
     return p, resolved
 
-def bounded_glob(base, pattern):
+def matches_exclude(rel_norm, pattern):
+    """Match one exclude glob against a path, its basename, and its components.
+
+    Native callers spell recursive excludes both as ``.git`` and ``**/.git``.
+    ``fnmatch`` treats ``**`` as an ordinary ``*``, so a leading ``**/`` would
+    otherwise miss the same name at the search root (for example a top-level
+    ``.env`` against ``**/.env``).
+    """
+    variants = [str(pattern)]
+    if variants[0].startswith("**/"):
+        variants.append(variants[0][3:])
+    parts = rel_norm.split("/")
+    basename = parts[-1] if parts else rel_norm
+    for variant in variants:
+        candidate = variant.rstrip("/")
+        if not candidate:
+            continue
+        if fnmatch.fnmatch(rel_norm, candidate) or fnmatch.fnmatch(basename, candidate):
+            return True
+        if any(fnmatch.fnmatch(part, candidate) for part in parts):
+            return True
+    return False
+
+
+def bounded_glob(base, pattern, include_hidden=False):
     # Expand one path component at a time: a final-result check alone lets
     # recursive glob scan an escaping directory before its matches are checked.
     start = ""
@@ -61,6 +85,19 @@ def bounded_glob(base, pattern):
             fail("path_outside_root", "absolute glob pattern is outside root")
     parts = [part for part in pattern.split("/") if part]
 
+    def children(directory, part):
+        escaped = glob_mod.escape(directory)
+        seen = set()
+        for child in glob_mod.iglob(os.path.join(escaped, part)):
+            if child not in seen:
+                seen.add(child)
+                yield child
+        if include_hidden and not part.startswith("."):
+            for child in glob_mod.iglob(os.path.join(escaped, "." + part)):
+                if child not in seen:
+                    seen.add(child)
+                    yield child
+
     def walk(directory, remaining, ancestors):
         _, resolved = resolve_path(base / directory)
         if not remaining:
@@ -70,7 +107,7 @@ def bounded_glob(base, pattern):
         part, rest = remaining[0], remaining[1:]
         if part == "**":
             yield from walk(directory, rest, ancestors)
-            for child in glob_mod.iglob(os.path.join(glob_mod.escape(directory), "*")):
+            for child in children(directory, "*"):
                 _, real_child = resolve_path(base / child)
                 if (base / child).is_dir():
                     if real_child not in ancestors:
@@ -78,7 +115,7 @@ def bounded_glob(base, pattern):
                 elif not rest and not directory_only:
                     yield child
             return
-        for child in glob_mod.iglob(os.path.join(glob_mod.escape(directory), part)):
+        for child in children(directory, part):
             resolve_path(base / child)
             if not rest or (base / child).is_dir():
                 yield from walk(child, rest, ancestors)
@@ -246,6 +283,22 @@ def apply_gitignore(base, matches):
             kept.append(item)
     return kept, warnings
 
+def filter_gitignored_paths(base, paths):
+    """Apply the same .gitignore evaluator Glob uses to ``grep -l`` paths."""
+    if not base.is_dir():
+        return paths, []
+    items = []
+    base_resolved = base.resolve()
+    for path in paths:
+        try:
+            relative = pathlib.Path(path).resolve().relative_to(base_resolved)
+        except (OSError, ValueError):
+            continue
+        items.append({"path": path, "relpath": str(relative).replace("\\", "/"), "type": "file"})
+    kept, warnings = apply_gitignore(base, items)
+    return [item["path"] for item in kept], warnings
+
+
 def command_lines(cmd, max_chars=32768):
     """Yield bounded line prefixes; close the process when the caller stops."""
     import contextlib
@@ -300,31 +353,71 @@ def command_lines(cmd, max_chars=32768):
 
 def collect_page(cmd, output_mode, offset, limit, max_line_chars, *, skip_zeros=False, char_budget=5000000):
     import contextlib
-    matches, count, truncated_lines = [], 0, 0
+    matches, truncated_lines = [], 0
     used_chars = 0
     next_offset = None
     total_matches = 0 if output_mode == "count_matches" else None
+    eligible = 0
     cap = max_line_chars if output_mode == "content" else 32768
     with contextlib.closing(command_lines(cmd, cap)) as rows:
-        for index, (line, clipped) in enumerate(rows):
-            if index < offset or (skip_zeros and line.endswith(":0")):
+        for line, clipped in rows:
+            # Zero-count files are filtered by grep -c, not by the caller's
+            # offset: offset must skip the same entries the caller sees.
+            if skip_zeros and line.endswith(":0"):
                 continue
-            count += 1
             if total_matches is not None and line.rsplit(":", 1)[-1].isdigit():
                 total_matches += int(line.rsplit(":", 1)[-1])
-            if len(matches) < limit:
-                if clipped:
-                    line += "<remote-dev line truncated>"
-                    truncated_lines += 1
-                if used_chars + len(line) + 1 > char_budget and matches:
+            if eligible < offset:
+                eligible += 1
+                continue
+            eligible += 1
+            if len(matches) >= limit or (used_chars + len(line) + 1 > char_budget and matches):
+                if next_offset is None:
                     next_offset = offset + len(matches)
+                # count_matches must still report the aggregate total over all
+                # entries; other modes can stop at the first undelivered one.
+                if total_matches is None:
                     break
-                matches.append(line)
-                used_chars += len(line) + 1
-            elif total_matches is None:
-                next_offset = offset + len(matches)
+                continue
+            if clipped:
+                line += "<remote-dev line truncated>"
+                truncated_lines += 1
+            matches.append(line)
+            used_chars += len(line) + 1
+    return matches, next_offset is not None, total_matches, truncated_lines, next_offset
+
+
+def collect_all_lines(cmd, output_mode, max_line_chars, *, skip_zeros=False, char_budget=5000000):
+    """Collect the complete result set for native mtime-ordering semantics."""
+    import contextlib
+    lines, clipped, used, budget_hit = [], 0, 0, False
+    cap = max_line_chars if output_mode == "content" else 32768
+    with contextlib.closing(command_lines(cmd, cap)) as rows:
+        for line, was_clipped in rows:
+            if skip_zeros and line.endswith(":0"):
+                continue
+            if was_clipped:
+                line += "<remote-dev line truncated>"
+                clipped += 1
+            if used + len(line) + 1 > char_budget and lines:
+                budget_hit = True
                 break
-    return matches, count > limit or next_offset is not None, total_matches, truncated_lines, next_offset
+            lines.append(line)
+            used += len(line) + 1
+    return lines, clipped, budget_hit
+
+
+def sort_files_by_mtime(lines):
+    """Native Claude/Kimi order: most recently modified first, stable on ties."""
+    entries = []
+    for index, line in enumerate(lines):
+        try:
+            mtime = os.stat(line).st_mtime
+        except OSError:
+            mtime = 0.0
+        entries.append((mtime, index, line))
+    entries.sort(key=lambda item: (-item[0], item[1]))
+    return [line for _mtime, _index, line in entries]
 
 
 if op == "glob":
@@ -353,6 +446,7 @@ if op == "glob":
         entry_type = "file"
     max_depth = int(payload["max_depth"]) if payload.get("max_depth") is not None else None
     full_path = bool(payload.get("full_path", False))
+    hidden = bool(payload.get("hidden", False))
     has_extra_filters = bool(norm_exts or excludes or entry_type in {"file", "directory"} or max_depth is not None or full_path)
     eff_pattern = pattern
     if has_extra_filters and "/" not in eff_pattern and "**" not in eff_pattern and (max_depth is None or max_depth > 1):
@@ -363,8 +457,10 @@ if op == "glob":
     seen = 0
     # One-shot helper: chdir so glob(pattern, recursive=True) works on Python 3.9 (no root_dir).
     os.chdir(str(base))
-    for item in bounded_glob(base, eff_pattern):
-        rel_norm = item.replace("\\", "/").lstrip("./")
+    for item in bounded_glob(base, eff_pattern, include_hidden=hidden):
+        rel_norm = item.replace("\\", "/")
+        if rel_norm.startswith("./"):
+            rel_norm = rel_norm[2:]
         if not rel_norm:
             continue
         if max_depth is not None:
@@ -373,15 +469,8 @@ if op == "glob":
                 continue
         if full_path and not fnmatch.fnmatch(rel_norm, pattern):
             continue
-        if excludes:
-            parts = rel_norm.split("/")
-            if any(
-                fnmatch.fnmatch(rel_norm, ex)
-                or fnmatch.fnmatch(parts[-1], ex)
-                or any(fnmatch.fnmatch(part, ex.rstrip("/")) for part in parts)
-                for ex in excludes
-            ):
-                continue
+        if excludes and any(matches_exclude(rel_norm, ex) for ex in excludes):
+            continue
         path = base / item
         try:
             st = path.lstat()
@@ -458,6 +547,8 @@ if op == "grep":
     if warnings_context:
         warnings.append(warnings_context)
     rg_path = shutil.which("rg")
+    if rg_path is None and payload.get("require_rg"):
+        fail("rg_required", "native Claude/Kimi Grep semantics require ripgrep (rg) on the remote host; install rg or use the canonical remote.grep fallback")
     if rg_path:
         cmd = [rg_path, "--color", "never"]
         if fixed_strings:
@@ -501,6 +592,21 @@ if op == "grep":
             if after_context:
                 cmd.extend(["-A", str(after_context)])
         cmd.extend(["--", pattern, str(base)])
+        if output_mode == "files_with_matches" and payload.get("sort_by_mtime"):
+            lines, clipped, budget_hit = collect_all_lines(cmd, output_mode, max_line_chars)
+            ordered = sort_files_by_mtime(lines)
+            page = ordered[offset:offset + limit] if limit > 0 else ordered[offset:]
+            truncated = budget_hit or len(ordered) > offset + len(page)
+            next_offset = offset + len(page) if truncated else None
+            if clipped:
+                warnings.append(f"{clipped} line(s) truncated to {max_line_chars} chars")
+            if budget_hit:
+                warnings.append("result set exceeded the search character budget; mtime ordering covers the collected prefix only")
+            print(json.dumps({"status": "ok", "engine": "rg", "output_mode": output_mode, "offset": offset,
+                              "next_offset": next_offset,
+                              "matches": page, "total_matches": None, "truncated": truncated,
+                              "warnings": warnings}, sort_keys=True))
+            raise SystemExit(0)
         lines, truncated, total_matches, clipped, next_offset = collect_page(cmd, output_mode, offset, limit, max_line_chars)
         if clipped:
             warnings.append(f"{clipped} line(s) truncated to {max_line_chars} chars")
@@ -515,7 +621,7 @@ if op == "grep":
         fail("rg_required", "multiline grep requires ripgrep (rg) on the remote host; install rg or drop multiline")
     if type_name:
         fail("rg_required", f"grep fallback cannot honor --type {type_name}; install ripgrep (rg) or use --glob")
-    for pat in ([glob_pattern] if glob_pattern else []) + list(includes) + list(excludes):
+    for pat in ([glob_pattern] if glob_pattern else []) + list(includes):
         if pat and "/" in str(pat):
             fail("rg_required", f"grep fallback cannot honor path-anchored --glob {pat}; install ripgrep (rg) or use a basename glob")
     grep_path = shutil.which("grep")
@@ -527,40 +633,72 @@ if op == "grep":
         if fixed_strings
         else "rg not found; used grep -E fallback (POSIX ERE semantics)"
     )
+    if not include_ignored and output_mode != "files_with_matches":
+        warnings.append(
+            "grep fallback cannot evaluate .gitignore; ignored-path filtering is approximate"
+        )
     cmd = [grep_path, "-r", mode_flag, "-I"]
     if case_insensitive:
         cmd.append("-i")
     if include_ignored:
-        warnings.append("grep fallback cannot evaluate .gitignore; include_ignored only re-enables hidden and .git directories")
+        warnings.append("grep fallback cannot evaluate .gitignore; include_ignored lifts hidden-directory excludes while VCS metadata directories stay excluded")
+        if not fnmatch.fnmatch(base.name, ".git"):
+            cmd.append("--exclude-dir=.git")
     else:
-        for exclude_dir in (".git", ".*"):
-            if fnmatch.fnmatch(base.name, exclude_dir):
-                continue
-            cmd.append(f"--exclude-dir={exclude_dir}")
+        if not fnmatch.fnmatch(base.name, ".git"):
+            cmd.append("--exclude-dir=.git")
+        if not hidden and not fnmatch.fnmatch(base.name, ".*"):
+            cmd.append("--exclude-dir=.*")
     if glob_pattern:
         cmd.append(f"--include={glob_pattern}")
     for inc in includes:
         if inc:
             cmd.append(f"--include={inc}")
+    unhandled_excludes = []
     for exc in excludes:
-        if exc:
-            cmd.append(f"--exclude={str(exc).lstrip('!')}")
+        if not exc:
+            continue
+        clean_exc = str(exc).lstrip('!')
+        if "/" in clean_exc:
+            # Native callers pass both ``.git`` and ``**/.git``. Honor the
+            # basename form of a path-anchored exclude; anything more complex
+            # (for example ``**/.aws/credentials/**``) is reported rather than
+            # silently widening the search.
+            tail = clean_exc.rsplit("/", 1)[-1]
+            if tail and "*" not in tail and "?" not in tail:
+                cmd.append(f"--exclude={tail}")
+                cmd.append(f"--exclude-dir={tail}")
+            else:
+                unhandled_excludes.append(clean_exc)
+            continue
+        cmd.append(f"--exclude={clean_exc}")
+        cmd.append(f"--exclude-dir={clean_exc}")
+    if unhandled_excludes:
+        warnings.append(
+            "grep fallback cannot honor "
+            f"{len(unhandled_excludes)} path-anchored exclude(s): {', '.join(unhandled_excludes)}"
+        )
     if output_mode == "count_matches":
         import contextlib
-        counts, total_matches, count = [], 0, 0
+        counts, total_matches, eligible, next_offset = [], 0, 0, None
         count_cmd = [grep_path, "-o", mode_flag]
         if case_insensitive:
             count_cmd.append("-i")
         with contextlib.closing(command_lines([*cmd, "-l", "--", pattern, str(base)])) as candidates:
-            for index, (candidate, _) in enumerate(candidates):
+            for candidate, _ in candidates:
                 amount = sum(1 for _ in command_lines([*count_cmd, "--", pattern, candidate]))
                 total_matches += amount
-                if index >= offset:
-                    count += 1
-                    if len(counts) < limit:
-                        counts.append(f"{candidate}:{amount}")
+                if eligible < offset:
+                    eligible += 1
+                    continue
+                eligible += 1
+                if len(counts) < limit:
+                    counts.append(f"{candidate}:{amount}")
+                elif next_offset is None:
+                    next_offset = offset + len(counts)
         print(json.dumps({"status": "ok", "engine": "grep", "output_mode": output_mode, "offset": offset,
-                          "matches": counts, "total_matches": total_matches, "truncated": count > limit,
+                          "matches": counts, "total_matches": total_matches,
+                          "next_offset": next_offset, "truncated": next_offset is not None,
                           "warnings": warnings}, sort_keys=True))
         raise SystemExit(0)
     if output_mode == "files_with_matches":
@@ -577,8 +715,43 @@ if op == "grep":
         if after_context:
             cmd.append(f"-A{after_context}")
     cmd.extend(["--", pattern, str(base)])
-    lines, truncated, _, clipped, next_offset = collect_page(cmd, output_mode, offset, limit, max_line_chars,
-                                                skip_zeros=output_mode == "count")
+    if output_mode == "files_with_matches" and payload.get("sort_by_mtime"):
+        lines, clipped, budget_hit = collect_all_lines(cmd, output_mode, max_line_chars)
+        if not include_ignored:
+            lines, gi_warnings = filter_gitignored_paths(base, lines)
+            warnings.extend(gi_warnings)
+            warnings.append(
+                "grep fallback: files_with_matches applied .gitignore in-process; "
+                "content/count modes remain approximate for ignored paths"
+            )
+        ordered = sort_files_by_mtime(lines)
+        page = ordered[offset:offset + limit] if limit > 0 else ordered[offset:]
+        truncated = budget_hit or len(ordered) > offset + len(page)
+        next_offset = offset + len(page) if truncated else None
+        if clipped:
+            warnings.append(f"{clipped} line(s) truncated to {max_line_chars} chars")
+        if budget_hit:
+            warnings.append("result set exceeded the search character budget; mtime ordering covers the collected prefix only")
+        print(json.dumps({"status": "ok", "engine": "grep", "output_mode": output_mode, "offset": offset,
+                          "next_offset": next_offset,
+                          "matches": page, "total_matches": None, "truncated": truncated,
+                          "warnings": warnings}, sort_keys=True))
+        raise SystemExit(0)
+    if output_mode == "files_with_matches" and not include_ignored:
+        all_lines, all_clipped, budget_hit = collect_all_lines(cmd, output_mode, max_line_chars)
+        all_lines, gi_warnings = filter_gitignored_paths(base, all_lines)
+        warnings.extend(gi_warnings)
+        warnings.append(
+            "grep fallback: files_with_matches applied .gitignore in-process; "
+            "content/count modes remain approximate for ignored paths"
+        )
+        page = all_lines[offset:offset + limit] if limit > 0 else all_lines[offset:]
+        truncated = budget_hit or len(all_lines) > offset + len(page)
+        next_offset = offset + len(page) if truncated else None
+        lines, clipped = page, all_clipped
+    else:
+        lines, truncated, _, clipped, next_offset = collect_page(cmd, output_mode, offset, limit, max_line_chars,
+                                                    skip_zeros=output_mode == "count")
     if clipped:
         warnings.append(f"{clipped} line(s) truncated to {max_line_chars} chars")
     print(json.dumps({"status": "ok", "engine": "grep", "output_mode": output_mode, "offset": offset,

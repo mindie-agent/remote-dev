@@ -340,6 +340,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             entry_type=str(args["entry_type"]) if args.get("entry_type") is not None else None,
             max_depth=int(args["max_depth"]) if args.get("max_depth") is not None else None,
             full_path=bool(args.get("full_path", False)),
+            hidden=bool(args.get("hidden", False)),
             timeout_ms=timeout_ms,
         )
     if name == "remote.grep":
@@ -365,6 +366,8 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             hidden=bool(args.get("hidden", False)),
             offset=int(args.get("offset") or 0),
             limit=int(args.get("limit")) if args.get("limit") is not None else 100,
+            sort_by_mtime=bool(args.get("sort_by_mtime", False)),
+            require_rg=bool(args.get("require_rg", False)),
             timeout_ms=timeout_ms,
         )
     if name == "remote.ls":
