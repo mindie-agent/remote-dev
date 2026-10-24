@@ -971,6 +971,19 @@ class FinalLogStopTests(unittest.TestCase):
         with mock.patch("remote_dev.mcp.tools._call_canonical", return_value=completed):
             self.assertIsNone(native_common._refresh_job_output("j"))
 
+    def test_refresh_job_output_preserves_local_recording_failure(self):
+        recording = {
+            "text": "The remote result was received, but local recording failed.\n",
+            "result": {
+                "tool": "remote.job_stdin", "outcome": "failed",
+                "status": "local_recording_failed", "state": "failed", "exit_code": 7,
+                "execution_outcome": "success", "operation_completed": True,
+                "local_recording": {"status": "failed", "stage": "save_output"},
+            },
+        }
+        with mock.patch("remote_dev.mcp.tools._call_canonical", return_value=recording):
+            self.assertIs(native_common._refresh_job_output("j"), recording)
+
     def test_refresh_job_output_preserves_canonical_failure(self):
         failure = {
             "text": "Remote job j: failed\n",

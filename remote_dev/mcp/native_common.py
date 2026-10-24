@@ -130,6 +130,12 @@ def _refresh_job_output(job_id: str) -> dict[str, Any] | None:
     result = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(result, dict):
         return payload if isinstance(payload, dict) else None
+    if result.get("status") == "local_recording_failed":
+        # The remote command was observed, but saving its output failed. Preserve
+        # the canonical acknowledged-result envelope (execution_outcome,
+        # operation_completed, real exit code); do not fall through to stale
+        # cached text or a generic local OSError.
+        return payload
     completed_command = (
         str(result.get("tool") or "").endswith(("bash", "job_stdin", "exec_command", "write_stdin", "shell"))
         and result.get("state") in {"succeeded", "failed", "timeout", "cancelled"}
