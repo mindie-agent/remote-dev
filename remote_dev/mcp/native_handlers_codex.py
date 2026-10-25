@@ -33,6 +33,7 @@ def codex_exec(profile: str, spec: NativeToolSpec, native: dict[str, Any], norma
     # string alias.
     normalized = dict(normalized)
     normalized.setdefault("job_id", str(time.time_ns()))
+    normalized["foreground"] = True
     payload = call_canonical("remote.bash", normalized)
     result = payload.get("result") or {}
     state = str(result.get("state") or result.get("status") or "unknown")

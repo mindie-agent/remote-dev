@@ -243,6 +243,27 @@ class SessionResultPreviewTests(unittest.TestCase):
         self.assertFalse(result["output_preview"]["truncated"])
         self.assertNotIn("<remote-dev preview:", result["preview"]["stdout"])
 
+    def test_terminal_command_summary_reads_actual_cache_edges(self) -> None:
+        stdout = "HEAD-\n" + ("progress line\n" * 5000) + "TAIL-STDOUT\n"
+        stderr = "ERR-HEAD\n" + ("warning\n" * 3000) + "ERR-TAIL\n"
+        Path(str(self.record_path.with_name(self.record_path.stem + ".stdout.log"))).write_text(
+            stdout, encoding="utf-8"
+        )
+        Path(str(self.record_path.with_name(self.record_path.stem + ".stderr.log"))).write_text(
+            stderr, encoding="utf-8"
+        )
+        row = self._row("HEAD-\n", "ERR-HEAD\n", state="failed", exit_code=7)
+        with mock.patch.object(job_ops, "control", return_value=row):
+            payload = job_ops._session_result(
+                self.endpoint, json.loads(self.record_path.read_text()), self.record_path,
+                row, tool="remote.bash", started="2026-10-25T00:00:00Z",
+                start=0.0, budget=10000, prefer_cache_edges=True,
+            )
+        self.assertIn("TAIL-STDOUT", payload["result"]["preview"]["stdout"])
+        self.assertIn("ERR-TAIL", payload["result"]["preview"]["stderr"])
+        self.assertIn("remote raw stdout", payload["text"])
+        self.assertEqual(payload["result"]["exit_code"], 7)
+
     def test_partial_first_page_is_not_called_full_raw_log(self) -> None:
         stdout = "first page only\n"
         row = self._row(stdout, "", state="running", exit_code=None)

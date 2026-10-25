@@ -35,7 +35,14 @@ class SessionTests(unittest.TestCase):
 
     def control(self, endpoint, identifier, action, **params):
         self.calls.append((endpoint, identifier, action, params))
-        self.assertIn(action, {"launch", "exchange"})
+        self.assertIn(action, {"launch", "exchange", "tail"})
+        if action == "tail":
+            return {
+                "state": "succeeded" if self.done else "running",
+                "quiet": self.done,
+                "stdout": self.stdout.decode()[:32768],
+                "stderr": self.stderr.decode()[:32768],
+            }
         row = {"state": "succeeded" if self.done else "running", "quiet": self.done,
                "result": {"exit_code": 0} if self.done else None, "accepted": True,
                "written": len(params.get("data", "").encode()), "written_chars": len(params.get("data", "")),

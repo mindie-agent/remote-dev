@@ -28,6 +28,7 @@ __all__ = [
     "DEFAULT_JOB_TAIL_CHARS",
     "format_job_log_output",
     "job_log_refs",
+    "local_stream_preview",
     "preview_stream_edges",
     "preview_stream_exact",
     "preview_stream_text",
@@ -243,6 +244,48 @@ def preview_stream_edges(
         folded_chars=folded_chars,
         folded_bytes=folded_bytes,
         truncated=bool(omitted_bytes or folded_chars),
+    )
+
+
+def local_stream_preview(
+    path: str | Path,
+    *,
+    head_chars: int = DEFAULT_JOB_HEAD_CHARS,
+    tail_chars: int = DEFAULT_JOB_TAIL_CHARS,
+) -> dict[str, Any]:
+    """Bounded head+tail view of a local cached stream file.
+
+    Small files are read once so omitted character counts stay exact. Large
+    files use bounded first/last reads; the omitted character count is a
+    truthful lower bound and the omitted byte count is exact from ``stat``.
+    Never reads a >4 MiB cache or a >50 MB log in full.
+    """
+    import codecs
+
+    path = Path(path)
+    size = path.stat().st_size
+    if size == 0:
+        return preview_stream_text("", head_chars=head_chars, tail_chars=tail_chars)
+    if size <= 4 * 1024 * 1024:
+        data = path.read_bytes()
+        return preview_stream_text(data.decode("utf-8", errors="replace"),
+                                   head_chars=head_chars, tail_chars=tail_chars)
+    head_limit = max(0, min(16384, size))
+    with path.open("rb") as stream:
+        head_data = stream.read(head_limit)
+    head_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    head = head_decoder.decode(head_data, final=False)
+    tail_limit = max(0, min(32768, size))
+    with path.open("rb") as stream:
+        stream.seek(size - tail_limit)
+        tail_data = stream.read(tail_limit)
+    offset = 0
+    while offset < len(tail_data) and (tail_data[offset] & 0xC0) == 0x80:
+        offset += 1
+    tail = tail_data[offset:].decode("utf-8", errors="replace")
+    return preview_stream_edges(
+        head, tail, total_bytes=size,
+        head_chars=head_chars, tail_chars=tail_chars,
     )
 
 

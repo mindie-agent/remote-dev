@@ -120,9 +120,9 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
                 details.get("state") in {"succeeded", "failed", "timeout", "cancelled"}
                 and isinstance(details.get("exit_code"), int)
                 and not isinstance(details.get("exit_code"), bool)
-                and (name.endswith("bash") or name.endswith("job_stdin")
-                     or name.endswith("exec_command") or name.endswith("write_stdin")
-                     or name.endswith("shell"))
+                and (name.lower().endswith("bash") or name.lower().endswith("job_stdin")
+                     or name.lower().endswith("exec_command") or name.lower().endswith("write_stdin")
+                     or name.lower().endswith("shell"))
             )
             background_started = (
                 details.get("kind") == "background"

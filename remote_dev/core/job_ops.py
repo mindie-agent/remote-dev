@@ -28,7 +28,7 @@ from typing import Any
 from remote_dev.core.endpoint import DEFAULT_CWD, DEFAULT_ROOT, Endpoint
 from remote_dev.core.container_endpoint import FULL_CONTAINER_ID, pinned_endpoint
 from remote_dev.core.errors import RemoteExecutionError, caller_error
-from remote_dev.core.job_logs import format_job_log_output, job_log_refs, render_job_refs_text
+from remote_dev.core.job_logs import format_job_log_output, job_log_refs, local_stream_preview, render_job_refs_text
 from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS, compact_text
 from remote_dev.core.locking import record_lock
 from remote_dev.core.runtime_env import runtime_env_lines
@@ -265,7 +265,8 @@ def _save_output(record, path, row, *, cursor_key="stdin_cursors"):
     record.update(updated)
 
 
-def _session_result(endpoint, record, path, row, *, tool, started, start, budget, local_cache_error=None, preserve_full_page=False):
+def _session_result(endpoint, record, path, row, *, tool, started, start, budget, local_cache_error=None,
+                    preserve_full_page=False, prefer_cache_edges=False, tail_sources=None):
     state = str(row.get("state") or "unknown")
     quiet = bool(row.get("quiet"))
     pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
@@ -285,10 +286,46 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
         unread_bytes=pending,
         local_recording_error=local_cache_error,
     )
-    formatted = format_job_log_output(
-        str(row.get("stdout") or ""), str(row.get("stderr") or ""),
-        refs=refs, preserve_full_page=preserve_full_page,
-    )
+    if prefer_cache_edges:
+        try:
+            edge_chars = max(1, int(budget) // 2)
+            stdout_source = local_stream_preview(
+                Path(path).with_name(Path(path).stem + ".stdout.log"),
+                head_chars=edge_chars, tail_chars=edge_chars,
+            )
+            stderr_source = local_stream_preview(
+                Path(path).with_name(Path(path).stem + ".stderr.log"),
+                head_chars=edge_chars, tail_chars=edge_chars,
+            )
+            formatted = format_job_log_output(
+                stdout_source, stderr_source, refs=refs,
+            )
+        except OSError:
+            prefer_cache_edges = False
+    if not prefer_cache_edges and tail_sources:
+        from remote_dev.core.job_logs import preview_stream_edges
+
+        heads = tail_sources.get("head") if isinstance(tail_sources, dict) else {}
+        tails = tail_sources.get("tail") if isinstance(tail_sources, dict) else {}
+        edge_sources = {}
+        for name in ("stdout", "stderr"):
+            total_bytes = int(row.get(name + "_offset") or 0) + int(row.get(name + "_bytes_remaining") or 0)
+            head_text = str((heads or {}).get(name) or row.get(name) or "")
+            tail_text = str((tails or {}).get(name) or "")
+            edge_chars = max(1, int(budget) // 2)
+            edge_sources[name] = preview_stream_edges(
+                head_text, tail_text,
+                total_bytes=max(total_bytes, len(head_text.encode("utf-8"))),
+                head_chars=edge_chars, tail_chars=edge_chars,
+            )
+        formatted = format_job_log_output(
+            edge_sources["stdout"], edge_sources["stderr"], refs=refs,
+        )
+    if not prefer_cache_edges and not tail_sources:
+        formatted = format_job_log_output(
+            str(row.get("stdout") or ""), str(row.get("stderr") or ""),
+            refs=refs, preserve_full_page=preserve_full_page,
+        )
     preview = formatted["preview"]
     warnings = []
     if row.get("stdin_buffer_full"):
@@ -371,7 +408,7 @@ def start_remote_job(
     runtime_env: bool | None = None, description: str | None = None,
     job_id: str | None = None, yield_time_ms: int | None = None,
     max_output_tokens: int | None = None, tty: bool = False, wait: bool = False,
-    shell: str | None = None, login: bool | None = None,
+    shell: str | None = None, login: bool | None = None, foreground: bool = False,
 ) -> dict[str, Any]:
     started, start = utc_now_iso(), time.monotonic()
     env = env or {}
@@ -441,7 +478,28 @@ def start_remote_job(
                 failure["result"]["status"] = "submission_uncertain"
                 failure["result"]["summary"] = "Remote submission outcome is uncertain; observe the original job."
             return _failure_payload(failure["result"])
-    return _session_result(endpoint, record, path, row, tool="remote.bash", started=started, start=start, budget=budget)
+    pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
+    tail_sources = None
+    if foreground and row.get("state") in TERMINAL_JOB_STATES and any(pending.values()) and not wait:
+        try:
+            # Two bounded remote reads: the first bytes of each raw log and its
+            # final lines. Never materialize a large log just to summarize it.
+            heads = control(endpoint, job_id, "tail", max_bytes=65536,
+                            stdout_offset=0, stderr_offset=0)
+            tails = control(endpoint, job_id, "tail", lines=MAX_JOB_TAIL_LINES)
+        except (TimeoutError, RemoteExecutionError, ValueError, RuntimeError, OSError):
+            heads, tails = {}, {}
+        if heads or tails:
+            tail_sources = {
+                "head": {name: str((heads or {}).get(name) or "") for name in ("stdout", "stderr")},
+                "tail": {name: str((tails or {}).get(name) or "") for name in ("stdout", "stderr")},
+            }
+    return _session_result(
+        endpoint, record, path, row, tool="remote.bash", started=started, start=start,
+        budget=budget, tail_sources=tail_sources,
+        prefer_cache_edges=bool(foreground and wait and not any(pending.values())
+                                and row.get("state") in TERMINAL_JOB_STATES),
+    )
 
 
 @observed_tool("remote.job_status")

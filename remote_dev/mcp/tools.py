@@ -280,6 +280,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             job_id=args.get("job_id"),
             shell=args.get("shell"),
             login=args.get("login"),
+            foreground=bool(args.get("foreground", False)),
         )
     if name == "remote.read":
         assert endpoint is not None
