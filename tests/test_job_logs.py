@@ -14,6 +14,7 @@ import remote_dev.core.state_store as state_store
 import remote_dev.mcp.tools as tools
 from remote_dev.core import job_logs
 from remote_dev.core.endpoint import Endpoint
+from remote_dev.core.shell_ops import remote_bash
 from remote_dev.core.preview import MAX_TEXT_CHARS
 from remote_dev.mcp import native_handlers_claude as claude_handlers
 from remote_dev.mcp import native_handlers_kimi as kimi_handlers
@@ -279,6 +280,29 @@ class SessionResultPreviewTests(unittest.TestCase):
         self.assertTrue(result["refs"]["remote_raw_stdout"].endswith("/stdout.log"))
         self.assertIn("Preview degraded", payload["text"])
         self.assertIn("full raw log refs", payload["text"])
+
+    def test_preview_timeout_keeps_completed_command_outcome(self) -> None:
+        job_id = "job-preview-timeout"
+        row = self._row("HEAD\n", "ERR\n", state="failed", exit_code=7,
+                        stdout_bytes_remaining=900, stderr_bytes_remaining=50)
+
+        def fake_control(_endpoint, _job_id, action, **params):
+            if action == "launch":
+                return row
+            raise TimeoutError("preview tail deadline")
+
+        with mock.patch.object(job_ops, "control", side_effect=fake_control):
+            payload = remote_bash(
+                self.endpoint, command="false", job_id=job_id, foreground=True,
+                wait=False,
+            )
+        result = payload["result"]
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["exit_code"], 7)
+        self.assertTrue(result["preview_degraded"])
+        self.assertIn("Preview degraded", payload["text"])
+        self.assertIn("full raw log refs", payload["text"])
+        self.assertTrue(result["refs"]["remote_raw_stdout"].endswith("/stdout.log"))
 
     def test_partial_first_page_is_not_called_full_raw_log(self) -> None:
         stdout = "first page only\n"
