@@ -266,7 +266,8 @@ def _save_output(record, path, row, *, cursor_key="stdin_cursors"):
 
 
 def _session_result(endpoint, record, path, row, *, tool, started, start, budget, local_cache_error=None,
-                    preserve_full_page=False, prefer_cache_edges=False, tail_sources=None):
+                    preserve_full_page=False, prefer_cache_edges=False, tail_sources=None,
+                    preview_error=None):
     state = str(row.get("state") or "unknown")
     quiet = bool(row.get("quiet"))
     pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
@@ -300,7 +301,8 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
             formatted = format_job_log_output(
                 stdout_source, stderr_source, refs=refs,
             )
-        except OSError:
+        except OSError as exc:
+            preview_error = preview_error or f"local cache preview unavailable: {type(exc).__name__}"
             prefer_cache_edges = False
     if not prefer_cache_edges and tail_sources:
         from remote_dev.core.job_logs import preview_stream_edges
@@ -328,6 +330,8 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
         )
     preview = formatted["preview"]
     warnings = []
+    if preview_error:
+        warnings.append(f"Preview degraded: {preview_error}. The command result and full raw log refs are preserved.")
     if row.get("stdin_buffer_full"):
         warnings.append("Input partially accepted; resend chars[stdin.written_chars:] after the program consumes input.")
     if row.get("eof_deferred"):
@@ -348,6 +352,7 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
                "timings": {**row.get("timings", {}), **row.get("transport", {})},
                "cursors": record.get("stdin_cursors", {}), "bytes_remaining": pending,
                "output_budget_bytes": budget,
+               "preview_degraded": bool(preview_error),
                "output_preview": {"truncated": formatted["truncated"], "omitted_chars": formatted["omitted_chars"],
                                   "omitted_bytes": formatted["omitted_bytes"], "omitted_chars_exact": formatted["omitted_chars_exact"],
                                   "repeated_lines_folded": formatted["repeated_lines_folded"],
@@ -480,15 +485,21 @@ def start_remote_job(
             return _failure_payload(failure["result"])
     pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
     tail_sources = None
+    preview_error = None
     if foreground and row.get("state") in TERMINAL_JOB_STATES and any(pending.values()) and not wait:
+        # Keep both preview reads inside a small shared deadline. This is a
+        # secondary decoration of an already completed command, never a reason
+        # to lose its observed exit/refs or to extend host tool deadlines.
+        preview_deadline = time.monotonic() + 6.0
         try:
-            # Two bounded remote reads: the first bytes of each raw log and its
-            # final lines. Never materialize a large log just to summarize it.
             heads = control(endpoint, job_id, "tail", max_bytes=65536,
-                            stdout_offset=0, stderr_offset=0)
-            tails = control(endpoint, job_id, "tail", lines=MAX_JOB_TAIL_LINES)
-        except (TimeoutError, RemoteExecutionError, ValueError, RuntimeError, OSError):
+                            stdout_offset=0, stderr_offset=0,
+                            timeout_ms=max(250, int((preview_deadline - time.monotonic()) * 1000)))
+            tails = control(endpoint, job_id, "tail", lines=MAX_JOB_TAIL_LINES,
+                            timeout_ms=max(250, int((preview_deadline - time.monotonic()) * 1000)))
+        except (TimeoutError, RemoteExecutionError, ValueError, RuntimeError, OSError) as exc:
             heads, tails = {}, {}
+            preview_error = f"{type(exc).__name__}: {str(exc)[:160]}"
         if heads or tails:
             tail_sources = {
                 "head": {name: str((heads or {}).get(name) or "") for name in ("stdout", "stderr")},
@@ -496,7 +507,7 @@ def start_remote_job(
             }
     return _session_result(
         endpoint, record, path, row, tool="remote.bash", started=started, start=start,
-        budget=budget, tail_sources=tail_sources,
+        budget=budget, tail_sources=tail_sources, preview_error=preview_error,
         prefer_cache_edges=bool(foreground and wait and not any(pending.values())
                                 and row.get("state") in TERMINAL_JOB_STATES),
     )

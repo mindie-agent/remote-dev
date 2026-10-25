@@ -264,6 +264,22 @@ class SessionResultPreviewTests(unittest.TestCase):
         self.assertIn("remote raw stdout", payload["text"])
         self.assertEqual(payload["result"]["exit_code"], 7)
 
+    def test_preview_degradation_preserves_command_result_and_refs(self) -> None:
+        row = self._row("HEAD\n", "ERR\n", state="failed", exit_code=7)
+        row["stdout_bytes_remaining"] = 1000
+        payload = job_ops._session_result(
+            self.endpoint, json.loads(self.record_path.read_text()), self.record_path,
+            row, tool="remote.bash", started="2026-10-25T00:00:00Z",
+            start=0.0, budget=10000, preview_error="TimeoutError: preview deadline",
+        )
+        result = payload["result"]
+        self.assertEqual(result["exit_code"], 7)
+        self.assertEqual(result["outcome"], "failed")
+        self.assertTrue(result["preview_degraded"])
+        self.assertTrue(result["refs"]["remote_raw_stdout"].endswith("/stdout.log"))
+        self.assertIn("Preview degraded", payload["text"])
+        self.assertIn("full raw log refs", payload["text"])
+
     def test_partial_first_page_is_not_called_full_raw_log(self) -> None:
         stdout = "first page only\n"
         row = self._row(stdout, "", state="running", exit_code=None)

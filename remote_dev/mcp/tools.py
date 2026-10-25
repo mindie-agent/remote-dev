@@ -236,6 +236,12 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
     args = dict(arguments or {})
     foreground = bool(args.pop("_foreground", False))
     name = canonical_name(name)
+    if (name == "remote.bash" and not foreground and profile == CANONICAL_PROFILE
+            and not bool(args.get("run_in_background", False))):
+        # Canonical one-shot Bash keeps the same real head/tail contract as the
+        # native foreground wrappers; background/explicit session calls remain
+        # incremental and cursor-lossless.
+        foreground = True
     if name not in TOOL_SCHEMAS:
         raise caller_error(f"unknown remote-dev tool: {name}", KeyError)
     if raw_name in {"remote.view_file_outline", "remote_view_file_outline"}:
