@@ -323,7 +323,7 @@ def claude_notebook_edit(profile: str, spec: NativeToolSpec, native: dict[str, A
 @handler("claude_bash")
 def claude_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
     normalized = dict(normalized)
-    normalized["foreground"] = not bool(native.get("run_in_background", False))
+    normalized["_foreground"] = not bool(native.get("run_in_background", False))
     payload = call_canonical("remote.bash", normalized)
     result = payload.get("result") or {}
     state = str(result.get("state") or result.get("status") or "unknown")

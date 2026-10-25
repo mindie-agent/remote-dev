@@ -161,7 +161,6 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "job_id": {"type": "string", "description": "Optional caller-assigned job id. Native Codex session ids are numeric; the profile generates a numeric id and returns it as session_id."},
             "shell": {"type": "string", "description": "Shell binary for this command. Defaults to the remote user's bash."},
             "login": {"type": "boolean", "description": "Run the selected shell with login semantics (-l); native Codex default is true."},
-            "foreground": {"type": "boolean", "default": False, "description": "Internal native foreground summary flag; not a background toggle. Native adapters set it for non-background commands so a completed log can be summarized from bounded remote head/tail edges."},
         },
         description="command is required; the alias cmd / CommandLine is also accepted (Codex / Antigravity habit). Enforced by the server so alias-only calls pass provider schema validation.",
     ),

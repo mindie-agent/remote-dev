@@ -234,6 +234,7 @@ def _require(
 def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str = CANONICAL_PROFILE) -> dict[str, Any]:
     raw_name = name
     args = dict(arguments or {})
+    foreground = bool(args.pop("_foreground", False))
     name = canonical_name(name)
     if name not in TOOL_SCHEMAS:
         raise caller_error(f"unknown remote-dev tool: {name}", KeyError)
@@ -280,7 +281,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             job_id=args.get("job_id"),
             shell=args.get("shell"),
             login=args.get("login"),
-            foreground=bool(args.get("foreground", False)),
+            foreground=foreground,
         )
     if name == "remote.read":
         assert endpoint is not None
