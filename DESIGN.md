@@ -12,7 +12,7 @@ flowchart TB
         Coord["mindie-coordinator / Domain Workflow Skills"]
     end
 
-    subgraph LayerA["Layer A: Remote Developer Tool Surface (18 Canonical Tools + 40+ 6-Harness Aliases)"]
+    subgraph LayerA["Layer A: Remote Developer Tool Surface (19 Canonical Tools + 60+ 6-Harness Aliases)"]
         FileTools["Files & Patches: read / write / edit / multi_edit / apply_patch"]
         SearchTools["Search & Listing: glob / grep / ls"]
         JobTools["Commands & Jobs: bash / job_status / job_tail / job_stop / job_stdin"]
@@ -37,10 +37,10 @@ flowchart TB
 
 ### 1. Layer A: Remote Developer Tool Surface
 
-Exposes 18 canonical tools (plus 40+ 6-Harness aliases across Codex, Claude Code, Cursor, Kimi Code, DSH, and Antigravity) over both the stdio MCP server (`remote-dev server`) and the CLI (`remote-dev <subcommand>`):
+Exposes 19 canonical tools (plus 60+ 6-Harness aliases across Codex, Claude Code, Cursor, Kimi Code, DSH, and Antigravity). Native wire names are exposed only through a trusted `REMOTE_DEV_HARNESS_PROFILE`; see `docs/harness-profiles.md`. over both the stdio MCP server (`remote-dev server`) and the CLI (`remote-dev <subcommand>`):
 - **Read, Write & Patch**: `remote.read`, `remote.write`, `remote.edit`, `remote.multi_edit`, `remote.apply_patch`
 - **Search & Browse**: `remote.glob`, `remote.grep`, `remote.ls`
-- **Run & Control Processes**: `remote.bash`, `remote.job_status`, `remote.job_tail`, `remote.job_stop`, `remote.job_stdin`
+- **Run & Control Processes**: `remote.bash`, `remote.job_status`, `remote.job_tail`, `remote.job_output`, `remote.job_stop`, `remote.job_stdin`
 - **Sync Files & Inspect Hosts**: `remote.artifact_manifest`, `remote.artifact_pull`, `remote.artifact_push`, `remote.probe`, `remote.context_snapshot`
 
 ### 2. Layer B: Shared Substrate
@@ -73,7 +73,7 @@ Coordinators (like `mindie-coordinator`) and workflow skills live in their own r
 
 ## MCP Transport & Resource URIs
 
-The MCP server supports standard stdio `Content-Length` JSON-RPC framing as well as newline-delimited JSON-RPC. In addition to the 18 canonical tools (and 40+ 6-Harness aliases), it exposes read-only MCP resources:
+The MCP server supports standard stdio `Content-Length` JSON-RPC framing as well as newline-delimited JSON-RPC. In addition to the 19 canonical tools (and 60+ 6-Harness aliases), it exposes read-only MCP resources:
 
 - `remote://endpoints`
 - `remote://endpoint/<endpoint-id>/context/latest`

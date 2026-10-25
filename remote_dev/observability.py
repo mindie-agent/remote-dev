@@ -227,7 +227,8 @@ def observed_tool(name, *, component="remote-dev"):
                     raise
                 finally:
                     _tool.reset(token)
-            if isinstance(result, dict):
+            minimal_result = bool(isinstance(value, dict) and value.pop("_native_minimal", False))
+            if isinstance(result, dict) and not minimal_result:
                 if operation.get("cleanup_errors"):
                     result["cleanup_errors"] = operation["cleanup_errors"]
                     warning = "Prior idle connection cleanup failed: " + "; ".join(operation["cleanup_errors"])

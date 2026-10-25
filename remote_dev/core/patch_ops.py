@@ -78,10 +78,12 @@ def parse_codex_patch(patch: str) -> list[dict[str, Any]]:
     if not lines or lines[0].strip() != "*** Begin Patch":
         raise PatchParseError("Codex patch must start with *** Begin Patch")
     ops: list[dict[str, Any]] = []
+    ended = False
     i = 1
     while i < len(lines):
         stripped = lines[i].strip("\r\n")
         if stripped == "*** End Patch":
+            ended = True
             break
         if stripped.startswith("*** Add File: "):
             path = stripped.removeprefix("*** Add File: ").strip()
@@ -157,6 +159,8 @@ def parse_codex_patch(patch: str) -> list[dict[str, Any]]:
         raise PatchParseError(f"unsupported patch directive: {stripped}")
     if not ops:
         raise PatchParseError("patch did not contain file operations")
+    if not ended:
+        raise PatchParseError("Codex patch must end with *** End Patch")
     return ops
 
 

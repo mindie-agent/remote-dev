@@ -137,6 +137,7 @@ class NormalizeArgumentsTests(unittest.TestCase):
         self.assertEqual(execute.call_args.kwargs["cwd"], "/srv")
 
 
+@unittest.skipIf(os.name == "nt", "POSIX remote worker simulation; Windows client normalization is covered separately")
 class RemoteReadParityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -180,6 +181,7 @@ class RemoteReadParityTests(unittest.TestCase):
         self.assertIn(data["status"], {"ok", "partial"})
 
 
+@unittest.skipIf(os.name == "nt", "POSIX remote worker simulation; Windows client normalization is covered separately")
 class RemoteWriteAppendTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()

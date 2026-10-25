@@ -40,20 +40,42 @@ def _duration_ms(start: float) -> int:
 
 
 def _compact_matches(matches: list[Any]) -> tuple[list[str], bool]:
+    """Fit matches into the text budget, reserving continuation/header room.
+
+    The final text adds one newline per match plus a ``<continue ...>`` header
+    or ``<truncated>`` footer. Budget those bytes here so the joined text is
+    never shortened later without a continuation offset.
+    """
     visible: list[str] = []
-    total = 0
+    used = 0
     truncated = False
+    budget = MAX_TEXT_CHARS - 64
     for item in matches:
         text = str(item)
         if len(text) > MAX_LINE_CHARS:
             text = text[:MAX_LINE_CHARS] + "<remote-dev line truncated>"
             truncated = True
-        if total + len(text) > MAX_TEXT_CHARS:
+        if used + len(text) + (1 if visible else 0) > budget:
             truncated = True
             break
         visible.append(text)
-        total += len(text)
+        used += len(text) + 1
     return visible, truncated or len(visible) < len(matches)
+
+
+def _effective_next_offset(offset: int, visible_count: int, match_count: int, worker_next: Any) -> int | None:
+    """Advance only when this formatter actually dropped matches.
+
+    The worker computes a continuation offset before ``MAX_TEXT_CHARS`` is
+    applied. Re-budget against the delivered page so a caller following the
+    offset never skips matches that were cut from the text.
+    """
+    if visible_count >= match_count:
+        return int(worker_next) if worker_next is not None else None
+    candidate = offset + visible_count
+    if worker_next is None:
+        return candidate
+    return min(candidate, int(worker_next))
 
 
 @observed_tool("remote.glob")
@@ -64,12 +86,15 @@ def remote_glob(
     pattern: str = "*",
     path: str | None = None,
     limit: int = 100,
+    offset: int = 0,
     respect_gitignore: bool = False,
+    include_ignored: bool = False,
     extensions: list[str] | None = None,
     excludes: list[str] | None = None,
     entry_type: str | None = None,
     max_depth: int | None = None,
     full_path: bool = False,
+    hidden: bool = False,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
@@ -86,7 +111,9 @@ def remote_glob(
         "path": base,
         "pattern": pattern or "*",
         "limit": limit,
-        "respect_gitignore": respect_gitignore,
+        "offset": offset,
+        "respect_gitignore": False if include_ignored else respect_gitignore,
+        "hidden": bool(hidden),
     }
     if extensions:
         glob_req["extensions"] = [str(e) for e in extensions]
@@ -108,19 +135,32 @@ def remote_glob(
     status = str(data.get("status", "failed"))
     warnings = data.get("warnings", []) if isinstance(data.get("warnings"), list) else []
     visible_matches, text_truncated = _compact_matches([str(item.get("path", item)) for item in matches])
+    next_offset = _effective_next_offset(offset, len(visible_matches), len(matches), data.get("next_offset"))
     result = make_result(
         tool="remote.glob",
         target=endpoint.to_result_target(),
         outcome="success" if status == "ok" else "failed",
         status=status,
-        summary=f"RemoteGlob found {len(matches)} paths.",
+        summary=f"RemoteGlob found {len(matches)} paths." if status == "ok" else f"RemoteGlob failed ({status}).",
         started_at=started,
         duration_ms=_duration_ms(start),
         preview={"matches": visible_matches, "truncated": bool(data.get("truncated", False)) or text_truncated},
         warnings=warnings,
-        extra={"matches": visible_matches, "truncated": bool(data.get("truncated", False)) or text_truncated, "error": data.get("error"), "error_details": data.get("error_details")},
+        extra={"matches": visible_matches, "next_offset": next_offset, "truncated": bool(data.get("truncated", False)) or text_truncated, "error": data.get("error"), "error_details": data.get("error_details")},
     )
-    text = compact_text("\n".join(visible_matches) + ("\n<truncated>\n" if data.get("truncated") or text_truncated else "\n"))
+    if next_offset is not None:
+        text = f"<continue offset={next_offset}>\n" + compact_text("\n".join(visible_matches))
+    else:
+        footer = "\n<truncated>\n" if data.get("truncated") or text_truncated else "\n"
+        text = compact_text("\n".join(visible_matches) + footer)
+    if status != "ok":
+        text = result["summary"] + "\n" + str(data.get("error") or "Search failed.") + "\n" + text.lstrip()
+    caveats = [
+        warning for warning in warnings
+        if "grep fallback" in warning and ("gitignore" in warning or "approximate" in warning)
+    ]
+    if data.get("engine") == "grep" and caveats:
+        text = text.rstrip("\n") + "\n" + "\n".join(caveats) + "\n"
     return {"text": text, "result": result}
 
 
@@ -139,13 +179,17 @@ def remote_grep(
     multiline: bool = False,
     case_insensitive: bool = False,
     fixed_strings: bool = False,
+    only_matching: bool = False,
     before_context: int = 0,
     after_context: int = 0,
     context_lines: int = 0,
     line_numbers: bool | None = None,
     include_ignored: bool = False,
+    hidden: bool = False,
     offset: int = 0,
     limit: int = 100,
+    sort_by_mtime: bool = False,
+    require_rg: bool = False,
     timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     started = utc_now_iso()
@@ -155,6 +199,8 @@ def remote_grep(
         output_mode = "files_with_matches"
     else:
         local_warnings = []
+    if limit == 0:
+        limit = MAX_GREP_MATCHES
     if limit > MAX_GREP_MATCHES:
         local_warnings.append(f"limit clamped from {limit} to {MAX_GREP_MATCHES}")
         limit = MAX_GREP_MATCHES
@@ -183,9 +229,12 @@ def remote_grep(
         "context_lines": context_lines,
         "line_numbers": line_numbers,
         "include_ignored": include_ignored,
+        "hidden": hidden,
         "offset": offset,
         "limit": limit,
         "max_line_chars": MAX_LINE_CHARS,
+        "sort_by_mtime": bool(sort_by_mtime),
+        "require_rg": bool(require_rg),
     }
     if fixed_strings:
         grep_req["fixed_strings"] = True
@@ -203,6 +252,7 @@ def remote_grep(
     status = str(data.get("status", "failed"))
     warnings = local_warnings + (data.get("warnings", []) if isinstance(data.get("warnings"), list) else [])
     visible_matches, text_truncated = _compact_matches(matches)
+    next_offset = _effective_next_offset(offset, len(visible_matches), len(matches), data.get("next_offset"))
     result = make_result(
         tool="remote.grep",
         target=endpoint.to_result_target(),
@@ -213,11 +263,21 @@ def remote_grep(
         duration_ms=_duration_ms(start),
         preview={"matches": visible_matches, "truncated": bool(data.get("truncated", False)) or text_truncated},
         warnings=warnings,
-        extra={"matches": visible_matches, "engine": data.get("engine"), "output_mode": output_mode, "offset": offset, "total_matches": data.get("total_matches"), "truncated": bool(data.get("truncated", False)) or text_truncated, "error": data.get("error"), "error_details": data.get("error_details")},
+        extra={"matches": visible_matches, "engine": data.get("engine"), "output_mode": output_mode, "offset": offset, "next_offset": next_offset, "total_matches": data.get("total_matches"), "truncated": bool(data.get("truncated", False)) or text_truncated, "error": data.get("error"), "error_details": data.get("error_details")},
     )
-    text = compact_text("\n".join(visible_matches) + ("\n<truncated>\n" if data.get("truncated") or text_truncated else "\n"))
+    if next_offset is not None:
+        text = f"<continue offset={next_offset}>\n" + compact_text("\n".join(visible_matches))
+    else:
+        footer = "\n<truncated>\n" if data.get("truncated") or text_truncated else "\n"
+        text = compact_text("\n".join(visible_matches) + footer)
     if status != "ok":
         text = result["summary"] + "\n" + str(data.get("error") or "Search failed.") + "\n" + text.lstrip()
+    caveats = [
+        warning for warning in warnings
+        if "grep fallback" in warning and ("gitignore" in warning or "approximate" in warning)
+    ]
+    if data.get("engine") == "grep" and caveats:
+        text = text.rstrip("\n") + "\n" + "\n".join(caveats) + "\n"
     return {"text": text, "result": result}
 
 

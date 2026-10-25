@@ -28,10 +28,11 @@ from typing import Any
 from remote_dev.core.endpoint import DEFAULT_CWD, DEFAULT_ROOT, Endpoint
 from remote_dev.core.container_endpoint import FULL_CONTAINER_ID, pinned_endpoint
 from remote_dev.core.errors import RemoteExecutionError, caller_error
+from remote_dev.core.job_logs import format_job_log_output, job_log_refs, local_stream_preview, render_job_refs_text
 from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS, compact_text
 from remote_dev.core.locking import record_lock
 from remote_dev.core.runtime_env import runtime_env_lines
-from remote_dev.core.state_store import atomic_write_json, find_job_record, job_record_path
+from remote_dev.core.state_store import atomic_write_json, find_job_record, job_record_path, resolve_ledger_scope
 from remote_dev.processes import control
 from remote_dev.result import make_result, tool_text, utc_now_iso
 from remote_dev.core.errors import error_details
@@ -59,7 +60,7 @@ def _stop_drain_seconds() -> float:
     return _default_stop_drain_seconds()
 
 
-MAX_YIELD_MS = 300000
+MAX_YIELD_MS = 600000
 MAX_INCREMENTAL_READ_BYTES = 32768
 UNKNOWN_JOB_STATES = frozenset({"unknown", "uncertain", "lost", "lost_outcome"})
 TERMINAL_JOB_STATES = frozenset({"succeeded", "failed", "timeout", "cancelled"})
@@ -101,13 +102,19 @@ def _timeout_seconds(timeout_ms: int | None) -> float | None:
     return timeout_ms / 1000
 
 
-def _job_command(endpoint: Endpoint, command: str, runtime_enabled: bool) -> str:
+def _job_command(endpoint: Endpoint, command: str, runtime_enabled: bool,
+                 shell: str | None = None, login: bool | None = None) -> str:
     preamble = runtime_env_lines(endpoint, runtime_enabled)
+    executed = command
+    if shell is not None or login is not None:
+        chosen = shell or "bash"
+        login_flag = "-l " if login else ""
+        executed = f"exec {shlex.quote(chosen)} {login_flag}-c {shlex.quote(command)}"
     if not preamble:
-        return command
+        return executed
     # Parse the user's command after initialization, in the same shell. This
     # preserves runtime functions/options and avoids a second SSH .bashrc load.
-    return "\n".join([*preamble, f"eval -- {shlex.quote(command)}"])
+    return "\n".join([*preamble, f"eval -- {shlex.quote(executed)}"])
 
 
 _PUBLIC_JOB_KEYS = (
@@ -235,14 +242,14 @@ def _yield_ms(value: int | None, default: int) -> int:
     return max(0, min(MAX_YIELD_MS, default if value is None else int(value)))
 
 
-def _save_output(record, path, row):
+def _save_output(record, path, row, *, cursor_key="stdin_cursors"):
     # Hold the record lock from read through exchange and cursor commit.
     # Overwrite from the committed length after a crash before cursor commit.
     # Do not expose a cursor that the local transaction did not commit. If a
     # file write or the receipt fails, the remote observation still exists and
     # the next read resumes the previous committed cursor without replaying input.
     updated = copy.deepcopy(record)
-    cursors = updated.setdefault("stdin_cursors", {})
+    cursors = updated.setdefault(cursor_key, {})
     local_offsets = updated.setdefault("local_output_offsets", {})
     for name in ("stdout", "stderr"):
         log = path.with_name(path.stem + "." + name + ".log")
@@ -258,7 +265,9 @@ def _save_output(record, path, row):
     record.update(updated)
 
 
-def _session_result(endpoint, record, path, row, *, tool, started, start, budget):
+def _session_result(endpoint, record, path, row, *, tool, started, start, budget, local_cache_error=None,
+                    preserve_full_page=False, prefer_cache_edges=False, tail_sources=None,
+                    preview_error=None):
     state = str(row.get("state") or "unknown")
     quiet = bool(row.get("quiet"))
     pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
@@ -269,8 +278,60 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
                else "timeout" if state == "timeout" else "cancelled" if state == "cancelled" or row.get("cancellation_requested") else "success")
     job_id = record["job_id"]
     summary = f"Remote command {state}." + (f" Exit code: {exit_code}." if exit_code is not None else "")
-    preview = {name: str(row.get(name) or "") for name in ("stdout", "stderr")}
+    refs = job_log_refs(
+        job_id=job_id,
+        record_path=path,
+        record=record,
+        endpoint_id=endpoint.endpoint_id,
+        observed_offsets={name: int(row.get(name + "_offset") or 0) for name in ("stdout", "stderr")},
+        unread_bytes=pending,
+        local_recording_error=local_cache_error,
+    )
+    if prefer_cache_edges:
+        try:
+            edge_chars = max(1, int(budget) // 2)
+            stdout_source = local_stream_preview(
+                Path(path).with_name(Path(path).stem + ".stdout.log"),
+                head_chars=edge_chars, tail_chars=edge_chars,
+            )
+            stderr_source = local_stream_preview(
+                Path(path).with_name(Path(path).stem + ".stderr.log"),
+                head_chars=edge_chars, tail_chars=edge_chars,
+            )
+            formatted = format_job_log_output(
+                stdout_source, stderr_source, refs=refs,
+            )
+        except OSError as exc:
+            preview_error = preview_error or f"local cache preview unavailable: {type(exc).__name__}"
+            prefer_cache_edges = False
+    if not prefer_cache_edges and tail_sources:
+        from remote_dev.core.job_logs import preview_stream_edges
+
+        heads = tail_sources.get("head") if isinstance(tail_sources, dict) else {}
+        tails = tail_sources.get("tail") if isinstance(tail_sources, dict) else {}
+        edge_sources = {}
+        for name in ("stdout", "stderr"):
+            total_bytes = int(row.get(name + "_offset") or 0) + int(row.get(name + "_bytes_remaining") or 0)
+            head_text = str((heads or {}).get(name) or row.get(name) or "")
+            tail_text = str((tails or {}).get(name) or "")
+            edge_chars = max(1, int(budget) // 2)
+            edge_sources[name] = preview_stream_edges(
+                head_text, tail_text,
+                total_bytes=max(total_bytes, len(head_text.encode("utf-8"))),
+                head_chars=edge_chars, tail_chars=edge_chars,
+            )
+        formatted = format_job_log_output(
+            edge_sources["stdout"], edge_sources["stderr"], refs=refs,
+        )
+    if not prefer_cache_edges and not tail_sources:
+        formatted = format_job_log_output(
+            str(row.get("stdout") or ""), str(row.get("stderr") or ""),
+            refs=refs, preserve_full_page=preserve_full_page,
+        )
+    preview = formatted["preview"]
     warnings = []
+    if preview_error:
+        warnings.append(f"Preview degraded: {preview_error}. The command result and full raw log refs are preserved.")
     if row.get("stdin_buffer_full"):
         warnings.append("Input partially accepted; resend chars[stdin.written_chars:] after the program consumes input.")
     if row.get("eof_deferred"):
@@ -281,8 +342,6 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
         warnings.append(str(row.get("reason") or "stdin rejected"))
     if uncertain:
         warnings.append("Remote execution outcome is uncertain; inspect this job without launching or resending input.")
-    refs = {"job_record": str(path), "remote_dir": record["remote_dir"]}
-    refs.update({name: str(path.with_name(path.stem + "." + name + ".log")) for name in ("stdout", "stderr")})
     result = make_result(
         tool=tool, target={**endpoint.to_result_target(), "cwd": record["cwd"]},
         outcome=outcome, status=state if accepted else "stdin_rejected", summary=summary,
@@ -293,6 +352,13 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
                "timings": {**row.get("timings", {}), **row.get("transport", {})},
                "cursors": record.get("stdin_cursors", {}), "bytes_remaining": pending,
                "output_budget_bytes": budget,
+               "preview_degraded": bool(preview_error),
+               "output_preview": {"truncated": formatted["truncated"], "omitted_chars": formatted["omitted_chars"],
+                                  "omitted_bytes": formatted["omitted_bytes"], "omitted_chars_exact": formatted["omitted_chars_exact"],
+                                  "repeated_lines_folded": formatted["repeated_lines_folded"],
+                                  "head_chars": formatted["head_chars"], "tail_chars": formatted["tail_chars"],
+                                  "full_page": preserve_full_page,
+                                  "local_cache_status": refs.get("local_cache_status")},
                "stdin": {key: row[key] for key in ("accepted", "written", "written_chars", "eof", "eof_deferred", "stdin_buffer_full", "retryable") if key in row},
                "environment": {key: record.get(key) for key in ("runtime_env", "runtime_env_file", "env_keys", "timeout_ms")}},
     )
@@ -307,15 +373,17 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
         text += f"session_id: {job_id} (poll with remote_job_status, remote_job_output, or remote_job_tail)\n"
     for warning in warnings:
         text += warning + "\n"
-    for name, body in preview.items():
-        if body:
-            text += f"__{name.upper()}__\n{body}"
+    text += formatted["text"]
     return {"text": text, "result": result}
 
 
-def _recording_failure(endpoint, record, path, row, error, *, tool, started, start, budget):
+def _recording_failure(endpoint, record, path, row, error, *, tool, started, start, budget, preserve_full_page=False):
     """An acknowledged remote result survives a failed local output commit."""
-    payload = _session_result(endpoint, record, path, row, tool=tool, started=started, start=start, budget=budget)
+    payload = _session_result(
+        endpoint, record, path, row, tool=tool, started=started, start=start, budget=budget,
+        local_cache_error=f"{type(error).__name__}: {error}",
+        preserve_full_page=preserve_full_page,
+    )
     result = payload["result"]
     result["execution_outcome"] = result["outcome"]
     result["execution_status"] = result["status"]
@@ -327,8 +395,10 @@ def _recording_failure(endpoint, record, path, row, error, *, tool, started, sta
         "error_details": error_details(error),
         "observed_cursors": {name + "_offset": row.get(name + "_offset") for name in ("stdout", "stderr")},
     }
+    completed = bool(row.get("quiet")) and row.get("state") in TERMINAL_JOB_STATES
+    result["operation_completed"] = completed
     result.setdefault("error_details", {"category": "local_recording", "submission_state": "acknowledged", "retryable": False})
-    result["error_details"]["operation_completed"] = bool(row.get("quiet")) and row.get("state") in TERMINAL_JOB_STATES
+    result["error_details"]["operation_completed"] = completed
     message = "Remote result was received, but local output/cursor recording failed. Do not relaunch the command or resend acknowledged input."
     result["summary"] += " " + message
     result["warnings"].append(message)
@@ -343,6 +413,7 @@ def start_remote_job(
     runtime_env: bool | None = None, description: str | None = None,
     job_id: str | None = None, yield_time_ms: int | None = None,
     max_output_tokens: int | None = None, tty: bool = False, wait: bool = False,
+    shell: str | None = None, login: bool | None = None, foreground: bool = False,
 ) -> dict[str, Any]:
     started, start = utc_now_iso(), time.monotonic()
     env = env or {}
@@ -350,7 +421,7 @@ def start_remote_job(
     job_id = require_job_id(job_id or new_job_id())
     cwd = cwd or endpoint.effective_cwd
     path = job_record_path(endpoint, job_id)
-    spec = {"command": _job_command(endpoint, command, runtime_enabled), "cwd": cwd,
+    spec = {"command": _job_command(endpoint, command, runtime_enabled, shell=shell, login=login), "cwd": cwd,
             "env": {require_env_name(key): str(value) for key, value in env.items()},
             "timeout_seconds": _timeout_seconds(timeout_ms), "interactive": not wait, "tty": bool(tty)}
     record = {"schema_version": "remote-dev.job.v1", "job_id": job_id,
@@ -359,6 +430,8 @@ def start_remote_job(
               "cwd": cwd, "env_keys": sorted(env), "runtime_env": runtime_enabled,
               "runtime_env_file": endpoint.runtime_env_file, "remote_dir": remote_job_dir(endpoint, job_id),
               "started_at": started, "timeout_ms": timeout_ms, "tty": bool(tty),
+              "shell": shell, "login": login,
+              "session_scope": resolve_ledger_scope(),
               "authorization": {"token": uuid.uuid4().hex, "job_id": job_id}}
     budget = _output_budget_bytes(max_output_tokens)
     with record_lock(path):
@@ -410,7 +483,34 @@ def start_remote_job(
                 failure["result"]["status"] = "submission_uncertain"
                 failure["result"]["summary"] = "Remote submission outcome is uncertain; observe the original job."
             return _failure_payload(failure["result"])
-    return _session_result(endpoint, record, path, row, tool="remote.bash", started=started, start=start, budget=budget)
+    pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
+    tail_sources = None
+    preview_error = None
+    if foreground and row.get("state") in TERMINAL_JOB_STATES and any(pending.values()) and not wait:
+        # Keep both preview reads inside a small shared deadline. This is a
+        # secondary decoration of an already completed command, never a reason
+        # to lose its observed exit/refs or to extend host tool deadlines.
+        preview_deadline = time.monotonic() + 6.0
+        try:
+            heads = control(endpoint, job_id, "tail", max_bytes=65536,
+                            stdout_offset=0, stderr_offset=0,
+                            timeout_ms=max(250, int((preview_deadline - time.monotonic()) * 1000)))
+            tails = control(endpoint, job_id, "tail", lines=MAX_JOB_TAIL_LINES,
+                            timeout_ms=max(250, int((preview_deadline - time.monotonic()) * 1000)))
+        except (TimeoutError, RemoteExecutionError, ValueError, RuntimeError, OSError) as exc:
+            heads, tails = {}, {}
+            preview_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+        if heads or tails:
+            tail_sources = {
+                "head": {name: str((heads or {}).get(name) or "") for name in ("stdout", "stderr")},
+                "tail": {name: str((tails or {}).get(name) or "") for name in ("stdout", "stderr")},
+            }
+    return _session_result(
+        endpoint, record, path, row, tool="remote.bash", started=started, start=start,
+        budget=budget, tail_sources=tail_sources, preview_error=preview_error,
+        prefer_cache_edges=bool(foreground and wait and not any(pending.values())
+                                and row.get("state") in TERMINAL_JOB_STATES),
+    )
 
 
 @observed_tool("remote.job_status")
@@ -444,7 +544,9 @@ def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, An
         summary=f"Remote job {job_id} is {status}.",
         started_at=started,
         duration_ms=_duration_ms(start),
-        extra={"job": _public_job_record(record, remote_status=supervisor, quiet=supervisor.get("quiet"))},
+        extra={"job": _public_job_record(
+            record, state=status, remote_status=supervisor, quiet=supervisor.get("quiet")
+        )},
     )
     return {"text": f"Remote job {job_id}: {status}\n", "result": result}
 
@@ -458,7 +560,7 @@ def _job_tail_impl(
     yield_time_ms: int | None = None,
     tool: str = "remote.job_tail",
 ) -> dict[str, Any]:
-    endpoint, record, _record_path = _load_record(endpoint, job_id)
+    endpoint, record, record_path = _load_record(endpoint, job_id)
     started = utc_now_iso()
     start = time.monotonic()
     warnings = []
@@ -511,7 +613,19 @@ def _job_tail_impl(
     for name in missing:
         warnings.append(f"{name}.log does not exist in the remote job dir")
     all_missing = bool(requested) and len(missing) == len(requested)
-    text = compact_text("".join(sections), limit=MAX_TEXT_CHARS)
+    refs = job_log_refs(
+        job_id=job_id,
+        record_path=record_path,
+        record=record,
+        endpoint_id=endpoint.endpoint_id,
+    )
+    refs_text = render_job_refs_text(refs)
+    body_limit = max(1, MAX_TEXT_CHARS - (len(refs_text) + 3 if refs_text else 0))
+    body = compact_text("".join(sections), limit=body_limit).rstrip("\n")
+    text = body
+    if refs_text:
+        text = (text + "\n\n" + refs_text) if text else refs_text
+    text = text.rstrip("\n") + "\n" if text else ""
     failed = all_missing or supervisor.get("state") == "absent"
     result = make_result(
         tool=tool,
@@ -521,7 +635,8 @@ def _job_tail_impl(
         summary=f"Remote job tail for {job_id}.",
         started_at=started,
         duration_ms=_duration_ms(start),
-        preview={"tail": text, "stderr": ""},
+        preview={"tail": body, "stderr": ""},
+        refs=refs,
         warnings=warnings,
         extra={"job_id": job_id, "lines": lines, "missing_logs": missing, "state": supervisor.get("state")},
     )
@@ -542,6 +657,99 @@ def remote_job_output(
     endpoint: Endpoint | None, *, job_id: str, lines: int = 200, stream: str = "both", yield_time_ms: int | None = None
 ) -> dict[str, Any]:
     return _job_tail_impl(endpoint, job_id=job_id, lines=lines, stream=stream, yield_time_ms=yield_time_ms, tool="remote.job_output")
+
+
+@observed_tool("remote.job_output")
+@pinned_endpoint
+def remote_job_output_incremental(
+    endpoint: Endpoint | None,
+    *,
+    job_id: str,
+    wait: bool = False,
+    timeout_ms: int | None = None,
+    max_bytes: int = MAX_INCREMENTAL_READ_BYTES,
+) -> dict[str, Any]:
+    """Consuming read used by DSH ``job_output``.
+
+    Returns only bytes after this job's committed output cursor. With
+    ``wait=True`` it keeps polling until the job reaches a terminal state or
+    the caller's timeout budget expires; a timed-out wait leaves the job
+    running. Cursors are committed under the same record lock that guards
+    stdin, so concurrent readers never replay acknowledged output.
+    """
+    endpoint, record, path = _load_record(endpoint, job_id)
+    started, start = utc_now_iso(), time.monotonic()
+    wait_ms = 30000 if timeout_ms is None else min(int(timeout_ms), 600000)
+    deadline = start + (max(0, wait_ms) / 1000.0) if wait else start
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    row: dict[str, Any] = {}
+    attempts = 0
+    while True:
+        with record_lock(path):
+            live = json.loads(path.read_text(encoding="utf-8"))
+            snapshot = dict(live.get("output_cursors") or {})
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000)) if wait else 0
+        delay = min(1000, remaining_ms) if wait else 0
+        row = control(
+            endpoint, job_id, "exchange", data="", eof=False,
+            stdout_offset=int(snapshot.get("stdout_offset") or 0),
+            stderr_offset=int(snapshot.get("stderr_offset") or 0),
+            max_bytes=max_bytes, shared_budget=True, yield_time_ms=delay,
+        )
+        with record_lock(path):
+            live = json.loads(path.read_text(encoding="utf-8"))
+            current = dict(live.get("output_cursors") or {})
+            if current != snapshot and attempts < 3:
+                attempts += 1
+                continue
+            _save_output(live, path, row, cursor_key="output_cursors")
+        stdout_parts.append(str(row.get("stdout") or ""))
+        stderr_parts.append(str(row.get("stderr") or ""))
+        state = str(row.get("state") or "unknown")
+        if not wait or state in TERMINAL_JOB_STATES or time.monotonic() >= deadline:
+            break
+    stdout = "".join(stdout_parts)
+    stderr = "".join(stderr_parts)
+    state = str(row.get("state") or "unknown")
+    exit_code = (row.get("result") or {}).get("exit_code") if state in TERMINAL_JOB_STATES else None
+    record = json.loads(path.read_text(encoding="utf-8"))
+    pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
+    refs = job_log_refs(
+        job_id=job_id,
+        record_path=path,
+        record=record,
+        endpoint_id=endpoint.endpoint_id,
+        observed_offsets={name: int(row.get(name + "_offset") or 0) for name in ("stdout", "stderr")},
+        unread_bytes=pending,
+    )
+    formatted = format_job_log_output(stdout, stderr, refs=refs, preserve_full_page=True)
+    result = make_result(
+        tool="remote.job_output",
+        target=endpoint.to_result_target(),
+        outcome="success",
+        status="ok",
+        summary=f"Read output from remote job {job_id}.",
+        started_at=started,
+        duration_ms=_duration_ms(start),
+        preview=formatted["preview"],
+        refs=refs,
+        extra={
+            "job_id": job_id,
+            "state": state,
+            "wait": bool(wait),
+            "exit_code": exit_code,
+            "output_preview": {
+                "truncated": formatted["truncated"],
+                "omitted_chars": formatted["omitted_chars"],
+                "omitted_bytes": formatted["omitted_bytes"],
+                "omitted_chars_exact": formatted["omitted_chars_exact"],
+                "repeated_lines_folded": formatted["repeated_lines_folded"],
+                "local_cache_status": refs.get("local_cache_status"),
+            },
+        },
+    )
+    return {"text": formatted["text"], "result": result}
 
 
 def _output_budget_bytes(max_output_tokens: int | None) -> int:
@@ -601,8 +809,8 @@ def remote_job_stdin(endpoint: Endpoint | None, *, job_id: str, chars: str | Non
         except TimeoutError:
             raise
         except (OSError, ValueError, RuntimeError) as error:
-            return _recording_failure(endpoint, record, path, row, error, tool="remote.job_stdin", started=started, start=start, budget=budget)
-    return _session_result(endpoint, record, path, row, tool="remote.job_stdin", started=started, start=start, budget=budget)
+            return _recording_failure(endpoint, record, path, row, error, tool="remote.job_stdin", started=started, start=start, budget=budget, preserve_full_page=True)
+    return _session_result(endpoint, record, path, row, tool="remote.job_stdin", started=started, start=start, budget=budget, preserve_full_page=True)
 
 
 @observed_tool("remote.job_stop")

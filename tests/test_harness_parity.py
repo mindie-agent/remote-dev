@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,16 +15,12 @@ from remote_dev.mcp.schemas import normalize_arguments  # noqa: E402
 import remote_dev.core.file_ops as file_ops  # noqa: E402
 import remote_dev.core.search_ops as search_ops  # noqa: E402
 import remote_dev.mcp.tools as mcp_tools  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent))
+from _worker_runner import run_worker_script
 
 
 def run_file_op(payload: dict) -> dict:
-    proc = subprocess.run(
-        [sys.executable, "-c", file_ops.REMOTE_FILE_PY],
-        input=json.dumps(payload),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    proc = run_worker_script(file_ops.REMOTE_FILE_PY, payload)
     if proc.returncode != 0:
         raise AssertionError(f"file op helper failed: {proc.stderr}\n{proc.stdout}")
     return json.loads(proc.stdout.strip().splitlines()[-1])
@@ -35,14 +30,7 @@ def run_grep(payload: dict, *, path_env: str | None = None) -> dict:
     env = dict(os.environ)
     if path_env is not None:
         env["PATH"] = path_env
-    proc = subprocess.run(
-        [sys.executable, "-c", search_ops.REMOTE_SEARCH_PY],
-        input=json.dumps(payload),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
+    proc = run_worker_script(search_ops.REMOTE_SEARCH_PY, payload, env=env)
     if proc.returncode != 0:
         raise AssertionError(f"grep helper failed: {proc.stderr}\n{proc.stdout}")
     return json.loads(proc.stdout.strip().splitlines()[-1])

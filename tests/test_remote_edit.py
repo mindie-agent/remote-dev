@@ -4,6 +4,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
+sys.path.insert(0, str(Path(__file__).parent))
+from _worker_runner import run_worker_script
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -115,12 +117,8 @@ class RemoteEditTests(unittest.TestCase):
                 "cwd": str(root),
                 "file_path": str(root / PurePosixPath(payload["file_path"]).relative_to("/workspace")),
             }
-            proc = subprocess.run(
-                [sys.executable, "-I", "-c", script],
-                input=json.dumps(local_payload),
-                capture_output=True,
-                text=True,
-                check=False,
+            proc = run_worker_script(
+                script, local_payload, isolated=True,
             )
             if proc.returncode != 0:
                 raise AssertionError(f"remote script failed: {proc.stderr}\n{proc.stdout}")
@@ -159,13 +157,18 @@ class RemoteEditTests(unittest.TestCase):
             ]
             with mock.patch.object(state_store, "substrate_root", return_value=root / "state"), mock.patch.object(
                 file_ops, "run_remote_python", side_effect=local_remote_python
+            ), mock.patch.object(
+                file_ops, "remote_stat", return_value={"status": "missing", "exists": False}
             ):
                 for idx, (tool_name, make_args) in enumerate(cases):
                     with self.subTest(tool_name=tool_name):
                         target = root / f"sample_{idx}.py"
                         target.write_bytes(b"keep_top = 0\ndelete_me = 1\nkeep_bottom = 2\n")
                         remote_target = PurePosixPath("/workspace") / target.name
-                        res = mcp_tools.call_tool(tool_name, {**endpoint_args, **make_args(remote_target)})
+                        profile = "claude" if tool_name == "remote_Edit" else None
+                        res = mcp_tools.call_tool(
+                            tool_name, {**endpoint_args, **make_args(remote_target)}, profile=profile
+                        )
                         self.assertEqual(res["result"]["outcome"], "success", res)
                         self.assertEqual(res["result"]["status"], "edited", res)
                         self.assertEqual(res["result"]["file"]["path"], str(remote_target))

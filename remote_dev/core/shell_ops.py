@@ -54,6 +54,10 @@ def remote_bash(
     max_output_tokens: int | None = None,
     tty: bool = False,
     wait: bool = False,
+    foreground: bool = False,
+    job_id: str | None = None,
+    shell: str | None = None,
+    login: bool | None = None,
 ) -> dict[str, Any]:
     env = env or {}
     runtime_enabled = endpoint.runtime_env if runtime_env is None else runtime_env
@@ -82,5 +86,6 @@ def remote_bash(
     return start_remote_job(
         endpoint, command=command, cwd=cwd, env=env, timeout_ms=timeout_ms,
         runtime_env=runtime_enabled, description=description, yield_time_ms=yield_time_ms,
-        max_output_tokens=max_output_tokens, tty=tty, wait=wait,
+        max_output_tokens=max_output_tokens, tty=tty, wait=wait, job_id=job_id,
+        shell=shell, login=login, foreground=foreground,
     )

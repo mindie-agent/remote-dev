@@ -34,6 +34,14 @@ from remote_dev.core.state_store import (
     state_root,
 )
 from remote_dev.mcp.schemas import ALIASES, HARNESS_TOOL_ALIASES, PARAM_ALIASES, TOOL_SCHEMAS, normalize_arguments
+from remote_dev.mcp.harness_profiles import (
+    CANONICAL_PROFILE,
+    PROFILE_ENV,
+    resolve_profile,
+    spec_by_wire,
+    spec_by_wire_any_profile,
+)
+from remote_dev.mcp.schemas import harness_catalog
 from remote_dev.processes import control
 
 ENDPOINT_ID_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -41,35 +49,8 @@ ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 RESOURCE_LOG_LIMIT_BYTES = 150000
 
 
-def list_tools() -> list[dict[str, Any]]:
-    descriptions = {
-        "remote.read": "Read a remote file with native Read-like pagination and a read ledger.",
-        "remote.write": "Write a remote file with overwrite support and optional read-ledger concurrency checks.",
-        "remote.edit": "Edit a remote file with exact string replacement and optional read-ledger concurrency checks.",
-        "remote.multi_edit": "Apply multiple exact edits atomically to one remote file.",
-        "remote.bash": "Run a remote shell command with Bash-like semantics, logs, preview, and automatic yield, writable stdin and optional PTY.",
-        "remote.glob": "Find remote paths with ** glob semantics.",
-        "remote.grep": "Search remote files with rg-compatible semantics and a grep -E (POSIX ERE) fallback.",
-        "remote.ls": "List a remote directory without reading file contents.",
-        "remote.apply_patch": "Apply a Codex apply_patch payload or unified diff on a remote endpoint.",
-        "remote.job_status": "Check a remote background job through the shared process supervisor.",
-        "remote.job_tail": "Tail remote background job logs through the shared process supervisor.",
-        "remote.job_output": "Read remote background job output through the shared process supervisor.",
-        "remote.job_stop": "Stop a remote background job through the shared process supervisor.",
-        "remote.job_stdin": "Write to a remote session's stdin (Codex write_stdin habit), with optional EOF and output polling.",
-        "remote.artifact_manifest": "Build a remote artifact sha256 manifest.",
-        "remote.artifact_pull": "Pull a remote artifact through SSH streaming with hash verification; reject local overwrite by default.",
-        "remote.artifact_push": "Push a local artifact through SSH streaming with hash verification.",
-        "remote.context_snapshot": "Write a compact endpoint context snapshot.",
-        "remote.probe": "Probe basic endpoint facts.",
-    }
-    # Grok's session registry rejects dotted names even when its MCP doctor
-    # successfully lists them. Advertise the portable aliases to every client;
-    # call_tool still accepts canonical dotted names for existing integrations.
-    return [
-        {"name": alias, "description": descriptions.get(name, name), "inputSchema": TOOL_SCHEMAS[name]}
-        for alias, name in ALIASES.items()
-    ]
+def list_tools(profile: str | None = None) -> list[dict[str, Any]]:
+    return harness_catalog(profile)
 
 
 def list_resources() -> list[dict[str, Any]]:
@@ -250,11 +231,20 @@ def _require(
     return value
 
 
-@observed_tool(lambda name, arguments=None: canonical_name(name))
-def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str = CANONICAL_PROFILE) -> dict[str, Any]:
     raw_name = name
     args = dict(arguments or {})
+    foreground_marker = args.pop("_foreground", None)
+    foreground = bool(foreground_marker)
     name = canonical_name(name)
+    if (name == "remote.bash" and foreground_marker is None
+            and not bool(args.get("run_in_background", False))):
+        # Canonical one-shot Bash keeps the same real head/tail contract under
+        # every bound native profile, not only the canonical profile. Native
+        # wrappers set the internal marker explicitly (False for background)
+        # and are left untouched. Background/explicit session calls remain
+        # incremental and cursor-lossless.
+        foreground = True
     if name not in TOOL_SCHEMAS:
         raise caller_error(f"unknown remote-dev tool: {name}", KeyError)
     if raw_name in {"remote.view_file_outline", "remote_view_file_outline"}:
@@ -297,6 +287,10 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             yield_time_ms=int(args["yield_time_ms"]) if args.get("yield_time_ms") is not None else None,
             max_output_tokens=int(args["max_output_tokens"]) if args.get("max_output_tokens") is not None else None,
             tty=bool(args.get("tty", False)),
+            job_id=args.get("job_id"),
+            shell=args.get("shell"),
+            login=args.get("login"),
+            foreground=foreground,
         )
     if name == "remote.read":
         assert endpoint is not None
@@ -313,6 +307,12 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             node_paths=list(args["node_paths"]) if args.get("node_paths") is not None else None,
             allow_symlink=bool(args.get("allow_symlink", False)),
             verify_content=bool(args.get("verify_content", True)),
+            max_chars=int(args["max_chars"]) if args.get("max_chars") is not None else None,
+            column_offset=int(args.get("column_offset") or 0),
+            pages=args.get("pages"),
+            strict_offset=bool(args.get("strict_offset", False)),
+            utf16_units=bool(args.get("utf16_units", False)),
+            utf8_only=bool(args.get("utf8_only", False)),
             client_context_id=args.get("client_context_id"),
             timeout_ms=timeout_ms,
         )
@@ -327,6 +327,7 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             old_string=str(_require(args, "old_string", name)),
             new_string=_require(args, "new_string", name, allow_empty=True),
             replace_all=bool(args.get("replace_all", False)),
+            normalize_crlf=bool(args.get("normalize_crlf", False)),
             start_line=int(args["start_line"]) if args.get("start_line") is not None else None,
             end_line=int(args["end_line"]) if args.get("end_line") is not None else None,
             client_context_id=args.get("client_context_id"),
@@ -341,13 +342,16 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             endpoint,
             pattern=str(args.get("pattern") or "*"),
             path=args.get("path"),
-            limit=int(args.get("limit") or 100),
+            limit=int(args.get("limit")) if args.get("limit") is not None else 100,
+            offset=int(args.get("offset") or 0),
             respect_gitignore=bool(args.get("respect_gitignore", False)),
+            include_ignored=bool(args.get("include_ignored", False)),
             extensions=list(args["extensions"]) if args.get("extensions") is not None else None,
             excludes=list(args["excludes"]) if args.get("excludes") is not None else None,
             entry_type=str(args["entry_type"]) if args.get("entry_type") is not None else None,
             max_depth=int(args["max_depth"]) if args.get("max_depth") is not None else None,
             full_path=bool(args.get("full_path", False)),
+            hidden=bool(args.get("hidden", False)),
             timeout_ms=timeout_ms,
         )
     if name == "remote.grep":
@@ -364,13 +368,17 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             multiline=bool(args.get("multiline", False)),
             case_insensitive=bool(args.get("case_insensitive", False)),
             fixed_strings=bool(args.get("fixed_strings", False)),
+            only_matching=bool(args.get("only_matching", False)),
             before_context=int(args.get("before_context") or 0),
             after_context=int(args.get("after_context") or 0),
             context_lines=int(args.get("context_lines") or 0),
             line_numbers=args.get("line_numbers") if args.get("line_numbers") is None else bool(args.get("line_numbers")),
             include_ignored=bool(args.get("include_ignored", False)),
+            hidden=bool(args.get("hidden", False)),
             offset=int(args.get("offset") or 0),
-            limit=int(args.get("limit") or 100),
+            limit=int(args.get("limit")) if args.get("limit") is not None else 100,
+            sort_by_mtime=bool(args.get("sort_by_mtime", False)),
+            require_rg=bool(args.get("require_rg", False)),
             timeout_ms=timeout_ms,
         )
     if name == "remote.ls":
@@ -469,3 +477,38 @@ def call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         assert endpoint is not None
         return remote_probe(endpoint, timeout_ms=timeout_ms, diagnose_connection=bool(args.get("diagnose_connection", False)), modules=args.get("modules"))
     raise KeyError(f"unknown remote-dev tool: {name}")
+
+
+@observed_tool(lambda name, arguments=None, **kwargs: name)
+def call_tool(
+    name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    profile: str | None = None,
+) -> dict[str, Any]:
+    """Dispatch one canonical or profile-bound native tool call.
+
+    The profile is trusted process context (plugin launcher env) or an
+    explicit in-process argument. It is never inferred from argument values.
+    """
+    resolved = resolve_profile(profile)
+    args = dict(arguments or {})
+    if resolved == CANONICAL_PROFILE:
+        native_elsewhere = spec_by_wire_any_profile(name)
+        if native_elsewhere is not None and name not in ALIASES:
+            raise caller_error(
+                f"{name} is a {native_elsewhere[0]} native tool; "
+                f"bind {PROFILE_ENV}={native_elsewhere[0]} or pass profile=... to use it"
+            )
+    if resolved != CANONICAL_PROFILE:
+        spec = spec_by_wire(resolved, name)
+        if spec is not None:
+            from remote_dev.mcp.harness_native import dispatch_native
+
+            return dispatch_native(resolved, spec, args, _call_canonical)
+        other = spec_by_wire_any_profile(name)
+        if other is not None and other[0] != resolved and name not in ALIASES:
+            raise caller_error(
+                f"{name} is a {other[0]} native tool; current harness profile is {resolved}"
+            )
+    return _call_canonical(name, args, profile=resolved)
