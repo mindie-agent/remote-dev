@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,6 +14,8 @@ from unittest import mock
 
 from remote_dev.core.endpoint import Endpoint
 import remote_dev.core.search_ops as search_ops
+sys.path.insert(0, str(Path(__file__).parent))
+from _worker_runner import run_worker_script
 
 
 def run_glob(tree: Path, *, respect_gitignore: bool, extra_env: dict[str, str] | None = None) -> dict:
@@ -29,14 +31,8 @@ def run_glob(tree: Path, *, respect_gitignore: bool, extra_env: dict[str, str] |
     env = dict(os.environ)
     if extra_env:
         env.update(extra_env)
-    proc = subprocess.run(
-        [sys.executable, "-c", search_ops.REMOTE_SEARCH_PY],
-        input=json.dumps(payload),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        cwd=str(tree),
+    proc = run_worker_script(
+        search_ops.REMOTE_SEARCH_PY, payload, env=env, cwd=str(tree),
     )
     if proc.returncode != 0:
         raise AssertionError(f"glob helper failed: {proc.stderr}\n{proc.stdout}")

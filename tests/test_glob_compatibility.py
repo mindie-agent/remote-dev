@@ -10,14 +10,16 @@ binding even on newer interpreters.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).parent))
+from _worker_runner import run_worker_script
 
 import remote_dev.core.search_ops as search_ops  # noqa: E402
 
@@ -38,13 +40,8 @@ def run_remote_search_helper(payload, *, cwd, script=None, shim=False):
     source = search_ops.REMOTE_SEARCH_PY if script is None else script
     if shim:
         source = LEGACY_GLOB_SHIM + source
-    return subprocess.run(
-        [sys.executable, "-c", source],
-        input=json.dumps(payload),
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=str(cwd),
+    return run_worker_script(
+        source, payload, cwd=str(cwd),
     )
 
 

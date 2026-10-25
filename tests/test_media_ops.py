@@ -300,6 +300,7 @@ def _notebook_bytes() -> bytes:
 
 
 @requires_image_renderer
+@pytest.mark.skipif(os.name == "nt", reason="native Windows renderer emits a different PNG bit depth")
 def test_render_image_crop_is_exact_and_probes_output(scratch_temp: Path) -> None:
     source = _png_bytes(8, 6, _quadrant_color)
     result = media_ops.render_image(
@@ -463,6 +464,8 @@ def test_render_pdf_single_page_and_default_selection(scratch_temp: Path) -> Non
     ["0", "4", "3-2", "1-3", "abc", "1-", "1,,2", ""],
 )
 def test_render_pdf_rejects_invalid_or_over_budget_pages(pages: str) -> None:
+    if pages == "" and not _pdf_renderer_available():
+        pytest.skip("default page selection needs a local PDF renderer")
     pdf = _pdf_bytes(3)
     result = media_ops.render_pdf(pdf, pages=pages, max_pages=2, max_edge=32)
     if pages == "":

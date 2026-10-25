@@ -4,6 +4,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
+sys.path.insert(0, str(Path(__file__).parent))
+from _worker_runner import run_worker_script
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -115,12 +117,8 @@ class RemoteEditTests(unittest.TestCase):
                 "cwd": str(root),
                 "file_path": str(root / PurePosixPath(payload["file_path"]).relative_to("/workspace")),
             }
-            proc = subprocess.run(
-                [sys.executable, "-I", "-c", script],
-                input=json.dumps(local_payload),
-                capture_output=True,
-                text=True,
-                check=False,
+            proc = run_worker_script(
+                script, local_payload, isolated=True,
             )
             if proc.returncode != 0:
                 raise AssertionError(f"remote script failed: {proc.stderr}\n{proc.stdout}")

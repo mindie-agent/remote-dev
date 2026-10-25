@@ -93,6 +93,10 @@ class RemoteReadTests(unittest.TestCase):
             file_ops.run_remote_python = original_runner  # type: ignore[assignment]
 
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _worker_runner import run_worker_script
+
+
 class KimiReadPaginationTests(unittest.TestCase):
     """Business-level pagination through the real worker and formatter.
 
@@ -110,13 +114,8 @@ class KimiReadPaginationTests(unittest.TestCase):
         self.addCleanup(setattr, state_store, "substrate_root", self._state_root)
 
         def run_worker(_endpoint, script, payload, **_kwargs):
-            proc = subprocess.run(
-                [sys.executable, "-I", "-c", script],
-                input=json.dumps(payload),
-                capture_output=True,
-                text=True,
-                cwd=self.root,
-                check=False,
+            proc = run_worker_script(
+                script, payload, cwd=self.root, isolated=True,
             )
             if proc.returncode != 0:
                 raise AssertionError(f"worker failed: {proc.stderr}")

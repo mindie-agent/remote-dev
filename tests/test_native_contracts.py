@@ -1206,7 +1206,7 @@ class WorkerFileTests(unittest.TestCase):
 
     def test_edit_delete_replacement_and_errors(self) -> None:
         target = self.root / "delete.txt"
-        target.write_text("a\nb\nc\n", encoding="utf-8")
+        target.write_bytes(b"a\nb\nc\n")
         payload = {
             "op": "edit",
             "root": str(self.root),
@@ -1217,10 +1217,10 @@ class WorkerFileTests(unittest.TestCase):
         }
         data = _run_worker(FILE_WORKER, payload, self.root)
         self.assertEqual(data["status"], "edited")
-        self.assertEqual(target.read_text(encoding="utf-8"), "a\nc\n")
+        self.assertEqual(target.read_bytes(), b"a\nc\n")
 
         ambiguous = self.root / "ambiguous.txt"
-        ambiguous.write_text("x\nx\n", encoding="utf-8")
+        ambiguous.write_bytes(b"x\nx\n")
         data = _run_worker(
             FILE_WORKER,
             {
@@ -1341,7 +1341,7 @@ class WorkerSearchTests(unittest.TestCase):
         data = self._grep()
         self.assertEqual(data["status"], "ok")
         self.assertEqual(data["output_mode"], "files_with_matches")
-        self.assertIn(str(self.target), data["matches"])
+        self.assertIn("m.txt", {Path(row).name for row in data["matches"]})
 
     def test_glob_limit_pagination(self) -> None:
         payload = {

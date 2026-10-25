@@ -33,6 +33,10 @@ def _rg_path() -> str | None:
 RG = _rg_path()
 
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _worker_runner import run_worker_script
+
+
 class _Transport:
     """Run the shipped worker locally; no protocol or payload is simulated."""
 
@@ -47,14 +51,8 @@ class _Transport:
             env["PATH"] = self.path
         elif self.rg:
             env["PATH"] = str(Path(self.rg).parent) + os.pathsep + env.get("PATH", "")
-        proc = subprocess.run(
-            [sys.executable, "-I", "-c", script],
-            input=json.dumps(payload),
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=str(self.cwd),
-            check=False,
+        proc = run_worker_script(
+            script, payload, env=env, cwd=str(self.cwd), isolated=True,
         )
         if proc.returncode != 0:
             return {"status": "failed", "error": proc.stderr[-2000:]}
