@@ -28,6 +28,7 @@ from typing import Any
 from remote_dev.core.endpoint import DEFAULT_CWD, DEFAULT_ROOT, Endpoint
 from remote_dev.core.container_endpoint import FULL_CONTAINER_ID, pinned_endpoint
 from remote_dev.core.errors import RemoteExecutionError, caller_error
+from remote_dev.core.job_logs import format_job_log_output, job_log_refs, render_job_refs_text
 from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS, compact_text
 from remote_dev.core.locking import record_lock
 from remote_dev.core.runtime_env import runtime_env_lines
@@ -264,7 +265,7 @@ def _save_output(record, path, row, *, cursor_key="stdin_cursors"):
     record.update(updated)
 
 
-def _session_result(endpoint, record, path, row, *, tool, started, start, budget):
+def _session_result(endpoint, record, path, row, *, tool, started, start, budget, local_cache_error=None, preserve_full_page=False):
     state = str(row.get("state") or "unknown")
     quiet = bool(row.get("quiet"))
     pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
@@ -275,7 +276,20 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
                else "timeout" if state == "timeout" else "cancelled" if state == "cancelled" or row.get("cancellation_requested") else "success")
     job_id = record["job_id"]
     summary = f"Remote command {state}." + (f" Exit code: {exit_code}." if exit_code is not None else "")
-    preview = {name: str(row.get(name) or "") for name in ("stdout", "stderr")}
+    refs = job_log_refs(
+        job_id=job_id,
+        record_path=path,
+        record=record,
+        endpoint_id=endpoint.endpoint_id,
+        observed_offsets={name: int(row.get(name + "_offset") or 0) for name in ("stdout", "stderr")},
+        unread_bytes=pending,
+        local_recording_error=local_cache_error,
+    )
+    formatted = format_job_log_output(
+        str(row.get("stdout") or ""), str(row.get("stderr") or ""),
+        refs=refs, preserve_full_page=preserve_full_page,
+    )
+    preview = formatted["preview"]
     warnings = []
     if row.get("stdin_buffer_full"):
         warnings.append("Input partially accepted; resend chars[stdin.written_chars:] after the program consumes input.")
@@ -287,8 +301,6 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
         warnings.append(str(row.get("reason") or "stdin rejected"))
     if uncertain:
         warnings.append("Remote execution outcome is uncertain; inspect this job without launching or resending input.")
-    refs = {"job_record": str(path), "remote_dir": record["remote_dir"]}
-    refs.update({name: str(path.with_name(path.stem + "." + name + ".log")) for name in ("stdout", "stderr")})
     result = make_result(
         tool=tool, target={**endpoint.to_result_target(), "cwd": record["cwd"]},
         outcome=outcome, status=state if accepted else "stdin_rejected", summary=summary,
@@ -299,6 +311,12 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
                "timings": {**row.get("timings", {}), **row.get("transport", {})},
                "cursors": record.get("stdin_cursors", {}), "bytes_remaining": pending,
                "output_budget_bytes": budget,
+               "output_preview": {"truncated": formatted["truncated"], "omitted_chars": formatted["omitted_chars"],
+                                  "omitted_bytes": formatted["omitted_bytes"], "omitted_chars_exact": formatted["omitted_chars_exact"],
+                                  "repeated_lines_folded": formatted["repeated_lines_folded"],
+                                  "head_chars": formatted["head_chars"], "tail_chars": formatted["tail_chars"],
+                                  "full_page": preserve_full_page,
+                                  "local_cache_status": refs.get("local_cache_status")},
                "stdin": {key: row[key] for key in ("accepted", "written", "written_chars", "eof", "eof_deferred", "stdin_buffer_full", "retryable") if key in row},
                "environment": {key: record.get(key) for key in ("runtime_env", "runtime_env_file", "env_keys", "timeout_ms")}},
     )
@@ -313,15 +331,17 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
         text += f"session_id: {job_id} (poll with remote_job_status, remote_job_output, or remote_job_tail)\n"
     for warning in warnings:
         text += warning + "\n"
-    for name, body in preview.items():
-        if body:
-            text += f"__{name.upper()}__\n{body}"
+    text += formatted["text"]
     return {"text": text, "result": result}
 
 
-def _recording_failure(endpoint, record, path, row, error, *, tool, started, start, budget):
+def _recording_failure(endpoint, record, path, row, error, *, tool, started, start, budget, preserve_full_page=False):
     """An acknowledged remote result survives a failed local output commit."""
-    payload = _session_result(endpoint, record, path, row, tool=tool, started=started, start=start, budget=budget)
+    payload = _session_result(
+        endpoint, record, path, row, tool=tool, started=started, start=start, budget=budget,
+        local_cache_error=f"{type(error).__name__}: {error}",
+        preserve_full_page=preserve_full_page,
+    )
     result = payload["result"]
     result["execution_outcome"] = result["outcome"]
     result["execution_status"] = result["status"]
@@ -471,7 +491,7 @@ def _job_tail_impl(
     yield_time_ms: int | None = None,
     tool: str = "remote.job_tail",
 ) -> dict[str, Any]:
-    endpoint, record, _record_path = _load_record(endpoint, job_id)
+    endpoint, record, record_path = _load_record(endpoint, job_id)
     started = utc_now_iso()
     start = time.monotonic()
     warnings = []
@@ -524,7 +544,19 @@ def _job_tail_impl(
     for name in missing:
         warnings.append(f"{name}.log does not exist in the remote job dir")
     all_missing = bool(requested) and len(missing) == len(requested)
-    text = compact_text("".join(sections), limit=MAX_TEXT_CHARS)
+    refs = job_log_refs(
+        job_id=job_id,
+        record_path=record_path,
+        record=record,
+        endpoint_id=endpoint.endpoint_id,
+    )
+    refs_text = render_job_refs_text(refs)
+    body_limit = max(1, MAX_TEXT_CHARS - (len(refs_text) + 3 if refs_text else 0))
+    body = compact_text("".join(sections), limit=body_limit).rstrip("\n")
+    text = body
+    if refs_text:
+        text = (text + "\n\n" + refs_text) if text else refs_text
+    text = text.rstrip("\n") + "\n" if text else ""
     failed = all_missing or supervisor.get("state") == "absent"
     result = make_result(
         tool=tool,
@@ -534,7 +566,8 @@ def _job_tail_impl(
         summary=f"Remote job tail for {job_id}.",
         started_at=started,
         duration_ms=_duration_ms(start),
-        preview={"tail": text, "stderr": ""},
+        preview={"tail": body, "stderr": ""},
+        refs=refs,
         warnings=warnings,
         extra={"job_id": job_id, "lines": lines, "missing_logs": missing, "state": supervisor.get("state")},
     )
@@ -575,7 +608,7 @@ def remote_job_output_incremental(
     running. Cursors are committed under the same record lock that guards
     stdin, so concurrent readers never replay acknowledged output.
     """
-    endpoint, _record, path = _load_record(endpoint, job_id)
+    endpoint, record, path = _load_record(endpoint, job_id)
     started, start = utc_now_iso(), time.monotonic()
     wait_ms = 30000 if timeout_ms is None else min(int(timeout_ms), 600000)
     deadline = start + (max(0, wait_ms) / 1000.0) if wait else start
@@ -609,13 +642,19 @@ def remote_job_output_incremental(
             break
     stdout = "".join(stdout_parts)
     stderr = "".join(stderr_parts)
-    body = stdout
-    if stderr:
-        if body and not body.endswith("\n"):
-            body += "\n"
-        body += "[stderr]\n" + stderr
     state = str(row.get("state") or "unknown")
     exit_code = (row.get("result") or {}).get("exit_code") if state in TERMINAL_JOB_STATES else None
+    record = json.loads(path.read_text(encoding="utf-8"))
+    pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
+    refs = job_log_refs(
+        job_id=job_id,
+        record_path=path,
+        record=record,
+        endpoint_id=endpoint.endpoint_id,
+        observed_offsets={name: int(row.get(name + "_offset") or 0) for name in ("stdout", "stderr")},
+        unread_bytes=pending,
+    )
+    formatted = format_job_log_output(stdout, stderr, refs=refs, preserve_full_page=True)
     result = make_result(
         tool="remote.job_output",
         target=endpoint.to_result_target(),
@@ -624,10 +663,24 @@ def remote_job_output_incremental(
         summary=f"Read output from remote job {job_id}.",
         started_at=started,
         duration_ms=_duration_ms(start),
-        preview={"content": body},
-        extra={"job_id": job_id, "state": state, "wait": bool(wait), "exit_code": exit_code},
+        preview=formatted["preview"],
+        refs=refs,
+        extra={
+            "job_id": job_id,
+            "state": state,
+            "wait": bool(wait),
+            "exit_code": exit_code,
+            "output_preview": {
+                "truncated": formatted["truncated"],
+                "omitted_chars": formatted["omitted_chars"],
+                "omitted_bytes": formatted["omitted_bytes"],
+                "omitted_chars_exact": formatted["omitted_chars_exact"],
+                "repeated_lines_folded": formatted["repeated_lines_folded"],
+                "local_cache_status": refs.get("local_cache_status"),
+            },
+        },
     )
-    return {"text": body, "result": result}
+    return {"text": formatted["text"], "result": result}
 
 
 def _output_budget_bytes(max_output_tokens: int | None) -> int:
@@ -687,8 +740,8 @@ def remote_job_stdin(endpoint: Endpoint | None, *, job_id: str, chars: str | Non
         except TimeoutError:
             raise
         except (OSError, ValueError, RuntimeError) as error:
-            return _recording_failure(endpoint, record, path, row, error, tool="remote.job_stdin", started=started, start=start, budget=budget)
-    return _session_result(endpoint, record, path, row, tool="remote.job_stdin", started=started, start=start, budget=budget)
+            return _recording_failure(endpoint, record, path, row, error, tool="remote.job_stdin", started=started, start=start, budget=budget, preserve_full_page=True)
+    return _session_result(endpoint, record, path, row, tool="remote.job_stdin", started=started, start=start, budget=budget, preserve_full_page=True)
 
 
 @observed_tool("remote.job_stop")

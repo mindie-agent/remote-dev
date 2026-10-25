@@ -14,8 +14,8 @@ from remote_dev.core.errors import caller_error
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
 from remote_dev.mcp.native_common import (
     _IMAGE_EXTENSIONS, _TERMINAL, _assert_visible, _job_record, _media_failure, _native_job_status,
-    _job_file, _live_job, _read_media_payload, _record_output_path,
-    _refresh_job_output, _status_query_failed, _tail_text,
+    _job_file, _live_job, _native_job_output_preview, _read_media_payload, _record_output_path,
+    _refresh_job_output, _result_refs_text, _status_query_failed, _tail_text,
 )
 
 @handler("kimi_task_output")
@@ -35,21 +35,30 @@ def kimi_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any],
     native_status = _native_job_status(state)
     from remote_dev.core.state_store import find_job_record
 
-    refresh_failure = _refresh_job_output(job_id)
+    observation: dict[str, Any] = {}
+    refresh_failure = _refresh_job_output(job_id, observation=observation)
     if refresh_failure is not None:
         return refresh_failure
     found = find_job_record(job_id)
-    preview, truncated = ("", False)
     output_path = _record_output_path(record)
     if found:
-        stdout, out_truncated = _tail_text(_job_file(found[0], "stdout"), 32768)
-        stderr, err_truncated = _tail_text(_job_file(found[0], "stderr"), 32768)
-        preview = stdout
+        formatted = _native_job_output_preview(
+            found[0], found[1], observation=observation, tail_reader=_tail_text
+        )
+        preview = formatted["preview"]["stdout"]
+        stderr = formatted["preview"]["stderr"]
         if stderr:
             if preview and not preview.endswith("\n"):
                 preview += "\n"
             preview += stderr
-        truncated = out_truncated or err_truncated
+        truncated = formatted["truncated"]
+        refs = formatted["refs"]
+        refs_text = formatted["refs_text"]
+    else:
+        from remote_dev.core.job_logs import format_job_log_output
+
+        formatted = format_job_log_output("", "")
+        preview, truncated, refs, refs_text = "", False, {}, ""
     remote_status = job.get("remote_status") or {}
     result = job.get("result") or {}
     lines = [
@@ -78,6 +87,8 @@ def kimi_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any],
         lines.append(f"output_path: {output_path}")
     lines.append(f"output_truncated: {str(truncated).lower()}")
     lines.extend(["", "[output]", preview.strip() or "[no output available]"])
+    if refs_text:
+        lines.extend(["", refs_text])
     text = "\n".join(lines)
     result_payload = dict(status_payload)
     result_payload["text"] = text
@@ -87,6 +98,16 @@ def kimi_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any],
         "status": native_status,
         "job_id": job_id,
         "output_path": output_path,
+        "refs": refs,
+        "preview": formatted["preview"],
+        "output_preview": {
+            "truncated": formatted["truncated"],
+            "omitted_chars": formatted["omitted_chars"],
+            "omitted_bytes": formatted["omitted_bytes"],
+            "omitted_chars_exact": formatted["omitted_chars_exact"],
+            "repeated_lines_folded": formatted["repeated_lines_folded"],
+            "local_cache_status": refs.get("local_cache_status"),
+        },
     }
     result_payload["result"].setdefault("extra", {})["native_task"] = {
         "task_id": job_id, "status": native_status, "output_path": output_path,
@@ -239,11 +260,18 @@ def kimi_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normal
     stderr = str(preview.get("stderr") or "")
     exit_code = result.get("exit_code")
     job_id = result.get("job_id") or result.get("session_id")
-    body = stdout + stderr
+    body = stdout
+    if stderr:
+        if body and not body.endswith("\n"):
+            body += "\n"
+        body += stderr
     if state in {"prepared", "running"}:
         body = f"task_id: {job_id}\nstatus: running\n" + body
     elif exit_code not in (None, 0):
         body = body.rstrip() + f"\nCommand failed with exit code: {exit_code}."
+    refs_text = _result_refs_text(result)
+    if refs_text:
+        body = body.rstrip() + "\n\n" + refs_text
     payload["text"] = body if body.endswith("\n") else body + "\n"
     result.update({"tool": spec.wire, "status": state, "task_id": job_id, "exit_code": exit_code})
     return payload

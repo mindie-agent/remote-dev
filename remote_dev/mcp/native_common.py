@@ -8,7 +8,8 @@
 from __future__ import annotations
 
 import base64
-from typing import Any, Mapping
+import codecs
+from typing import Any, Callable, Mapping
 
 from remote_dev.core.errors import caller_error
 _TERMINAL = {"cancelled", "succeeded", "failed", "timeout", "absent"}
@@ -95,7 +96,7 @@ def _job_result(job_id: str) -> dict[str, Any]:
     payload["result"].setdefault("job", {})
     return payload
 
-def _refresh_job_output(job_id: str) -> dict[str, Any] | None:
+def _refresh_job_output(job_id: str, *, observation: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Pull pending supervisor output into the local job logs once.
 
     Native TaskOutput/TaskList read the task's current output without taking
@@ -103,6 +104,8 @@ def _refresh_job_output(job_id: str) -> dict[str, Any] | None:
     chars is the non-mutating observation path that commits new bytes to the
     local log files.  A failed pull is returned to the caller as the actual
     canonical failure; it must not be silently replaced by stale cached text.
+    ``observation`` is filled with the successful canonical result so callers
+    can report truthful cache/cursor state without a second poll.
     """
     from remote_dev.mcp.tools import _call_canonical
 
@@ -143,6 +146,9 @@ def _refresh_job_output(job_id: str) -> dict[str, Any] | None:
     )
     if result.get("outcome") == "failed" and not completed_command:
         return payload
+    if observation is not None:
+        observation.clear()
+        observation.update(result)
     return None
 
 def _job_file(path: Any, stream: str) -> Any:
@@ -178,7 +184,106 @@ def _tail_text(path: Any, limit: int = 32000) -> tuple[str, bool]:
         offset += 1
     return data[offset:].decode("utf-8", errors="replace"), True
 
+
+def _head_text(path: Any, limit: int = 16384) -> tuple[str, bool]:
+    """Read a bounded UTF-8-safe prefix without loading a large cache file."""
+    from pathlib import Path
+
+    path = Path(path)
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(max(0, int(limit)))
+            size = path.stat().st_size
+    except FileNotFoundError:
+        return "", False
+    if not data:
+        return "", size > 0
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    return decoder.decode(data, final=False), size > len(data)
+
+
+def _job_stream_preview(
+    path: Any,
+    *,
+    tail_reader: Callable[[Any, int], tuple[str, bool]] | None = None,
+) -> dict[str, Any]:
+    """Bounded head+tail view of a local job cache file.
+
+    Medium caches are read once so omitted character counts stay exact. Larger
+    caches use the bounded tail/head readers and report exact omitted bytes with
+    a truthful lower bound for characters. The shared core formatter owns the
+    final bounds, counts, folding, and note.
+    """
+    from pathlib import Path
+
+    from remote_dev.core.job_logs import preview_stream_edges, preview_stream_text
+
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        size = 0
+    if 0 < size <= 4 * 1024 * 1024:
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            data = None
+        if data is not None:
+            return preview_stream_text(data.decode("utf-8", errors="replace"))
+    reader = tail_reader or _tail_text
+    tail, tail_truncated = reader(path, 32768)
+    if not tail_truncated:
+        return preview_stream_text(tail)
+    head_limit = min(16384, max(0, size - 32768))
+    head, _ = _head_text(path, head_limit) if head_limit else ("", False)
+    return preview_stream_edges(head, tail, total_bytes=size)
+
+
+def _native_job_output_preview(
+    record_path: Any,
+    record: Mapping[str, Any],
+    *,
+    observation: Mapping[str, Any] | None = None,
+    tail_reader: Callable[[Any, int], tuple[str, bool]] | None = None,
+) -> dict[str, Any]:
+    """Shared native TaskOutput/Bash formatter backed by the core preview/refs."""
+    from remote_dev.core.job_logs import format_job_log_output, job_log_refs
+
+    observation = observation or {}
+    streams = {
+        name: _job_stream_preview(_job_file(record_path, name), tail_reader=tail_reader)
+        for name in ("stdout", "stderr")
+    }
+    cursors = observation.get("cursors") if isinstance(observation.get("cursors"), Mapping) else {}
+    observed = {
+        name: int(cursors[name + "_offset"])
+        for name in ("stdout", "stderr")
+        if cursors.get(name + "_offset") is not None
+    }
+    pending = observation.get("bytes_remaining") if isinstance(observation.get("bytes_remaining"), Mapping) else {}
+    target = record.get("target") if isinstance(record.get("target"), Mapping) else {}
+    refs = job_log_refs(
+        job_id=str(record.get("job_id") or ""),
+        record_path=record_path,
+        record=record,
+        endpoint_id=target.get("endpoint_id") if isinstance(target, Mapping) else None,
+        observed_offsets=observed,
+        unread_bytes=pending,
+    )
+    return format_job_log_output(
+        streams["stdout"],
+        streams["stderr"],
+        refs=refs,
+    )
+
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+def _result_refs_text(result: Mapping[str, Any]) -> str:
+    """Render structured job refs for a native handler that rewrites text."""
+    from remote_dev.core.job_logs import render_job_refs_text
+
+    refs = result.get("refs") if isinstance(result.get("refs"), Mapping) else {}
+    return render_job_refs_text(refs)
+
 
 def _media_failure(spec_wire: str, fetched: Mapping[str, Any]) -> dict[str, Any]:
     from remote_dev.result import make_result

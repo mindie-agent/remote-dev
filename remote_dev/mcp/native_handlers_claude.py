@@ -14,7 +14,8 @@ from remote_dev.mcp.harness_profiles import NativeToolSpec
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
 from remote_dev.mcp.native_common import (
     _IMAGE_EXTENSIONS, _TERMINAL, _assert_visible, _job_file, _job_record,
-    _media_failure, _read_media_payload, _refresh_job_output, _status_query_failed, _tail_text,
+    _media_failure, _native_job_output_preview, _read_media_payload, _refresh_job_output,
+    _result_refs_text, _status_query_failed, _tail_text,
 )
 
 @handler("claude_task_output")
@@ -54,18 +55,19 @@ def claude_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any
     exit_code = remote_status.get("exit_code")
     if exit_code is None:
         exit_code = ((remote_status.get("result") or {}).get("exit_code"))
-    refresh_failure = _refresh_job_output(job_id)
+    observation: dict[str, Any] = {}
+    refresh_failure = _refresh_job_output(job_id, observation=observation)
     if refresh_failure is not None:
         return refresh_failure
-    stdout, stdout_truncated = _tail_text(_job_file(record_path, "stdout"))
-    stderr, stderr_truncated = _tail_text(_job_file(record_path, "stderr"))
-    output = stdout
+    formatted = _native_job_output_preview(
+        record_path, record, observation=observation, tail_reader=_tail_text
+    )
+    output = formatted["preview"]["stdout"]
+    stderr = formatted["preview"]["stderr"]
     if stderr:
         if output and not output.endswith("\n"):
             output += "\n"
         output += stderr
-    if stdout_truncated or stderr_truncated:
-        output = "[Truncated to the last 32000 characters]\n" + output
     native_status = {
         "prepared": "running", "running": "running", "succeeded": "completed",
         "cancelled": "killed", "failed": "failed", "timeout": "timeout", "absent": "failed",
@@ -81,16 +83,29 @@ def claude_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any
         lines.append(f"<exit_code>{exit_code}</exit_code>")
     if output.strip():
         lines.extend(["<output>", output.rstrip(), "</output>"])
+    if formatted["refs_text"]:
+        lines.extend(["", formatted["refs_text"]])
     text = "\n".join(lines)
     result = dict(status_payload["result"])
     result.update({
         "tool": spec.wire,
         "retrieval_status": retrieval,
+        "refs": formatted["refs"],
+        "preview": formatted["preview"],
+        "output_preview": {
+            "truncated": formatted["truncated"],
+            "omitted_chars": formatted["omitted_chars"],
+            "omitted_bytes": formatted["omitted_bytes"],
+            "omitted_chars_exact": formatted["omitted_chars_exact"],
+            "repeated_lines_folded": formatted["repeated_lines_folded"],
+            "local_cache_status": formatted["refs"].get("local_cache_status"),
+        },
         "task": {
             "task_id": job_id,
             "task_type": "local_bash",
             "status": native_status,
             "output": output,
+            "output_truncated": formatted["truncated"],
             **({"exitCode": exit_code} if exit_code is not None else {}),
         },
     })
@@ -324,6 +339,9 @@ def claude_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], norm
         body = body.rstrip() + f"\nbackgroundTaskId: {job_id}"
     elif exit_code not in (None, 0):
         body = body.rstrip() + f"\n[exit code: {exit_code}]"
+    refs_text = _result_refs_text(result)
+    if refs_text:
+        body = body.rstrip() + "\n\n" + refs_text
     payload["text"] = body if body.endswith("\n") else body + "\n"
     result.update({"tool": spec.wire, "status": state, "backgroundTaskId": job_id if state in {"prepared", "running"} else None, "exit_code": exit_code})
     return payload
