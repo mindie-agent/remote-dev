@@ -14,7 +14,7 @@ from remote_dev.mcp.harness_profiles import NativeToolSpec
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
 from remote_dev.mcp.native_common import (
     _TERMINAL, _assert_visible, _job_record, _live_job, _read_media_payload,
-    _result_refs_text, _status_query_failed,
+    _result_notices_text, _result_refs_text, _status_query_failed,
 )
 
 def _dsh_status(state: str) -> str:
@@ -241,7 +241,7 @@ def dsh_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normali
         text += f"\n[still running after {timeout_ms}ms; moved to background job {job_id}]"
     if markers:
         text += "\n" + "\n".join(markers)
-    refs_text = "" if kind == "background" else _result_refs_text(result)
+    refs_text = "" if kind == "background" else _result_notices_text(result)
     if refs_text:
         text += "\n\n" + refs_text
     payload["text"] = text + "\n"

@@ -234,12 +234,15 @@ def _require(
 def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str = CANONICAL_PROFILE) -> dict[str, Any]:
     raw_name = name
     args = dict(arguments or {})
-    foreground = bool(args.pop("_foreground", False))
+    foreground_marker = args.pop("_foreground", None)
+    foreground = bool(foreground_marker)
     name = canonical_name(name)
-    if (name == "remote.bash" and not foreground and profile == CANONICAL_PROFILE
+    if (name == "remote.bash" and foreground_marker is None
             and not bool(args.get("run_in_background", False))):
-        # Canonical one-shot Bash keeps the same real head/tail contract as the
-        # native foreground wrappers; background/explicit session calls remain
+        # Canonical one-shot Bash keeps the same real head/tail contract under
+        # every bound native profile, not only the canonical profile. Native
+        # wrappers set the internal marker explicitly (False for background)
+        # and are left untouched. Background/explicit session calls remain
         # incremental and cursor-lossless.
         foreground = True
     if name not in TOOL_SCHEMAS:

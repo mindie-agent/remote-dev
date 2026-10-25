@@ -285,6 +285,27 @@ def _result_refs_text(result: Mapping[str, Any]) -> str:
     return render_job_refs_text(refs)
 
 
+def _result_notices_text(result: Mapping[str, Any]) -> str:
+    """Render bounded warning/degradation notices and refs for native text.
+
+    Native handlers replace the canonical text with host-specific text. They
+    must retain secondary preview degradation warnings and the raw-log refs;
+    a structured-only flag is invisible to text-only model clients.
+    """
+    parts: list[str] = []
+    warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+    for warning in warnings:
+        text = str(warning).strip()
+        if text and text not in parts:
+            parts.append(text)
+    if result.get("preview_degraded") is True and not any("Preview degraded" in item for item in parts):
+        parts.append("Preview degraded; the command result and full raw log refs are preserved.")
+    refs_text = _result_refs_text(result)
+    if refs_text:
+        parts.append(refs_text)
+    return "\n".join(parts)
+
+
 def _media_failure(spec_wire: str, fetched: Mapping[str, Any]) -> dict[str, Any]:
     from remote_dev.result import make_result
 

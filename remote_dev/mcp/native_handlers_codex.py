@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 from remote_dev.mcp.harness_profiles import NativeToolSpec
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
-from remote_dev.mcp.native_common import _media_failure, _read_media_payload, _result_refs_text
+from remote_dev.mcp.native_common import _media_failure, _read_media_payload, _result_notices_text, _result_refs_text
 
 def _codex_output(result: Mapping[str, Any]) -> str:
     preview = result.get("preview") or {}
@@ -49,7 +49,7 @@ def codex_exec(profile: str, spec: NativeToolSpec, native: dict[str, Any], norma
         lines.append(f"Process exited with code {exit_code if exit_code is not None else 'unknown'}")
     if output:
         lines.extend(["Final output:", output.rstrip()])
-    refs_text = _result_refs_text(result)
+    refs_text = _result_notices_text(result)
     if refs_text:
         lines.extend(["", refs_text])
     payload["text"] = "\n".join(lines) + "\n"
@@ -79,7 +79,7 @@ def codex_write_stdin(profile: str, spec: NativeToolSpec, native: dict[str, Any]
         lines.append(f"Process exited with code {exit_code if exit_code is not None else 'unknown'}")
     if output:
         lines.extend(["Final output:", output.rstrip()])
-    refs_text = _result_refs_text(result)
+    refs_text = _result_notices_text(result)
     if refs_text:
         lines.extend(["", refs_text])
     payload["text"] = "\n".join(lines) + "\n"

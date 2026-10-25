@@ -15,7 +15,7 @@ from remote_dev.mcp.native_runtime import CanonicalCall, handler
 from remote_dev.mcp.native_common import (
     _IMAGE_EXTENSIONS, _TERMINAL, _assert_visible, _job_file, _job_record,
     _media_failure, _native_job_output_preview, _read_media_payload, _refresh_job_output,
-    _result_refs_text, _status_query_failed, _tail_text,
+    _result_notices_text, _result_refs_text, _status_query_failed, _tail_text,
 )
 
 @handler("claude_task_output")
@@ -341,7 +341,7 @@ def claude_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], norm
         body = body.rstrip() + f"\nbackgroundTaskId: {job_id}"
     elif exit_code not in (None, 0):
         body = body.rstrip() + f"\n[exit code: {exit_code}]"
-    refs_text = _result_refs_text(result)
+    refs_text = _result_notices_text(result)
     if refs_text:
         body = body.rstrip() + "\n\n" + refs_text
     payload["text"] = body if body.endswith("\n") else body + "\n"
