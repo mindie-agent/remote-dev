@@ -79,7 +79,7 @@ class JobLogFormatterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             record_path = Path(tmp) / "job-1.json"
             local = Path(tmp) / "job-1.stdout.log"
-            local.write_text("cached only\n", encoding="utf-8")
+            local.write_bytes(b"cached only\n")
             refs = job_logs.job_log_refs(
                 job_id="job-1",
                 record_path=record_path,

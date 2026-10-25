@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -97,6 +98,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _worker_runner import run_worker_script
 
 
+@unittest.skipIf(os.name == "nt", "POSIX remote worker semantics; Windows control-end coverage stays in the client tests")
 class KimiReadPaginationTests(unittest.TestCase):
     """Business-level pagination through the real worker and formatter.
 

@@ -59,6 +59,7 @@ class _Transport:
         return json.loads(proc.stdout)
 
 
+@unittest.skipIf(os.name == "nt", "POSIX remote search worker semantics; Windows control-end coverage stays in the client tests")
 class NativeSearchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="rd-native-search-")
