@@ -402,8 +402,10 @@ class NativeTaskOutputPreviewTests(unittest.TestCase):
         self.assertTrue(result["output_preview"]["truncated"])
 
     def test_native_output_does_not_load_large_cache_through_read_bytes(self) -> None:
+        cache = Path(self.temp.name) / "bounded-cache.stdout.log"
+        cache.write_bytes(("H" * 20_000 + "\nTAIL-STDOUT\n").encode("utf-8"))
         with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("whole cache read")):
-            text, truncated = _tail_text(self.record_path.with_name(self.record_path.stem + ".stdout.log"), 4096)
+            text, truncated = _tail_text(cache, 4096)
         self.assertTrue(truncated)
         self.assertTrue(text.endswith("TAIL-STDOUT\n"))
         self.assertLessEqual(len(text.encode()), 4096)
