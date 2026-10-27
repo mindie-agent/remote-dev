@@ -13,6 +13,27 @@ from remote_dev.mcp.harness_profiles import NativeToolSpec
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
 from remote_dev.mcp.native_common import _media_failure, _read_media_payload, _result_notices_text, _result_refs_text
 
+JS_MAX_SAFE_INTEGER = 2**53 - 1
+
+
+def _allocate_session_id(exists: Any) -> str:
+    import time
+
+    candidate = max(100, time.time_ns() // 1000)
+    while candidate <= JS_MAX_SAFE_INTEGER:
+        if exists(str(candidate)) is None:
+            return str(candidate)
+        candidate += 1
+    raise RuntimeError("session id space exhausted")
+
+
+def _native_session_id(value: Any) -> Any:
+    text = str(value)
+    if text.isascii() and text.isdigit() and int(text) <= JS_MAX_SAFE_INTEGER:
+        return int(text)
+    return value
+
+
 def _codex_output(result: Mapping[str, Any]) -> str:
     preview = result.get("preview") or {}
     stdout = str(preview.get("stdout") or "")
@@ -26,19 +47,20 @@ def _codex_output(result: Mapping[str, Any]) -> str:
 
 @handler("codex_exec")
 def codex_exec(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
-    import time
+    from remote_dev.core.state_store import find_job_record
 
     # Codex models sessions with a numeric id. Allocate one at launch so
     # write_stdin can round-trip the exact native type instead of inventing a
     # string alias.
     normalized = dict(normalized)
-    normalized.setdefault("job_id", str(time.time_ns()))
+    if "job_id" not in normalized:
+        normalized["job_id"] = _allocate_session_id(find_job_record)
     normalized["_foreground"] = True
     payload = call_canonical("remote.bash", normalized)
     result = payload.get("result") or {}
     state = str(result.get("state") or result.get("status") or "unknown")
     session_id = result.get("session_id") or result.get("job_id")
-    native_session_id = int(session_id) if str(session_id).isdigit() else session_id
+    native_session_id = _native_session_id(session_id)
     exit_code = result.get("exit_code")
     output = _codex_output(result)
     duration = float(result.get("duration_ms") or 0) / 1000.0
@@ -88,7 +110,7 @@ def codex_write_stdin(profile: str, spec: NativeToolSpec, native: dict[str, Any]
         "chunk_id": session_id,
         "wall_time_seconds": duration,
         "output": output,
-        "session_id": int(session_id) if session_id.isdigit() else session_id,
+        "session_id": _native_session_id(session_id),
     })
     return payload
 

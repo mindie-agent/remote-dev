@@ -219,15 +219,15 @@ def _require(
     value = args.get(key)
     if key not in args or value is None:
         hint = f" (alias: {alias_hint})" if alias_hint else ""
-        raise caller_error(f"{tool} requires {key}{hint}")
+        raise caller_error(f"{tool} requires {key}{hint}", field=key)
     if allow_empty:
         if not isinstance(value, str):
             hint = f" (alias: {alias_hint})" if alias_hint else ""
-            raise caller_error(f"{tool} requires {key} to be a string{hint}")
+            raise caller_error(f"{tool} requires {key} to be a string{hint}", field=key)
         return value
     if isinstance(value, str) and not value:
         hint = f" (alias: {alias_hint})" if alias_hint else ""
-        raise caller_error(f"{tool} requires {key}{hint}")
+        raise caller_error(f"{tool} requires {key}{hint}", field=key)
     return value
 
 
@@ -261,7 +261,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
     args = normalize_arguments(name, args)
     missing = [key for key in TOOL_SCHEMAS[name].get("required", ()) if key not in args]
     if missing:
-        raise caller_error(f"{name} requires {', '.join(missing)}", KeyError)
+        raise caller_error(f"{name} requires {', '.join(missing)}", KeyError, field=missing[0])
     # Validate before endpoint resolution or any external effect. A normal
     # operation has no total execution limit; timeout aliases are opt-in.
     from remote_dev.core.execution import execution_timeout
@@ -431,7 +431,10 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
                 endpoint,
                 job_id=str(args["job_id"]),
                 lines=int(args.get("lines") or 80),
+                stream=str(args.get("stream") or "both"),
                 yield_time_ms=args.get("yield_time_ms"),
+                max_output_tokens=int(args["max_output_tokens"]) if args.get("max_output_tokens") is not None else None,
+                timeout_ms=timeout_ms,
             )
         return remote_job_status(endpoint, job_id=str(args["job_id"]))
     if name == "remote.job_tail":
@@ -441,6 +444,8 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             lines=int(args.get("lines") or 80),
             stream=str(args.get("stream") or "both"),
             yield_time_ms=args.get("yield_time_ms"),
+            max_output_tokens=int(args["max_output_tokens"]) if args.get("max_output_tokens") is not None else None,
+            timeout_ms=timeout_ms,
         )
     if name == "remote.job_output":
         return remote_job_output(
@@ -449,6 +454,8 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             lines=int(args.get("lines") or 200),
             stream=str(args.get("stream") or "both"),
             yield_time_ms=args.get("yield_time_ms"),
+            max_output_tokens=int(args["max_output_tokens"]) if args.get("max_output_tokens") is not None else None,
+            timeout_ms=timeout_ms,
         )
     if name == "remote.job_stop":
         return remote_job_stop(endpoint, job_id=str(args["job_id"]), force=bool(args.get("force", False)))

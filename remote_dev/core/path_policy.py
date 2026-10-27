@@ -19,7 +19,7 @@ def normalize_remote_path(path: str) -> str:
         raise PathPolicyError("remote path must be a non-empty string")
     normalized = posixpath.normpath(path)
     if not normalized.startswith("/"):
-        raise PathPolicyError(f"remote path must be absolute: {path!r}")
+        raise PathPolicyError(f"remote path must be an absolute path on the remote endpoint (not a local path): {path!r}")
     return normalized
 
 
@@ -29,7 +29,7 @@ def assert_under_root(path: str, root: str) -> str:
     if normalized == normalized_root:
         return normalized
     if not normalized.startswith(normalized_root.rstrip("/") + "/"):
-        raise PathPolicyError(f"remote path is outside root: {normalized} not under {normalized_root}")
+        raise PathPolicyError(f"remote path is outside the endpoint root: {normalized} not under {normalized_root}; use a remote path inside root or set root")
     return normalized
 
 

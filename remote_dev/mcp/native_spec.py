@@ -23,7 +23,18 @@ NATIVE_PROFILES = ("codex", "claude", "kimi", "dsh")
 PROFILES = (CANONICAL_PROFILE,) + NATIVE_PROFILES
 
 class HarnessProfileError(ValueError):
-    """The requested profile is unknown or a native call is not bound to it."""
+    """The requested profile is unknown or a native call is not bound to it.
+
+    A pre-dispatch caller error: it carries ``error_code`` and the offending
+    top-level ``field`` so adapters can report actionable, non-echoing hints.
+    """
+
+    category = "caller"
+    error_code = "invalid_argument"
+
+    def __init__(self, message, field=None):
+        super().__init__(message)
+        self.field = field
 
 def resolve_profile(value: str | None = None) -> str:
     """Return the validated profile for this process/call.
@@ -87,12 +98,26 @@ def _number(value: Any) -> Any:
 
 NATIVE_TOOLS: dict[str, dict[str, NativeToolSpec]] = {profile: {} for profile in NATIVE_PROFILES}
 
-def native_input_schema(spec: NativeToolSpec, endpoint_props: Mapping[str, Any]) -> dict[str, Any]:
+JOB_RECORD_ENDPOINT_DESCRIPTION = (
+    "Endpoint selector fields are optional for this tool: the endpoint is "
+    "recovered from the stored job record. Supply host and port together, or "
+    "an alias, only to override or when no job record exists."
+)
+
+_JOB_RECORD_CANONICALS = frozenset({"remote.job_stdin", "remote.job_output", "remote.job_status", "remote.job_stop", "remote.job_tail"})
+
+def native_input_schema(
+    spec: NativeToolSpec,
+    endpoint_props: Mapping[str, Any],
+    selector_description: str = "",
+) -> dict[str, Any]:
     # Compatibility fields are accepted by the server but are not advertised
     # on the native wire schema. Only the native fields and the explicit remote
     # target fields belong in tools/list.
+    description = JOB_RECORD_ENDPOINT_DESCRIPTION if spec.canonical in _JOB_RECORD_CANONICALS else selector_description
     return {
         "type": "object",
+        **({"description": description} if description else {}),
         "properties": {**endpoint_props, **spec.properties},
         "required": list(spec.required),
         **({"additionalProperties": bool(spec.additional_properties)} if spec.additional_properties is not None else {}),
@@ -210,11 +235,16 @@ def validate_native_arguments(spec: NativeToolSpec, args: Mapping[str, Any], all
         if key not in args or args[key] is None:
             if any(alias in args for alias in required_aliases.get(key, ())):
                 continue
-            raise HarnessProfileError(f"{spec.wire} requires {key}")
+            raise HarnessProfileError(f"{spec.wire} requires {key}", field=key)
     for key, value in args.items():
         schema = spec.properties.get(key)
         if schema is not None:
-            _validate_value(value, schema, key)
+            try:
+                _validate_value(value, schema, key)
+            except HarnessProfileError as exc:
+                if exc.field is None:
+                    exc.field = key
+                raise
 
 _DSH_SANDBOX_PROPERTIES = {
     "sandbox_permissions": {

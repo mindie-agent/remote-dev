@@ -15,6 +15,7 @@ from remote_dev.observability import current_tool, observed_tool
 
 import re
 import json
+import math
 import copy
 from dataclasses import asdict
 import os
@@ -61,6 +62,7 @@ def _stop_drain_seconds() -> float:
 
 
 MAX_YIELD_MS = 600000
+POSIX_SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh"})
 MAX_INCREMENTAL_READ_BYTES = 32768
 UNKNOWN_JOB_STATES = frozenset({"unknown", "uncertain", "lost", "lost_outcome"})
 TERMINAL_JOB_STATES = frozenset({"succeeded", "failed", "timeout", "cancelled"})
@@ -106,6 +108,14 @@ def _job_command(endpoint: Endpoint, command: str, runtime_enabled: bool,
                  shell: str | None = None, login: bool | None = None) -> str:
     preamble = runtime_env_lines(endpoint, runtime_enabled)
     executed = command
+    if preamble and (shell is not None or login is not None):
+        chosen = shell or "bash"
+        if os.path.basename(chosen) not in POSIX_SHELLS:
+            raise caller_error("runtime_env requires a POSIX-family shell",
+                               error_code="unsupported_shell_for_runtime_env", field="shell")
+        login_flag = "-l " if login else ""
+        inner = "\n".join([*preamble, f"eval {shlex.quote(chr(10) + command)}"])
+        return f"exec {shlex.quote(chosen)} {login_flag}-c {shlex.quote(inner)}"
     if shell is not None or login is not None:
         chosen = shell or "bash"
         login_flag = "-l " if login else ""
@@ -186,13 +196,15 @@ def _load_record(endpoint: Endpoint | None, job_id: str) -> tuple[Endpoint, dict
             content = path.read_text(encoding="utf-8")
         except FileNotFoundError:
             raise caller_error(
-                f"unknown remote job id for endpoint: {job_id}", FileNotFoundError
+                f"unknown remote job id for endpoint: {job_id}", FileNotFoundError,
+                error_code="unknown_job", field="job_id"
             ) from None
         data = json.loads(content)
         return endpoint, data, path
     found = find_job_record(job_id)
     if not found:
-        raise caller_error(f"unknown remote job id: {job_id}", FileNotFoundError)
+        raise caller_error(f"unknown remote job id: {job_id}", FileNotFoundError,
+                            error_code="unknown_job", field="job_id")
     path, data = found
     return _endpoint_from_record(data), data, path
 
@@ -558,6 +570,8 @@ def _job_tail_impl(
     lines: int = 80,
     stream: str = "both",
     yield_time_ms: int | None = None,
+    max_output_tokens: int | None = None,
+    timeout_ms: int | None = None,
     tool: str = "remote.job_tail",
 ) -> dict[str, Any]:
     endpoint, record, record_path = _load_record(endpoint, job_id)
@@ -569,21 +583,40 @@ def _job_tail_impl(
         lines = MAX_JOB_TAIL_LINES
     if lines < 1:
         lines = 1
+    budget = None if max_output_tokens is None else _output_budget_bytes(max_output_tokens)
+    from .execution import timeout_value
+    timeout_value(timeout_ms)
+    absolute_deadline = None if timeout_ms is None else start + int(timeout_ms) / 1000.0
+
+    def _remaining_s() -> float | None:
+        if absolute_deadline is None:
+            return None
+        return absolute_deadline - time.monotonic()
+
+    def _tail_control() -> dict[str, Any]:
+        remaining = _remaining_s()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError(f"timeout_ms={timeout_ms} elapsed before the job tail control call")
+        remaining_ms = None if remaining is None else max(1, math.ceil(remaining * 1000))
+        return control(endpoint, job_id, "tail", lines=lines, timeout_ms=remaining_ms)
+
     try:
-        supervisor = control(endpoint, job_id, "tail", lines=lines)
+        supervisor = _tail_control()
         if yield_time_ms is not None and int(yield_time_ms) > 0:
             wait_sec = min(20.0, max(0.0, int(yield_time_ms) / 1000.0))
             deadline = time.monotonic() + wait_sec
+            if absolute_deadline is not None:
+                deadline = min(deadline, absolute_deadline)
             initial_out = (supervisor.get("stdout"), supervisor.get("stderr"))
             while (
                 supervisor.get("state") in {"prepared", "running"}
                 and (supervisor.get("stdout"), supervisor.get("stderr")) == initial_out
                 and time.monotonic() < deadline
             ):
-                time.sleep(min(1.0, max(0.05, deadline - time.monotonic())))
+                time.sleep(max(0.0, min(1.0, deadline - time.monotonic())))
                 if time.monotonic() >= deadline:
                     break
-                supervisor = control(endpoint, job_id, "tail", lines=lines)
+                supervisor = _tail_control()
     except TimeoutError:
         raise
     except (RemoteExecutionError, ValueError, RuntimeError, OSError) as exc:
@@ -622,6 +655,16 @@ def _job_tail_impl(
     refs_text = render_job_refs_text(refs)
     body_limit = max(1, MAX_TEXT_CHARS - (len(refs_text) + 3 if refs_text else 0))
     body = compact_text("".join(sections), limit=body_limit).rstrip("\n")
+    omitted_bytes = 0
+    if budget is not None:
+        encoded = body.encode("utf-8")
+        if len(encoded) > budget:
+            kept = encoded[len(encoded) - budget:]
+            while kept and (kept[0] & 0xC0) == 0x80:
+                kept = kept[1:]
+            omitted_bytes = len(encoded) - len(kept)
+            body = kept.decode("utf-8")
+            warnings.append(f"output truncated to max_output_tokens budget; {omitted_bytes} earlier bytes omitted from this preview (log refs and metadata are separate)")
     text = body
     if refs_text:
         text = (text + "\n\n" + refs_text) if text else refs_text
@@ -638,7 +681,8 @@ def _job_tail_impl(
         preview={"tail": body, "stderr": ""},
         refs=refs,
         warnings=warnings,
-        extra={"job_id": job_id, "lines": lines, "missing_logs": missing, "state": supervisor.get("state")},
+        extra={"job_id": job_id, "lines": lines, "missing_logs": missing, "state": supervisor.get("state"),
+               "truncated": omitted_bytes > 0, "omitted_bytes": omitted_bytes},
     )
     return {"text": text, "result": result}
 
@@ -646,17 +690,21 @@ def _job_tail_impl(
 @observed_tool("remote.job_tail")
 @pinned_endpoint
 def remote_job_tail(
-    endpoint: Endpoint | None, *, job_id: str, lines: int = 80, stream: str = "both", yield_time_ms: int | None = None
+    endpoint: Endpoint | None, *, job_id: str, lines: int = 80, stream: str = "both", yield_time_ms: int | None = None,
+    max_output_tokens: int | None = None, timeout_ms: int | None = None
 ) -> dict[str, Any]:
-    return _job_tail_impl(endpoint, job_id=job_id, lines=lines, stream=stream, yield_time_ms=yield_time_ms, tool="remote.job_tail")
+    return _job_tail_impl(endpoint, job_id=job_id, lines=lines, stream=stream, yield_time_ms=yield_time_ms,
+                          max_output_tokens=max_output_tokens, timeout_ms=timeout_ms, tool="remote.job_tail")
 
 
 @observed_tool("remote.job_output")
 @pinned_endpoint
 def remote_job_output(
-    endpoint: Endpoint | None, *, job_id: str, lines: int = 200, stream: str = "both", yield_time_ms: int | None = None
+    endpoint: Endpoint | None, *, job_id: str, lines: int = 200, stream: str = "both", yield_time_ms: int | None = None,
+    max_output_tokens: int | None = None, timeout_ms: int | None = None
 ) -> dict[str, Any]:
-    return _job_tail_impl(endpoint, job_id=job_id, lines=lines, stream=stream, yield_time_ms=yield_time_ms, tool="remote.job_output")
+    return _job_tail_impl(endpoint, job_id=job_id, lines=lines, stream=stream, yield_time_ms=yield_time_ms,
+                          max_output_tokens=max_output_tokens, timeout_ms=timeout_ms, tool="remote.job_output")
 
 
 @observed_tool("remote.job_output")

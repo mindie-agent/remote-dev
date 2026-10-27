@@ -14,8 +14,8 @@ from typing import Any
 
 
 ENDPOINT_PROPS: dict[str, Any] = {
-    "host": {"type": "string"},
-    "port": {"type": "integer"},
+    "host": {"type": "string", "description": "SSH host; must be given together with port unless alias is used."},
+    "port": {"type": "integer", "description": "SSH port; must be given together with host unless alias is used."},
     "user": {"type": "string", "default": "root"},
     "container": {"type": "string", "description": "Existing Docker container name or ID on the SSH host. All tools operate inside it; results return a full ID for reuse without another name lookup. No provisioning or managed allocation."},
     "root": {"type": "string", "default": "/"},
@@ -245,6 +245,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "chars": {"type": "string", "description": "Input bytes when action='send_input' (Antigravity manage_task Input habit)."},
             "force": {"type": "boolean", "description": "Force kill when action='kill'/'stop'."},
             "lines": {"type": "integer", "maximum": 500, "description": "Line count when action='tail'."},
+            "max_output_tokens": {"type": "integer", "description": "Output token cap for action='tail'; the preview keeps the newest max(4, min(32768, 2 * tokens)) UTF-8 bytes. Omitted means no truncation."},
+            "stream": {"type": "string", "enum": ["stdout", "stderr", "both"], "description": "Log stream for action='tail'. Defaults to both."},
         },
         ["job_id"],
         endpoint_selector=False,
@@ -255,8 +257,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "lines": {"type": "integer", "maximum": 500},
             "stream": {"type": "string", "enum": ["stdout", "stderr", "both"]},
             "yield_time_ms": {"type": "integer", "description": "Optional poll wait in milliseconds (DSH/Codex job_output/write_stdin habit)."},
-            "max_output_tokens": {"type": "integer", "description": "Optional output token cap (DSH/Codex habit)."},
-            "timeout_ms": {"type": "integer", "description": "Optional timeout in milliseconds."},
+            "max_output_tokens": {"type": "integer", "description": "Preview output token cap; the preview keeps the newest max(4, min(32768, 2 * tokens)) UTF-8 bytes. Log refs and metadata are outside this cap."},
+            "timeout_ms": {"type": "integer", "description": "Absolute deadline in milliseconds for the whole read, including polling."},
         },
         ["job_id"],
         endpoint_selector=False,
@@ -267,8 +269,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "lines": {"type": "integer", "maximum": 500},
             "stream": {"type": "string", "enum": ["stdout", "stderr", "both"]},
             "yield_time_ms": {"type": "integer", "description": "Optional poll wait in milliseconds (DSH/Codex job_output/write_stdin habit)."},
-            "max_output_tokens": {"type": "integer", "description": "Optional output token cap (DSH/Codex habit)."},
-            "timeout_ms": {"type": "integer", "description": "Optional timeout in milliseconds."},
+            "max_output_tokens": {"type": "integer", "description": "Preview output token cap; the preview keeps the newest max(4, min(32768, 2 * tokens)) UTF-8 bytes. Log refs and metadata are outside this cap."},
+            "timeout_ms": {"type": "integer", "description": "Absolute deadline in milliseconds for the whole read, including polling."},
         },
         ["job_id"],
         endpoint_selector=False,
@@ -727,7 +729,7 @@ def harness_catalog(profile: str | None = None) -> list[dict[str, Any]]:
         entry = {
             "name": spec.wire,
             "description": spec.description,
-            "inputSchema": native_input_schema(spec, ENDPOINT_PROPS),
+            "inputSchema": native_input_schema(spec, ENDPOINT_PROPS, ENDPOINT_SELECTOR_DESCRIPTION),
         }
         # A native name that equals a portable canonical alias (for example
         # DSH ``read`` -> ``remote_read``) is the same wire name. Native
