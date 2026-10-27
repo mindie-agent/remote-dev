@@ -113,12 +113,17 @@ def tail_text(value: str, limit: int = DEFAULT_TAIL_CHARS) -> str:
     return value if len(value) <= limit else value[-limit:]
 
 
-def compact_text(value: str, *, limit: int = MAX_TEXT_CHARS, fold_repeats: bool = True) -> str:
+def compact_text_span(value: str, *, limit: int = MAX_TEXT_CHARS, fold_repeats: bool = True) -> tuple[str, int, int]:
+    """Return compacted text plus the [start, end) range of ``value`` after folding that was discarded."""
     compacted = fold_repeated_lines(value) if fold_repeats else value
     if len(compacted) <= limit:
-        return compacted
+        return compacted, 0, 0
     marker = "\n<remote-dev text truncated; full output is available via refs/resources>\n"
     keep = max(0, limit - len(marker))
     head = keep // 2
     tail = keep - head
-    return compacted[:head] + marker + _tail_slice(compacted, tail)
+    return compacted[:head] + marker + _tail_slice(compacted, tail), head, len(compacted) - tail
+
+
+def compact_text(value: str, *, limit: int = MAX_TEXT_CHARS, fold_repeats: bool = True) -> str:
+    return compact_text_span(value, limit=limit, fold_repeats=fold_repeats)[0]

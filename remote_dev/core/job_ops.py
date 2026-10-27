@@ -28,9 +28,10 @@ from typing import Any
 
 from remote_dev.core.endpoint import DEFAULT_CWD, DEFAULT_ROOT, Endpoint
 from remote_dev.core.container_endpoint import FULL_CONTAINER_ID, pinned_endpoint
+from remote_dev.core import container_endpoint as _container_endpoint
 from remote_dev.core.errors import RemoteExecutionError, caller_error
 from remote_dev.core.job_logs import format_job_log_output, job_log_refs, local_stream_preview, render_job_refs_text
-from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS, compact_text
+from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS, compact_text_span, fold_repeated_lines
 from remote_dev.core.locking import record_lock
 from remote_dev.core.runtime_env import runtime_env_lines
 from remote_dev.core.state_store import atomic_write_json, find_job_record, job_record_path, resolve_ledger_scope
@@ -574,18 +575,10 @@ def _job_tail_impl(
     timeout_ms: int | None = None,
     tool: str = "remote.job_tail",
 ) -> dict[str, Any]:
-    endpoint, record, record_path = _load_record(endpoint, job_id)
-    started = utc_now_iso()
-    start = time.monotonic()
-    warnings = []
-    if lines > MAX_JOB_TAIL_LINES:
-        warnings.append(f"lines clamped from {lines} to {MAX_JOB_TAIL_LINES}")
-        lines = MAX_JOB_TAIL_LINES
-    if lines < 1:
-        lines = 1
-    budget = None if max_output_tokens is None else _output_budget_bytes(max_output_tokens)
     from .execution import timeout_value
     timeout_value(timeout_ms)
+    started = utc_now_iso()
+    start = time.monotonic()
     absolute_deadline = None if timeout_ms is None else start + int(timeout_ms) / 1000.0
 
     def _remaining_s() -> float | None:
@@ -593,6 +586,20 @@ def _job_tail_impl(
             return None
         return absolute_deadline - time.monotonic()
 
+    if endpoint is not None and endpoint.container is not None:
+        remaining = _remaining_s()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError(f"timeout_ms={timeout_ms} elapsed before the container pin")
+        endpoint = _container_endpoint.pin_container_endpoint(
+            endpoint, timeout_ms=None if remaining is None else max(1, math.ceil(remaining * 1000)))
+    endpoint, record, record_path = _load_record(endpoint, job_id)
+    warnings = []
+    if lines > MAX_JOB_TAIL_LINES:
+        warnings.append(f"lines clamped from {lines} to {MAX_JOB_TAIL_LINES}")
+        lines = MAX_JOB_TAIL_LINES
+    if lines < 1:
+        lines = 1
+    budget = None if max_output_tokens is None else _output_budget_bytes(max_output_tokens)
     def _tail_control() -> dict[str, Any]:
         remaining = _remaining_s()
         if remaining is not None and remaining <= 0:
@@ -632,8 +639,9 @@ def _job_tail_impl(
         )
         return _failure_payload(result)
     requested: list[str] = []
-    sections: list[str] = []
+    streams: list[tuple[str, str]] = []
     missing: list[str] = []
+    folded_bytes = 0
     for name in ("stdout", "stderr"):
         if stream not in {name, "both"}:
             continue
@@ -641,8 +649,10 @@ def _job_tail_impl(
         if name not in supervisor:
             missing.append(name)
             continue
-        body = str(supervisor.get(name) or "")
-        sections.append(f"__{name.upper()}__\n{body}".rstrip() + ("\n" if body else ""))
+        raw = str(supervisor.get(name) or "")
+        compacted = fold_repeated_lines(raw) if budget is None else raw
+        folded_bytes += len(raw.encode("utf-8")) - len(compacted.encode("utf-8"))
+        streams.append((name, compacted))
     for name in missing:
         warnings.append(f"{name}.log does not exist in the remote job dir")
     all_missing = bool(requested) and len(missing) == len(requested)
@@ -654,18 +664,55 @@ def _job_tail_impl(
     )
     refs_text = render_job_refs_text(refs)
     body_limit = max(1, MAX_TEXT_CHARS - (len(refs_text) + 3 if refs_text else 0))
-    body = compact_text("".join(sections), limit=body_limit).rstrip("\n")
-    omitted_bytes = 0
+    total_raw_bytes = sum(len(raw.encode("utf-8")) for _name, raw in streams)
+    omitted_bytes = folded_bytes
     if budget is not None:
-        encoded = body.encode("utf-8")
-        if len(encoded) > budget:
-            kept = encoded[len(encoded) - budget:]
-            while kept and (kept[0] & 0xC0) == 0x80:
-                kept = kept[1:]
-            omitted_bytes = len(encoded) - len(kept)
-            body = kept.decode("utf-8")
-            warnings.append(f"output truncated to max_output_tokens budget; {omitted_bytes} earlier bytes omitted from this preview (log refs and metadata are separate)")
-    text = body
+        # The budget applies to selected log bytes only; stream labels and refs
+        # are rendered metadata outside it. Newest bytes win, stderr last.
+        label_chars = sum(len(f"__{name.upper()}__\n") + 1 for name, _raw in streams)
+        remaining = min(budget, max(1, body_limit - label_chars))
+        kept_bodies: dict[str, str] = {}
+        for name, raw in reversed(streams):
+            encoded = raw.encode("utf-8")
+            if len(encoded) > remaining:
+                kept = encoded[len(encoded) - remaining:] if remaining > 0 else b""
+                while kept and (kept[0] & 0xC0) == 0x80:
+                    kept = kept[1:]
+            else:
+                kept = encoded
+            remaining -= len(kept)
+            kept_bodies[name] = kept.decode("utf-8")
+        kept_bytes = sum(len(value.encode("utf-8")) for value in kept_bodies.values())
+        omitted_bytes = total_raw_bytes - kept_bytes
+        rendered = ""
+        for name, _raw in streams:
+            part = kept_bodies[name]
+            rendered += f"__{name.upper()}__\n" + part + ("" if part.endswith("\n") or not part else "\n")
+        if omitted_bytes:
+            warnings.append(f"output truncated to max_output_tokens budget; {omitted_bytes} earlier bytes omitted from this preview (log refs and stream labels are separate)")
+        body = "".join(kept_bodies[name] for name, _raw in streams)
+        text_body = rendered.rstrip("\n")
+    else:
+        pieces: list[tuple[bool, str]] = []
+        for name, raw in streams:
+            pieces.append((False, f"__{name.upper()}__\n"))
+            if raw:
+                pieces.append((True, raw))
+                if not raw.endswith("\n"):
+                    pieces.append((False, "\n"))
+        joined = "".join(part for _is_raw, part in pieces)
+        compacted, cut_start, cut_end = compact_text_span(joined, limit=body_limit, fold_repeats=False)
+        if cut_end > cut_start:
+            offset = 0
+            for is_raw, part in pieces:
+                lo, hi = max(offset, cut_start), min(offset + len(part), cut_end)
+                if is_raw and hi > lo:
+                    omitted_bytes += len(part[lo - offset:hi - offset].encode("utf-8"))
+                offset += len(part)
+            warnings.append(f"output truncated to the text size limit; {omitted_bytes} raw log bytes omitted from this preview (full logs are available via refs)")
+        body = compacted.rstrip("\n")
+        text_body = body
+    text = text_body
     if refs_text:
         text = (text + "\n\n" + refs_text) if text else refs_text
     text = text.rstrip("\n") + "\n" if text else ""
@@ -682,13 +729,13 @@ def _job_tail_impl(
         refs=refs,
         warnings=warnings,
         extra={"job_id": job_id, "lines": lines, "missing_logs": missing, "state": supervisor.get("state"),
-               "truncated": omitted_bytes > 0, "omitted_bytes": omitted_bytes},
+               "truncated": omitted_bytes > 0, "omitted_bytes": omitted_bytes,
+               "repeated_lines_folded": folded_bytes > 0},
     )
     return {"text": text, "result": result}
 
 
 @observed_tool("remote.job_tail")
-@pinned_endpoint
 def remote_job_tail(
     endpoint: Endpoint | None, *, job_id: str, lines: int = 80, stream: str = "both", yield_time_ms: int | None = None,
     max_output_tokens: int | None = None, timeout_ms: int | None = None
@@ -698,7 +745,6 @@ def remote_job_tail(
 
 
 @observed_tool("remote.job_output")
-@pinned_endpoint
 def remote_job_output(
     endpoint: Endpoint | None, *, job_id: str, lines: int = 200, stream: str = "both", yield_time_ms: int | None = None,
     max_output_tokens: int | None = None, timeout_ms: int | None = None
