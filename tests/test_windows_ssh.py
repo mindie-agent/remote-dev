@@ -17,7 +17,9 @@ class WindowsSshSelectionTests(unittest.TestCase):
             ssh = root / "usr" / "bin" / "ssh.exe"
             ssh.parent.mkdir(parents=True)
             ssh.touch()
-            for layout in ("cmd", "bin", "mingw64/bin", "mingw32/bin", "CMD"):
+            for layout in (
+                "cmd", "bin", "mingw64/bin", "mingw32/bin", "ucrt64/bin", "usr/bin", "CMD",
+            ):
                 with self.subTest(layout=layout):
                     git = root / layout / "git.exe"
                     git.parent.mkdir(parents=True, exist_ok=True)
