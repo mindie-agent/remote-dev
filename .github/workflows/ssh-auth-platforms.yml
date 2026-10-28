@@ -102,7 +102,7 @@ jobs:
           distribution: Ubuntu-24.04
           wsl-version: "2"
           set-as-default: "true"
-          additional-packages: openssh-server openssh-client python3 python3-venv python3-pip
+          additional-packages: openssh-server openssh-client python3 python3-venv python3-pip git
       - name: Provision isolated Linux account and two actual sshd listeners
         shell: wsl-bash -u root {0}
         run: |

@@ -1,0 +1,13 @@
+# remote-dev 0.11.0
+
+[中文](remote-dev-0.11.0.md)
+
+SSH authentication now survives agent sessions. Setup verifies a supplied password, then installs and independently verifies a public key where supported. Hosts that reject public-key access or key installation remain accessible through the verified password. Normal development calls can repair a revoked key before dispatching business work; submitted work is never replayed. Read-only monitoring and diagnostics can fall back to the saved password without modifying remote keys.
+
+Remote-dev owns one authentication implementation and store. Coordinator and npu-top retain an `auth_ref` and use that implementation. Passwords default to the current user's plaintext `~/.mindie/ssh/credentials.json`, with POSIX directory/file modes `0700`/`0600`. `REMOTE_DEV_AUTH_DIR` and `REMOTE_DEV_CREDENTIAL_FILE` select explicit shared paths. Plugin virtual environments under the same user and operating system share this configuration. No system keychain, system login password, unlock prompt, or additional master password is involved. Native Windows and WSL keep separate user directories.
+
+The release adds `remote-dev auth setup/status/forget` and shared authentication APIs. An owned askpass process reads saved credentials by reference without copying passwords from the credential file into SSH arguments or environment variables. Native Windows installations provide `remote-dev-askpass.exe` and use the existing Git for Windows SSH requirement. macOS and WSL use OpenSSH. Authentication, execution, and cleanup use bounded deadlines and preserve host-key errors, missing credentials, and uncertain outcomes.
+
+Existing endpoints and OpenSSH identities remain usable after upgrade. Configure a password once to enable persistent password access and recovery. Forgetting access removes local configuration without revoking remote keys. The runtime retains mindie-diagnostics 0.5.4 at commit `5ae643e19223f2181ecdbaa3edaf464137c4805e`.
+
+Acceptance status: macOS local authentication, process-lifecycle, and consumer contracts have passed, as have local compatibility runs of all fixed benchmark workloads across the three components. Independent Python 3.11 and 3.13 processes have reused the default `credentials.json` under an isolated `REMOTE_DEV_AUTH_DIR`; existing user credentials were not read. Native Windows PowerShell and real WSL acceptance are still pending; this candidate note does not claim all three platforms have passed. Final source revisions and platform results must be recorded before release. The tag workflow produces formal benchmark reports from clean source and attaches them to the release.

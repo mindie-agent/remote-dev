@@ -24,7 +24,7 @@ pytestmark = [
 
 
 class Acceptance:
-    def __init__(self, root, monkeypatch):
+    def __init__(self, root):
         self.root = root
         self.manifest = json.loads(Path(os.environ["REMOTE_DEV_CROSS_SSH_MANIFEST"]).read_text())
         self.admin = json.loads(os.environ["REMOTE_DEV_CROSS_SSH_ADMIN"])
@@ -55,7 +55,7 @@ class Acceptance:
             "host": self.server_host,
             "port": self.manifest["password_port" if password_only else "key_port"],
             "user": self.manifest["user"], "root": self.manifest["work"],
-            "cwd": self.manifest["work"], "runtime_env": False, "ssh_mux": False,
+            "cwd": self.manifest["work"], "runtime_env": False,
             "known_hosts_file": str(self.root / "known hosts"),
         }
 
@@ -110,6 +110,17 @@ def platform_evidence():
                 "wsl_distribution": os.environ.get("WSL_DISTRO_NAME"),
                 "runtime_coverage": "installed remote-dev/coordinator/npu-top; actual Kimi adapter",
                 "harness_profiles": ["codex", "claude", "kimi", "dsh"]}
+    wheelhouse = Path(os.environ.get("REMOTE_DEV_CROSS_WHEELHOUSE", "wheelhouse"))
+    evidence["component_commits"] = {
+        path.stem: path.read_text().strip() for path in sorted(wheelhouse.glob("*.commit"))
+    }
+    evidence["consumer_interpreters"] = json.loads(os.environ["REMOTE_DEV_CROSS_SSH_PYTHONS"])
+    kimi_commit = subprocess.run(
+        ["git", "-C", os.environ["REMOTE_DEV_CROSS_KIMI_ROOT"], "rev-parse", "HEAD"],
+        capture_output=True, timeout=5,
+    )
+    assert kimi_commit.returncode == 0
+    evidence["kimi_commit"] = kimi_commit.stdout.decode().strip()
     from remote_dev.core.ssh_transport import _ssh_executable
     ssh = _ssh_executable()
     version = subprocess.run([ssh, "-V"], capture_output=True, timeout=5)
@@ -123,8 +134,8 @@ def platform_evidence():
 
 
 @pytest.fixture
-def acceptance(tmp_path, monkeypatch):
-    return Acceptance(tmp_path, monkeypatch)
+def acceptance(tmp_path):
+    return Acceptance(tmp_path)
 
 
 def test_auto_install_key_then_new_venv_without_password(acceptance):
@@ -182,7 +193,7 @@ def test_coordinator_kimi_two_chats_and_monitor_share_default_store(acceptance):
     for index in (0, 1):
         called = acceptance.invoke("kimi", endpoint, runtime=index, auth_ref=reference,
                                    command="printf plugin-shared-password")
-        assert called["reply"]["result"]["isError"] is False, called
+        assert called["reply"]["result"]["isError"] is False, json.dumps(called)
         assert "plugin-shared-password" in json.dumps(called), called
     monitored = acceptance.invoke("monitor", endpoint, runtime=1, auth_ref=reference)
     assert monitored["connection"]["ok"], monitored

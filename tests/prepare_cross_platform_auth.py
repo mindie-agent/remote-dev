@@ -38,6 +38,7 @@ def main():
         # replace these exact wheels with already published component versions.
         subprocess.run([str(python), "-m", "pip", "install", "--no-deps", *wheels],
                        check=True, timeout=90)
+        subprocess.run([str(python), "-m", "pip", "check"], check=True, timeout=20)
         pythons.append(str(python))
     (root / "pythons.json").write_text(json.dumps(pythons), encoding="utf-8")
 

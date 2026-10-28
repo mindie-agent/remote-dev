@@ -14,12 +14,17 @@ import sys
 
 import pytest
 
-from test_real_ssh_auth import auth_env, auth_server, pytestmark
+if __name__ != "__main__":
+    from test_real_ssh_auth import auth_env, auth_server, pytestmark
 
 
 def _consumer_worker(kind, source_root, payload):
     root = Path(source_root)
-    if not os.environ.get("REMOTE_DEV_AUTH_PACKAGE_ONLY"):
+    if os.environ.get("REMOTE_DEV_AUTH_PACKAGE_ONLY"):
+        import remote_dev
+
+        assert Path(remote_dev.__file__).is_relative_to(Path(sys.prefix))
+    else:
         for component in ("coordinator", "npu-top"):
             sys.path.insert(0, str(root / component))
     if kind == "coordinator":
@@ -32,7 +37,7 @@ def _consumer_worker(kind, source_root, payload):
             "password": payload["password"],
         }, state_dir=payload["state_dir"])
     if kind == "kimi":
-        sys.path.insert(0, str(root / "mindie-agent-kimi" / "scripts"))
+        sys.path.insert(0, str(_kimi_root(root) / "scripts"))
         import identity
         import mcp_server
         from remote_dev.core.rpc_transport import close_connections
@@ -85,20 +90,26 @@ def _consumer_worker(kind, source_root, payload):
 
 
 def _run_consumer(kind, source_root, payload, environment):
+    isolation = ["-I"] if os.environ.get("REMOTE_DEV_AUTH_PACKAGE_ONLY") else []
     process = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), kind, str(source_root)],
+        [sys.executable, *isolation, str(Path(__file__).resolve()), kind, str(source_root)],
         input=json.dumps(payload), text=True, capture_output=True, env=environment, timeout=40,
     )
     assert process.returncode == 0, process.stderr
     return json.loads(process.stdout)
 
 
+def _kimi_root(source_root):
+    return Path(os.environ.get("REMOTE_DEV_AUTH_KIMI_ROOT", source_root / "mindie-agent-kimi"))
+
+
 def test_password_only_profile_is_shared_by_real_consumer_processes(auth_server, auth_env):
     source_root = Path(os.environ.get("REMOTE_DEV_AUTH_SOURCE_ROOT", Path(__file__).resolve().parents[2]))
-    for expected in ("coordinator/mindie_coordinator", "npu-top/npu_top",
-                     "mindie-agent-kimi/scripts/mcp_server.py"):
+    for expected in ("coordinator/mindie_coordinator", "npu-top/npu_top"):
         if not (source_root / expected).exists():
             pytest.skip(f"consumer checkout unavailable: {expected}")
+    if not (_kimi_root(source_root) / "scripts" / "mcp_server.py").is_file():
+        pytest.skip("Kimi consumer checkout unavailable")
     endpoint = auth_server.endpoint(password_only=True)
     endpoint_fields = {
         "host": endpoint.host, "port": endpoint.port, "user": endpoint.user,
@@ -167,7 +178,11 @@ def test_monitor_uses_saved_password_after_key_revocation_without_repair(auth_se
               for directory in ("profiles", "keys")
               for path in (shared_root / directory).rglob("*") if path.is_file()}
     auth_server.container("rm /root/.ssh/authorized_keys")
-    environment = dict(os.environ, PYTHONPATH=str(source_root / "remote-dev"))
+    environment = dict(os.environ)
+    if os.environ.get("REMOTE_DEV_AUTH_PACKAGE_ONLY"):
+        environment.pop("PYTHONPATH", None)
+    else:
+        environment["PYTHONPATH"] = str(source_root / "remote-dev")
     monitored = _run_consumer("monitor", source_root, {
         "endpoint": {"host": endpoint.host, "port": endpoint.port, "user": endpoint.user},
         "auth_ref": configured["auth_ref"], "state_dir": str(auth_env / "npu-top"),
