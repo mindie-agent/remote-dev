@@ -255,7 +255,9 @@ def _windows_ssh_executable() -> str:
             parent = executable.parent
             if parent.name.casefold() in {"cmd", "bin"}:
                 root = parent.parent
-                if parent.name.casefold() == "bin" and root.name.casefold() in {"mingw64", "mingw32"}:
+                if parent.name.casefold() == "bin" and root.name.casefold() in {
+                    "mingw64", "mingw32", "ucrt64", "usr",
+                }:
                     root = root.parent
                 ssh = root / "usr" / "bin" / "ssh.exe"
                 if ssh.is_file():

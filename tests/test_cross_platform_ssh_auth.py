@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import socket
 import subprocess
 import sys
@@ -126,11 +127,12 @@ def platform_evidence():
     version = subprocess.run([ssh, "-V"], capture_output=True, timeout=5)
     assert version.returncode == 0
     evidence["ssh"] = ssh
+    evidence["git_on_path"] = shutil.which("git")
     evidence["ssh_version"] = version.stderr.decode("utf-8", "replace").strip()
     print(json.dumps(evidence))
     target = os.environ.get("REMOTE_DEV_CROSS_EVIDENCE")
     if target:
-        Path(target).write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+        Path(target).write_text(json.dumps(evidence, indent=2), encoding="utf-8", newline="\n")
 
 
 @pytest.fixture

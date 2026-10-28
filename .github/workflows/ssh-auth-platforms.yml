@@ -136,6 +136,14 @@ jobs:
           $env:PYTHONUTF8 = '1'
           $python = ($pythons | ConvertFrom-Json)[0]
           & $python -m pytest -q -s tests/test_cross_platform_ssh_auth.py --junitxml=windows-ssh-auth.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Native applications launched from Git Bash inherit its toolchain PATH.
+          $gitBin = & $python -I -c "from pathlib import Path; from remote_dev.core.ssh_transport import _ssh_executable; root = Path(_ssh_executable()).parents[2]; print(next(root / name / 'bin' for name in ('ucrt64', 'mingw64', 'mingw32') if (root / name / 'bin' / 'git.exe').is_file()))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$gitBin;$env:PATH"
+          $env:REMOTE_DEV_CROSS_SHELL = "PowerShell $($PSVersionTable.PSVersion) with Git Bash PATH"
+          $env:REMOTE_DEV_CROSS_EVIDENCE = 'windows-git-path-ssh-evidence.json'
+          & $python -m pytest -q -s tests/test_cross_platform_ssh_auth.py --junitxml=windows-git-path-ssh-auth.xml
           exit $LASTEXITCODE
       - name: Prepare native WSL virtual environments
         if: ${{ !cancelled() }}
@@ -171,5 +179,7 @@ jobs:
             windows-ssh-auth.xml
             wsl-ssh-auth.xml
             windows-ssh-evidence.json
+            windows-git-path-ssh-auth.xml
+            windows-git-path-ssh-evidence.json
             wsl-ssh-evidence.json
           retention-days: 7
