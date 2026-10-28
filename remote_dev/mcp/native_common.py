@@ -30,7 +30,7 @@ def _job_record(job_id: str) -> dict[str, Any]:
 
     found = find_job_record(job_id)
     if not found:
-        raise caller_error(f"unknown remote job id: {job_id}")
+        raise caller_error(f"unknown remote job id: {job_id}", error_code="unknown_job", field="job_id")
     _path, record = found
     return record
 

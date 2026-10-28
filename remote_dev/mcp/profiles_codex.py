@@ -5,6 +5,7 @@ profile validator remains strict and no canonical-compat bypass is applied.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping
 
 from .native_spec import HarnessProfileError, NativeToolSpec, _endpoint_args
@@ -46,16 +47,39 @@ def _codex_exec(args: dict[str, Any]) -> dict[str, Any]:
     out["description"] = "Codex exec_command"
     return out
 
+JS_MAX_SAFE_INTEGER = 2**53 - 1
+
+
+def _codex_session_id(value: Any) -> str:
+    from remote_dev.core.errors import caller_error
+
+    if isinstance(value, bool):
+        raise caller_error("session_id must be an integral session id", error_code="invalid_argument", field="session_id")
+    if isinstance(value, float):
+        if not math.isfinite(value) or value != int(value):
+            raise caller_error("session_id must be an integral session id", error_code="invalid_argument", field="session_id")
+        value = int(value)
+    if isinstance(value, int):
+        if value < 0 or value > JS_MAX_SAFE_INTEGER:
+            raise caller_error("session_id is outside the safe integer range", error_code="invalid_argument", field="session_id")
+        return str(value)
+    raise caller_error("session_id must be a session id", error_code="invalid_argument", field="session_id")
+
+
 def _codex_write_stdin(args: dict[str, Any]) -> dict[str, Any]:
     out = _endpoint_args(args)
-    out["job_id"] = str(args["session_id"])
+    out["job_id"] = _codex_session_id(args["session_id"])
     out["chars"] = args.get("chars", "")
     if args.get("yield_time_ms") is not None:
-        out["yield_time_ms"] = int(args["yield_time_ms"])
+        requested = int(args["yield_time_ms"])
     else:
-        out["yield_time_ms"] = 5000 if not out["chars"] else 250
-    if args.get("max_output_tokens") is not None:
-        out["max_output_tokens"] = int(args["max_output_tokens"])
+        requested = 5000 if not out["chars"] else 250
+    if out["chars"]:
+        out["yield_time_ms"] = max(250, min(requested, 30000))
+    else:
+        out["yield_time_ms"] = max(5000, min(requested, 300000))
+    tokens = args.get("max_output_tokens")
+    out["max_output_tokens"] = int(tokens) if tokens is not None else 10000
     return out
 
 CODEX_EXEC = NativeToolSpec(
@@ -64,7 +88,7 @@ CODEX_EXEC = NativeToolSpec(
     description="Runs a command in a PTY, returning output or a session ID for ongoing interaction (Codex exec_command).",
     properties={
         "cmd": {"type": "string", "description": "Shell command to execute."},
-        "workdir": {"type": "string", "description": "Working directory for the command. Defaults to the turn cwd."},
+        "workdir": {"type": "string", "description": "Working directory on the remote endpoint (not a local path). Defaults to the endpoint cwd/root."},
         "tty": {"type": "boolean", "description": "True allocates a PTY; false or omitted uses plain pipes."},
         "yield_time_ms": {"type": "number", "description": "Wait before yielding output. Defaults to 10000 ms; effective range 250-30000 ms."},
         "max_output_tokens": {"type": "number", "description": "Output token budget. Defaults to 10000 tokens."},
@@ -86,7 +110,7 @@ CODEX_WRITE_STDIN = NativeToolSpec(
     canonical="remote.job_stdin",
     description="Writes characters to an existing unified exec session and returns recent output (Codex write_stdin).",
     properties={
-        "session_id": {"type": "number", "description": "Identifier of the running unified exec session."},
+        "session_id": {"type": "number", "description": "Identifier of the running unified exec session (a JSON number up to 9007199254740991). A legacy larger numeric id cannot be sent here; use remote_job_status, remote_job_tail or remote_job_stdin with job_id or session_id as a string."},
         "chars": {"type": "string", "description": "Bytes to write to stdin. Defaults to empty, which polls without writing."},
         "yield_time_ms": {"type": "number", "description": "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default."},
         "max_output_tokens": {"type": "number", "description": "Output token budget. Defaults to 10000 tokens."},
@@ -103,9 +127,9 @@ CODEX_WRITE_STDIN = NativeToolSpec(
 CODEX_VIEW_IMAGE = NativeToolSpec(
     native_name="view_image",
     canonical="remote.read_image",
-    description="View a local image file from the filesystem when visual inspection is needed (Codex view_image).",
+    description="View an image file on the remote endpoint when visual inspection is needed (Codex view_image).",
     properties={
-        "path": {"type": "string", "description": "Local filesystem path to an image file."},
+        "path": {"type": "string", "description": "Path to an image file on the remote endpoint (not a local path)."},
     },
     required=("path",),
     handler="codex_view_image",
