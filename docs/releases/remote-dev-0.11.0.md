@@ -10,4 +10,6 @@ remote-dev 是唯一认证所有者。coordinator 和 npu-top 只保存 `auth_re
 
 升级保留已有 endpoint 和 OpenSSH 身份配置。需要可恢复的密码登录时，显式配置一次凭据即可；删除共享认证只删除本地配置，不撤销远端已安装公钥。运行时继续锁定 mindie-diagnostics 0.5.4（`5ae643e19223f2181ecdbaa3edaf464137c4805e`）。
 
-验收状态：已完成 macOS 本地认证、子进程生命周期及消费者合同测试，并通过三组件全部固定 benchmark 工作负载的本地兼容性检查。在隔离的 `REMOTE_DEV_AUTH_DIR` 下，默认 `credentials.json` 已验证可由独立 Python 3.11 和 3.13 进程复用；未读取真实用户凭据。原生 Windows PowerShell 与真实 WSL 验收仍待完成；此候选说明不代表三平台均已通过。发布前须补齐对应平台的最终源码 SHA 与实测结果；正式 benchmark 报告由 Tag 流水线在干净源码上生成并随包交付。
+三平台真实 SSH 验收已通过。macOS 使用安装后的三组件 wheel 与 Kimi 候选运行 7 项测试，全部通过（34.58 秒）。Windows Server 2025 的 PowerShell 7.6.7 / Python 3.12.10 / Git OpenSSH 10.5p1 通过 4 项（14.186 秒）；WSL2 Ubuntu 24.04 / OpenSSH 9.6p1 通过 4 项（12.694 秒），均无失败或跳过。Windows 与 WSL 的证据来自 [SSH 平台验收运行 40774308378](https://github.com/mindie-agent/remote-dev/actions/runs/40774308378)，测试合并提交 `f0523be1b2c817f14dd39dc097e89cb6ff53a98d` 与候选 `a7564f49b1ff106e59f72961c851b7b11eb81130` 的源码树相同；该候选的 9 项检查全部通过。
+
+四条真实路径覆盖自动安装公钥并在独立虚拟环境复用、服务器关闭公钥认证时持续密码登录、公钥撤销后的修复且业务仅执行一次，以及 coordinator、Kimi 的两个会话和两个虚拟环境、npu-top 数据库重开后的连接与采集共享同一凭据。Codex、Claude Code 和 DSH 覆盖其 endpoint profile，未声称完整原生宿主端到端运行。验收使用隔离的 `REMOTE_DEV_AUTH_DIR` 和其中默认 `credentials.json`，未读取真实用户凭据，也未调用系统凭据库。三组件全部固定 benchmark 工作负载已完成本地兼容性检查；正式 benchmark 报告由 Tag 流水线在干净源码上生成并随包交付。
