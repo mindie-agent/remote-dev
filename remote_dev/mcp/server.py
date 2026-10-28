@@ -161,8 +161,10 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
         else:
             error(request_id, -32601, f"method not found: {method}", framed=framed)
     except Exception as exc:  # noqa: BLE001
-        from remote_dev.core.errors import error_details
-        error(request_id, -32000, str(exc), {**error_details(exc),
+        from remote_dev.core.errors import error_details, safe_auth_error_details
+        details = error_details(exc)
+        auth = safe_auth_error_details(details)
+        error(request_id, -32000, auth["hint"] if auth else str(exc), {**(auth or details),
               **({"diagnostics": exc.diagnostics} if hasattr(exc, "diagnostics") else {})}, framed=framed)
 
 

@@ -282,6 +282,25 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
     job_action = str(args.get("action") or "status").strip().lower() if name == "remote.job_status" else "status"
     if name.startswith("remote.job_") and not (name == "remote.job_status" and job_action == "list"):
         _require(args, "job_id", name, "session_id")
+    if name == "remote.auth":
+        from remote_dev.auth import setup_access, auth_status, forget_access
+        from remote_dev.result import make_result
+        action = str(args.get("action") or "setup")
+        if action == "setup":
+            facts = setup_access(endpoint, password_env=args.get("password_env"),
+                                 identity_file=args.get("identity_file"),
+                                 install_key=bool(args.get("install_key", True)),
+                                 timeout_ms=timeout_ms or 30000)
+        elif action == "status":
+            facts = auth_status(endpoint)
+        elif action == "forget":
+            facts = forget_access(endpoint, timeout_ms=timeout_ms or 30000)
+        else:
+            raise caller_error("remote.auth action must be setup, status, or forget")
+        result = make_result(tool=name, target=endpoint.to_result_target(),
+                             outcome="success", status=str(facts.get("status") or "ok"),
+                             summary=f"SSH authentication {action} completed.", extra=facts)
+        return {"text": json.dumps(facts, ensure_ascii=False) + "\n", "result": result}
     if name == "remote.bash":
         assert endpoint is not None
         return remote_bash(

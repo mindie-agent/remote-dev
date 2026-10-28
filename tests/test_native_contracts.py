@@ -158,9 +158,8 @@ class FakeCanonical:
 # ---------------------------------------------------------------------------
 
 class CatalogContractTests(unittest.TestCase):
-    def test_canonical_catalog_is_still_19(self) -> None:
+    def test_canonical_catalog_matches_dispatcher_and_schemas(self) -> None:
         catalog = harness_catalog("canonical")
-        self.assertEqual(len(catalog), 19)
         self.assertEqual({tool["name"] for tool in catalog}, set(ALIASES))
         self.assertEqual({tool["name"] for tool in catalog}, {
             name.replace(".", "_") for name in TOOL_SCHEMAS

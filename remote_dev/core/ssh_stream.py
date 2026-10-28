@@ -83,7 +83,15 @@ def run_stream(
     primitive, not a ``remote-dev.result.v1`` document or a detached job.
     """
     dest = sys.stderr if output is None and merge_stderr else output
-    cmd = _resolve("stream_ssh_command")(endpoint, None, timeout_ms=timeout_ms)
+    from .ssh_transport import ssh_launch, _require_independent_stream, _remaining_timeout_ms
+    started = time.monotonic()
+    _require_independent_stream(endpoint)
+    launch = ssh_launch(
+        endpoint, timeout_ms=timeout_ms,
+        command_builder=lambda target, remaining: _resolve("stream_ssh_command")(target, None, timeout_ms=remaining),
+    )
+    timeout_ms = _remaining_timeout_ms(timeout_ms, started)
+    cmd = launch.argv
     payload = script.encode("utf-8")
     subprocess_mod = _resolve("subprocess")
     owner = _resolve("OwnedProcess")(
@@ -92,6 +100,7 @@ def run_stream(
         stdout=subprocess_mod.PIPE,
         stderr=subprocess_mod.STDOUT if merge_stderr else subprocess_mod.PIPE,
         bufsize=0,
+        **({"env": launch.env} if launch.env is not None else {}),
     )
     proc = owner.process
     # Upload concurrently with output draining: a script larger than pipe

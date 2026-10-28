@@ -97,6 +97,13 @@ def _openssh_G(
 
 
 class SshTransportTests(unittest.TestCase):
+    def test_known_hosts_with_spaces_remains_one_file_in_real_openssh_parser(self):
+        with tempfile.TemporaryDirectory(prefix="ssh user home ") as home:
+            known_hosts = str(Path(home) / "shared trust" / "known_hosts")
+            endpoint = Endpoint("example.invalid", 22, ssh_mux=False, known_hosts_file=known_hosts)
+            parsed, _ = _openssh_G(ssh_transport.ssh_command(endpoint, "true"))
+            self.assertEqual(parsed["userknownhostsfile"], known_hosts)
+
     def test_run_remote_python_uses_rpc_and_parses_json(self) -> None:
         endpoint = Endpoint(host="192.0.2.10", port=22)
         from remote_dev.core import rpc_transport
@@ -131,7 +138,8 @@ class SshTransportTests(unittest.TestCase):
     def test_control_path_is_scoped_per_identity_file(self) -> None:
         # OpenSSH %C does not hash the identity file, so endpoints that differ
         # only by SSH key must get distinct ControlPath sockets (D9).
-        with mock.patch.object(ssh_transport, "_MUX_READY", True):
+        with mock.patch.object(ssh_transport, "_MUX_READY", True), mock.patch.object(
+                ssh_transport, "_MUX_DIR", "/test-mux"):
             plain = self._control_path(ssh_transport._control_master_options())
             first = self._control_path(ssh_transport._control_master_options("/keys/a"))
             second = self._control_path(ssh_transport._control_master_options("/keys/b"))

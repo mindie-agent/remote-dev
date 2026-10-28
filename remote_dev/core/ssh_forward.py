@@ -66,22 +66,8 @@ def _as_long_stream(endpoint: Endpoint) -> Endpoint:
     _transport()._require_independent_stream(endpoint)
     if endpoint.keepalive:
         return endpoint
-    return Endpoint.for_long_stream(
-        host=endpoint.host,
-        port=endpoint.port,
-        user=endpoint.user,
-        root=endpoint.root,
-        cwd=endpoint.cwd,
-        runtime_env=endpoint.runtime_env,
-        runtime_env_file=endpoint.runtime_env_file,
-        identity_file=endpoint.identity_file,
-        connect_timeout_ms=endpoint.connect_timeout_ms,
-        kind=endpoint.kind,
-        alias=endpoint.alias,
-        source=endpoint.source,
-        container=endpoint.container,
-        container_selector=endpoint.container_selector,
-    )
+    from dataclasses import replace
+    return replace(endpoint, ssh_mux=False, keepalive=True)
 
 
 def local_forward_ssh_command(
@@ -258,13 +244,14 @@ def open_local_forward(
         chosen_port = _find_free_local_port(local_host)
     else:
         chosen_port = _validate_port(local_port, field="local_port")
-    cmd = transport.local_forward_ssh_command(
-        endpoint,
-        local_host=local_host,
-        local_port=chosen_port,
-        remote_host=remote_host,
-        remote_port=remote_port,
+    started = time.monotonic()
+    launch = transport.ssh_launch(
+        endpoint, timeout_ms=None if ready_timeout_s is None else int(ready_timeout_s * 1000),
+        command_builder=lambda target, remaining: transport.local_forward_ssh_command(
+            target, local_host=local_host, local_port=chosen_port,
+            remote_host=remote_host, remote_port=remote_port),
     )
+    cmd = launch.argv
     popen_kwargs: dict[str, Any] = {
         "stdout": transport.subprocess.DEVNULL,
         "stderr": transport.subprocess.PIPE,
@@ -272,6 +259,8 @@ def open_local_forward(
         "encoding": "utf-8",
         "errors": "replace",
     }
+    if launch.env is not None:
+        popen_kwargs["env"] = launch.env
     try:
         owner = transport.OwnedProcess(cmd, **popen_kwargs)
     except FileNotFoundError as exc:
@@ -284,7 +273,8 @@ def open_local_forward(
         remote_port=remote_port,
     )
     try:
-        handle.wait_ready(ready_timeout_s)
+        remaining = None if ready_timeout_s is None else max(0.0, ready_timeout_s - (time.monotonic() - started))
+        handle.wait_ready(remaining)
     except Exception as error:
         try:
             handle.close()

@@ -1,0 +1,175 @@
+name: Real SSH authentication platforms
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      coordinator_ref:
+        description: Coordinator candidate or release ref
+        default: ddddb992b71125f772ba150e29564f34df0c3e7c
+        type: string
+      npu_top_ref:
+        description: npu-top candidate or release ref
+        default: ad577570a5e02afadf9e4998524fcda408db5b74
+        type: string
+      kimi_ref:
+        description: Published Kimi adapter or candidate ref
+        default: 2b872a079f8496575614d2b49c4a5c2b3b38f674
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ssh-auth-platforms-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cohort:
+    name: Build exact consumer wheel cohort
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: mindie-agent/coordinator
+          ref: ${{ inputs.coordinator_ref || 'ddddb992b71125f772ba150e29564f34df0c3e7c' }}
+          path: acceptance-sources/coordinator
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: mindie-agent/npu-top
+          ref: ${{ inputs.npu_top_ref || 'ad577570a5e02afadf9e4998524fcda408db5b74' }}
+          path: acceptance-sources/npu-top
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: mindie-agent/diagnostics
+          ref: 5ae643e19223f2181ecdbaa3edaf464137c4805e
+          path: acceptance-sources/diagnostics
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build component wheels without resolving unpublished dependencies
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir wheelhouse .
+          python -m build --wheel --outdir wheelhouse acceptance-sources/diagnostics
+          python -m build --wheel --outdir wheelhouse acceptance-sources/coordinator
+          python -m build --wheel --outdir wheelhouse acceptance-sources/npu-top
+          git rev-parse HEAD > wheelhouse/remote-dev.commit
+          git -C acceptance-sources/coordinator rev-parse HEAD > wheelhouse/coordinator.commit
+          git -C acceptance-sources/npu-top rev-parse HEAD > wheelhouse/npu-top.commit
+          git -C acceptance-sources/diagnostics rev-parse HEAD > wheelhouse/diagnostics.commit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssh-auth-wheel-cohort
+          path: wheelhouse/
+          retention-days: 7
+
+  windows-wsl:
+    name: Real OpenSSH (PowerShell and WSL2)
+    needs: cohort
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: mindie-agent/mindie-agent-kimi
+          ref: ${{ inputs.kimi_ref || '2b872a079f8496575614d2b49c4a5c2b3b38f674' }}
+          path: acceptance-kimi
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ssh-auth-wheel-cohort
+          path: wheelhouse
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Verified v6.1.0 source; no floating third-party action reference.
+      - uses: Vampire/setup-wsl@887f39deb6c0976365e546926fe66f41b77d65ff
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: "2"
+          set-as-default: "true"
+          additional-packages: openssh-server openssh-client python3 python3-venv python3-pip git
+      - name: Provision isolated Linux account and two actual sshd listeners
+        shell: wsl-bash -u root {0}
+        run: |
+          mkdir -p /tmp/remote-dev-ssh-auth-suite
+          cp tests/cross_platform_ssh_server.py /tmp/remote-dev-ssh-auth-suite/server.py
+          python3 /tmp/remote-dev-ssh-auth-suite/server.py start --state /tmp/remote-dev-ssh-auth-server
+          uname -a
+      - name: Prepare native Windows virtual environments
+        shell: pwsh
+        run: |
+          python tests/prepare_cross_platform_auth.py --wheelhouse wheelhouse --root "$env:RUNNER_TEMP\SSH auth runtimes"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $manifest = Join-Path $env:RUNNER_TEMP 'ssh-auth-manifest.json'
+          wsl --distribution Ubuntu-24.04 --user root -- cat /tmp/remote-dev-ssh-auth-server/manifest.json |
+            Set-Content -Encoding utf8 $manifest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows PowerShell actual SSH four-path acceptance
+        shell: pwsh
+        run: |
+          $pythons = Get-Content -Raw "$env:RUNNER_TEMP\SSH auth runtimes\pythons.json"
+          $env:REMOTE_DEV_CROSS_SSH_PYTHONS = $pythons
+          $env:REMOTE_DEV_CROSS_SSH_MANIFEST = Join-Path $env:RUNNER_TEMP 'ssh-auth-manifest.json'
+          $env:REMOTE_DEV_CROSS_SSH_ADMIN = ConvertTo-Json -Compress @(
+            'wsl.exe', '--distribution', 'Ubuntu-24.04', '--user', 'root', '--',
+            'python3', '/tmp/remote-dev-ssh-auth-suite/server.py')
+          $env:REMOTE_DEV_CROSS_SSH_HOST = ((wsl --distribution Ubuntu-24.04 -- hostname -I).Trim() -split '\s+')[0]
+          $env:REMOTE_DEV_CROSS_KIMI_ROOT = Join-Path $env:GITHUB_WORKSPACE 'acceptance-kimi'
+          $env:REMOTE_DEV_CROSS_PLATFORM = 'windows-powershell'
+          $env:REMOTE_DEV_CROSS_SHELL = "PowerShell $($PSVersionTable.PSVersion)"
+          $env:REMOTE_DEV_CROSS_EVIDENCE = 'windows-ssh-evidence.json'
+          $env:PYTHONUTF8 = '1'
+          $python = ($pythons | ConvertFrom-Json)[0]
+          & $python -m pytest -q -s tests/test_cross_platform_ssh_auth.py --junitxml=windows-ssh-auth.xml
+          exit $LASTEXITCODE
+      - name: Prepare native WSL virtual environments
+        if: ${{ !cancelled() }}
+        shell: wsl-bash -u root {0}
+        run: |
+          python3 tests/prepare_cross_platform_auth.py --wheelhouse wheelhouse --root "/tmp/SSH auth runtimes"
+      - name: Actual WSL OpenSSH four-path acceptance
+        if: ${{ !cancelled() }}
+        shell: wsl-bash -u root {0}
+        run: |
+          export REMOTE_DEV_CROSS_SSH_PYTHONS="$(cat '/tmp/SSH auth runtimes/pythons.json')"
+          export REMOTE_DEV_CROSS_SSH_MANIFEST=/tmp/remote-dev-ssh-auth-server/manifest.json
+          export REMOTE_DEV_CROSS_SSH_ADMIN='["python3","/tmp/remote-dev-ssh-auth-suite/server.py"]'
+          export REMOTE_DEV_CROSS_SSH_HOST=127.0.0.1
+          export REMOTE_DEV_CROSS_KIMI_ROOT="$PWD/acceptance-kimi"
+          export REMOTE_DEV_CROSS_PLATFORM=wsl
+          export REMOTE_DEV_CROSS_SHELL="WSL bash"
+          export REMOTE_DEV_CROSS_EVIDENCE="$PWD/wsl-ssh-evidence.json"
+          "/tmp/SSH auth runtimes/coordinator plugin/bin/python" -m pytest -q -s tests/test_cross_platform_ssh_auth.py --junitxml=wsl-ssh-auth.xml
+      - name: Remove disposable SSH account, processes and secrets
+        if: always()
+        shell: pwsh
+        run: |
+          wsl --distribution Ubuntu-24.04 --user root -- python3 /tmp/remote-dev-ssh-auth-suite/server.py stop --state /tmp/remote-dev-ssh-auth-server
+          $cleanupExit = $LASTEXITCODE
+          Remove-Item -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'ssh-auth-manifest.json')
+          exit $cleanupExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-wsl-real-ssh-evidence
+          path: |
+            windows-ssh-auth.xml
+            wsl-ssh-auth.xml
+            windows-ssh-evidence.json
+            wsl-ssh-evidence.json
+          retention-days: 7

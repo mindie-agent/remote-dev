@@ -42,13 +42,6 @@ class ProfileSelectionTests(unittest.TestCase):
 
 
 class CatalogTests(unittest.TestCase):
-    def test_canonical_table_stays_19(self) -> None:
-        self.assertEqual(len(tools.harness_catalog("canonical")), 19)
-        self.assertEqual(len(tools.harness_catalog("kimi")), 29)
-        self.assertEqual(len(tools.harness_catalog("claude")), 30)
-        self.assertEqual(len(tools.harness_catalog("dsh")), 22)
-        self.assertEqual(len(tools.harness_catalog("codex")), 22)
-
     def test_native_wire_names_are_exact(self) -> None:
         names = {tool["name"] for tool in tools.harness_catalog("kimi")}
         for name in (

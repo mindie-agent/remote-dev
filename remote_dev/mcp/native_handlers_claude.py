@@ -299,7 +299,7 @@ def claude_notebook_edit(profile: str, spec: NativeToolSpec, native: dict[str, A
     write_payload = _call_canonical(
         "remote.write",
         {
-            **{key: normalized[key] for key in ("host", "port", "user", "container", "root", "cwd", "runtime_env", "identity_file", "connect_timeout_ms", "runtime_env_file", "alias") if key in normalized},
+            **{key: normalized[key] for key in ("host", "port", "user", "container", "root", "cwd", "runtime_env", "identity_file", "auth_ref", "known_hosts_file", "connect_timeout_ms", "runtime_env_file", "alias") if key in normalized},
             "file_path": normalized["file_path"],
             "content": edited["data"].decode("utf-8"),
             "overwrite": True,

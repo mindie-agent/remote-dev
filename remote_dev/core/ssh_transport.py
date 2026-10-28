@@ -113,13 +113,14 @@ class RemoteBytesCompleted:
     cancelled: bool = False
     cleanup_error: str | None = None
 
-def _capture_command(command, *, input=None, timeout=None):
+def _capture_command(command, *, input=None, timeout=None, env=None):
     """Capture one owned SSH process; quiet work has no default deadline."""
     from .cancellation import current_event
     cancelled = current_event()
     if cancelled is not None and cancelled.is_set():
         raise RemoteExecutionError("SSH capture cancelled before launch", category="cancelled", submission_state="not_sent")
-    owner = OwnedProcess(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    owner = OwnedProcess(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         **({"env": env} if env is not None else {}))
     proc = owner.process
     deadline = None if timeout is None else time.monotonic() + timeout
     first_input = input
@@ -178,6 +179,11 @@ def _capture_command(command, *, input=None, timeout=None):
     return RemoteBytesCompleted(list(command), observed_exit, stdout, stderr, timed_out, was_cancelled,
                                 "; ".join(cleanup) if cleanup else None)
 
+def _config_path(path: str) -> str:
+    """SSH parses -o values as config syntax even inside a single argv token."""
+    return json.dumps(path, ensure_ascii=False) if any(c.isspace() or c in '\\"' for c in path) else path
+
+
 def _control_master_options(identity_file: str | None = None) -> list[str]:
     """OpenSSH connection reuse through a ControlMaster socket directory (prepared once)."""
     global _MUX_READY
@@ -207,7 +213,7 @@ def _control_master_options(identity_file: str | None = None) -> list[str]:
         "-o",
         "ControlMaster=auto",
         "-o",
-        f"ControlPath={_MUX_DIR}/%C{key_suffix}",
+        "ControlPath=" + _config_path(f"{_MUX_DIR}/%C{key_suffix}"),
         "-o",
         "ControlPersist=120",
     ]
@@ -336,6 +342,8 @@ def _ssh_cmd(endpoint: Endpoint, option_tokens: Sequence[str] = ()) -> list[str]
     ]
     if endpoint.identity_file:
         cmd.extend(["-i", endpoint.identity_file])
+    if endpoint.known_hosts_file:
+        cmd.extend(["-o", "UserKnownHostsFile=" + _config_path(endpoint.known_hosts_file)])
     # User and host are never positional options. `-l` consumes `user`
     # even when it begins with `-`, and `--` stops option parsing before
     # `host`. `Endpoint.destination()` (`user@host`) is display-only.
@@ -365,6 +373,55 @@ def ssh_command(endpoint: Endpoint, *remote_tokens: str) -> list[str]:
         raise RemoteExecutionError("container SSH command requires an explicit remote command")
     command = shlex.join(["docker", "exec", "-i", endpoint.container, *argv])
     return [*ssh_base_cmd(host), command]
+
+@dataclass
+class SshLaunch:
+    """One connection's argv and private environment; never a tool result."""
+    argv: list[str]
+    env: dict[str, str] | None
+    auth_identity: tuple
+
+
+def ssh_launch(endpoint: Endpoint, command: str | Sequence[str] | None = None, *, tty: bool = False,
+               timeout_ms: int | None = None, repair: bool = True,
+               option_tokens: Sequence[str] = (), command_builder=None) -> SshLaunch:
+    """Resolve shared authentication before submitting any business command."""
+    from remote_dev.auth import prepare_auth
+
+    started = time.monotonic()
+    endpoint = pin_container_endpoint(endpoint, timeout_ms=timeout_ms)
+    plan = prepare_auth(endpoint, timeout_ms=_remaining_timeout_ms(timeout_ms, started), repair=repair)
+    remaining = _remaining_timeout_ms(timeout_ms, started)
+    tokens = [] if command is None else [command] if isinstance(command, str) else list(command)
+    argv = (command_builder(plan.endpoint, remaining) if command_builder is not None
+            else ssh_command(plan.endpoint, *tokens))
+    mux_options = []
+    if plan.identity[0] != "unmanaged" and _uses_shared_mux(plan.endpoint):
+        mux_options = _control_master_options(json.dumps(plan.identity, separators=(",", ":")))
+    # OpenSSH uses the first occurrence; authentication precedes defaults.
+    argv[1:1] = [*plan.options, *mux_options, *(["-tt"] if tty else []), *option_tokens]
+    return SshLaunch(argv, None if plan.env is None else {**os.environ, **plan.env}, plan.identity)
+
+
+def capture_launch(launch: SshLaunch, *, input: bytes | None = None,
+                   timeout_ms: int | None = None) -> RemoteBytesCompleted:
+    """Execute one prepared SSH plan with owned descendant cleanup and explicit outcomes."""
+    timeout_value(timeout_ms)
+    return _capture_command(
+        launch.argv, input=input,
+        timeout=None if timeout_ms is None else timeout_ms / 1000,
+        env=launch.env,
+    )
+
+
+def _remaining_timeout_ms(timeout_ms: int | None, started: float) -> int | None:
+    if timeout_ms is None:
+        return None
+    remaining = int(timeout_ms - (time.monotonic() - started) * 1000)
+    if remaining <= 0:
+        raise RemoteExecutionError("SSH authentication exhausted the call deadline; request was not sent",
+                                   category="authentication_timeout", submission_state="not_sent")
+    return remaining
 
 def stream_remote_payload(script: str, timeout_ms: int | None) -> str:
     """Wrap ``script`` in remote-side ``timeout --preserve-status`` when asked."""
@@ -399,8 +456,11 @@ def run_script(endpoint: Endpoint, script: str, *, timeout_ms: int | None = None
                trace_connection: bool = False) -> RemoteCompleted:
     timeout_value(timeout_ms)
     started = time.perf_counter()
-    timeout = None if timeout_ms is None else timeout_ms / 1000
-    command = ssh_command(endpoint, "bash", "-s")
+    budget_started = time.monotonic()
+    launch = ssh_launch(endpoint, ["bash", "-s"], timeout_ms=timeout_ms, repair=not trace_connection)
+    remaining_ms = _remaining_timeout_ms(timeout_ms, budget_started)
+    timeout = None if remaining_ms is None else remaining_ms / 1000
+    command = launch.argv
     payload = script.encode("utf-8")
     prepared = time.perf_counter()
     if trace_connection:
@@ -409,9 +469,10 @@ def run_script(endpoint: Endpoint, script: str, *, timeout_ms: int | None = None
         if len(payload) > 4096:
             raise ValueError("connection trace is restricted to small diagnostic probes")
         command.insert(1, "-v")
-        return _run_traced_script(command, payload, timeout_ms, started, prepared)
+        return _run_traced_script(command, payload, remaining_ms, started, prepared, env=launch.env)
     # Byte-oriented stdin preserves LF on Windows and binary payloads.
-    proc = _capture_command(command, input=payload, timeout=timeout)
+    proc = _capture_command(command, input=payload, timeout=timeout,
+                            **({"env": launch.env} if launch.env is not None else {}))
     code, stdout, stderr, timed_out = proc.returncode, proc.stdout, proc.stderr, getattr(proc, 'timed_out', False)
     finished = time.perf_counter()
     stdout, stderr = _decode_stream(stdout), _decode_stream(stderr)
@@ -426,7 +487,7 @@ def run_script(endpoint: Endpoint, script: str, *, timeout_ms: int | None = None
     return RemoteCompleted(code, stdout, stderr, timed_out=timed_out, timings=timings,
                            cancelled=getattr(proc, 'cancelled', False), cleanup_error=getattr(proc, 'cleanup_error', None))
 
-def _run_traced_script(command, payload, timeout_ms, started, prepared):
+def _run_traced_script(command, payload, timeout_ms, started, prepared, *, env=None):
     milestones = {}
 
     def observe(channel, text):
@@ -441,7 +502,8 @@ def _run_traced_script(command, payload, timeout_ms, started, prepared):
             milestones["last_output"] = now
 
     with OwnedProcess(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                      stderr=subprocess.PIPE, bufsize=0) as owner:
+                      stderr=subprocess.PIPE, bufsize=0,
+                      **({"env": env} if env is not None else {})) as owner:
         proc = owner.process
         try:
             proc.stdin.write(payload)
@@ -478,11 +540,15 @@ def run_bytes(
     stdin: bytes | None = None,
     timeout_ms: int | None = None,
 ) -> RemoteBytesCompleted:
-    timeout = None if timeout_ms is None else timeout_ms / 1000
+    started = time.monotonic()
+    launch = ssh_launch(endpoint, f"bash -c {shlex.quote(remote_command)}", timeout_ms=timeout_ms)
+    remaining_ms = _remaining_timeout_ms(timeout_ms, started)
+    timeout = None if remaining_ms is None else remaining_ms / 1000
     return _capture_command(
-        ssh_command(endpoint, f"bash -c {shlex.quote(remote_command)}"),
+        launch.argv,
         input=stdin,
         timeout=timeout,
+        **({"env": launch.env} if launch.env is not None else {}),
     )
 
 _RPC_SCRIPT = r"""
