@@ -23,6 +23,8 @@ def repair_of(error):
     assert details["category"] == "caller"
     assert details["submission_state"] == "not_sent"
     assert details["retryable"] is False
+    assert details["error_code"] in ("endpoint_incomplete", "invalid_argument")
+    assert details["field"] == details["input_repair"]["missing"][0]
     return details["input_repair"]
 
 

@@ -479,9 +479,9 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(args["yield_time_ms"], 250)
 
         canonical, args = self._call(
-            "remote_write_stdin", {"session_id": 7, "chars": "", "yield_time_ms": 1234}, "codex"
+            "remote_write_stdin", {"session_id": 7, "chars": "", "yield_time_ms": 6000}, "codex"
         )
-        self.assertEqual(args["yield_time_ms"], 1234)
+        self.assertEqual(args["yield_time_ms"], 6000)
 
     def test_write_defaults(self) -> None:
         canonical, args = self._call(

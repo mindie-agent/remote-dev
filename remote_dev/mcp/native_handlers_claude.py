@@ -27,7 +27,7 @@ def claude_task_output(profile: str, spec: NativeToolSpec, native: dict[str, Any
     job_id = str(native["task_id"])
     found = find_job_record(job_id)
     if not found:
-        raise caller_error(f"No task found with ID: {job_id}")
+        raise caller_error(f"No task found with ID: {job_id}", error_code="unknown_job", field="job_id")
     record_path, record = found
     _assert_visible(record)
     block = native.get("block") is not False

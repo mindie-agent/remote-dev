@@ -280,6 +280,146 @@ class RemoteJobControlTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "failed")
 
 
+class TailBudgetAndDeadlineTests(unittest.TestCase):
+    FULL = "a" * 64
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        original_root = state_store.substrate_root
+        state_store.substrate_root = lambda: Path(self.temp.name)  # type: ignore[assignment]
+        self.addCleanup(setattr, state_store, "substrate_root", original_root)
+        self.endpoint = Endpoint(host="127.0.0.1", port=46000, root="/srv/app", cwd="/srv/app",
+                                 container=self.FULL)
+        self.job_id = "job-budget1"
+        state_store.atomic_write_json(
+            state_store.job_record_path(self.endpoint, self.job_id),
+            {"job_id": self.job_id, "target": self.endpoint.to_result_target(),
+             "remote_dir": "/srv/app/.remote-dev/jobs/job-budget1"})
+
+    def _tail(self, stdout="", stderr="", tool=None, **kwargs):
+        tool = tool or job_ops.remote_job_tail
+        with mock.patch.object(job_ops, "control", return_value=_supervisor(stdout=stdout, stderr=stderr)):
+            return tool(self.endpoint, job_id=self.job_id, **kwargs)
+
+    def test_tiny_budget_keeps_newest_log_bytes_not_labels(self) -> None:
+        for tool in (job_ops.remote_job_tail, job_ops.remote_job_output):
+            payload = self._tail("DATA-ABCD", "", tool=tool, max_output_tokens=1)
+            result = payload["result"]
+            self.assertEqual(result["preview"]["tail"], "ABCD")
+            self.assertEqual(result["omitted_bytes"], 5)
+            self.assertTrue(result["truncated"])
+            self.assertIn("ABCD", payload["text"])
+            self.assertNotIn("DATA-", payload["text"])
+
+    def test_budget_both_streams_and_unicode(self) -> None:
+        payload = self._tail("out-1234\n", "err-\u4f60\u597d\n", max_output_tokens=3)
+        result = payload["result"]
+        body = result["preview"]["tail"]
+        self.assertLessEqual(len(body.encode()), 6)
+        self.assertTrue(body.endswith("\u597d\n") or body.endswith("\u597d"))
+        self.assertEqual(result["omitted_bytes"], len("out-1234\nerr-\u4f60\u597d\n".encode()) - len(body.encode()))
+        body.encode().decode("utf-8")
+
+    def test_budget_selects_real_tail_before_repeat_folding(self) -> None:
+        raw = "repeat-long-line\n" * 100
+        result = self._tail(raw, "", max_output_tokens=1)["result"]
+        self.assertEqual(result["preview"]["tail"], raw[-4:])
+        self.assertEqual(result["omitted_bytes"], len(raw.encode()) - 4)
+        self.assertFalse(result["repeated_lines_folded"])
+        unbudgeted = self._tail(raw, "")["result"]
+        self.assertTrue(unbudgeted["repeated_lines_folded"])
+        self.assertTrue(unbudgeted["truncated"])
+        self.assertGreater(unbudgeted["omitted_bytes"], 0)
+
+    def test_budget_preserves_trailing_newline(self) -> None:
+        result = self._tail("abc\n", "", max_output_tokens=2)["result"]
+        self.assertEqual(result["preview"]["tail"], "abc\n")
+        self.assertEqual(result["omitted_bytes"], 0)
+
+    def test_text_limit_truncation_reports_omitted_raw_bytes(self) -> None:
+        raw = "".join(f"line {i}\n" for i in range(5000))
+        for kwargs in ({}, {"max_output_tokens": 100000}):
+            result = self._tail(raw, "", **kwargs)["result"]
+            self.assertTrue(result["truncated"], kwargs)
+            self.assertGreater(result["omitted_bytes"], 0)
+            kept = len(raw.encode()) - result["omitted_bytes"]
+            self.assertGreater(kept, 0)
+            self.assertLess(kept, len(raw.encode()))
+
+    def test_untruncated_reports_zero_and_empty_streams(self) -> None:
+        result = self._tail("", "", max_output_tokens=1)["result"]
+        self.assertEqual((result["truncated"], result["omitted_bytes"]), (False, 0))
+        result = self._tail("small", "")["result"]
+        self.assertEqual((result["truncated"], result["omitted_bytes"]), (False, 0))
+
+    def _clock(self):
+        state = {"now": 1000.0}
+        fake = mock.Mock()
+        fake.monotonic = lambda: state["now"]
+        fake.sleep = lambda seconds: state.__setitem__("now", state["now"] + seconds)
+        return state, fake
+
+    def test_pin_time_is_deducted_before_control(self) -> None:
+        for tool in (job_ops.remote_job_tail, job_ops.remote_job_output):
+            state, fake = self._clock()
+            selector = Endpoint(host="127.0.0.1", port=46000, root="/srv/app", cwd="/srv/app",
+                                container="named")
+
+            def pin(endpoint, *, timeout_ms=None):
+                if endpoint.container != "named":
+                    return endpoint
+                self.assertEqual(timeout_ms, 1000)
+                state["now"] += 0.9
+                return self.endpoint
+
+            seen = {}
+
+            def fake_control(_endpoint, _job, _action, **params):
+                seen.update(params)
+                return _supervisor(stdout="ok", stderr="")
+
+            with mock.patch.object(job_ops, "time", fake), \
+                    mock.patch.object(job_ops._container_endpoint, "pin_container_endpoint", pin), \
+                    mock.patch.object(job_ops, "control", fake_control):
+                tool(selector, job_id=self.job_id, timeout_ms=1000)
+            self.assertLessEqual(seen["timeout_ms"], 101)
+            self.assertGreaterEqual(seen["timeout_ms"], 1)
+
+    def test_expired_pin_prevents_control(self) -> None:
+        state, fake = self._clock()
+        selector = Endpoint(host="127.0.0.1", port=46000, root="/srv/app", cwd="/srv/app",
+                            container="named")
+
+        def pin(endpoint, *, timeout_ms=None):
+            if endpoint.container != "named":
+                return endpoint
+            state["now"] += 1.0
+            return self.endpoint
+
+        with mock.patch.object(job_ops, "time", fake), \
+                mock.patch.object(job_ops._container_endpoint, "pin_container_endpoint", pin), \
+                mock.patch.object(job_ops, "control") as control:
+            with self.assertRaises(TimeoutError):
+                job_ops.remote_job_tail(selector, job_id=self.job_id, timeout_ms=1000)
+        control.assert_not_called()
+
+    def test_expired_record_resolution_prevents_control(self) -> None:
+        state, fake = self._clock()
+        original = job_ops._load_record
+
+        def slow_load(endpoint, job_id):
+            state["now"] += 1.0
+            return original(endpoint, job_id)
+
+        with mock.patch.object(job_ops, "time", fake), \
+                mock.patch.object(job_ops, "_load_record", slow_load), \
+                mock.patch.object(job_ops, "control") as control:
+            with self.assertRaises(TimeoutError):
+                job_ops.remote_job_output(self.endpoint, job_id=self.job_id, timeout_ms=1000)
+        control.assert_not_called()
+
+
 class StartRemoteJobTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()

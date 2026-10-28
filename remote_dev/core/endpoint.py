@@ -265,12 +265,12 @@ def _bool_field(payload: dict[str, Any], key: str, caller_fields: set[str], defa
 def _direct_endpoint(payload: dict[str, Any], *, caller_fields: set[str]) -> Endpoint:
     # Empty path fields use process defaults, not caller-provided coordinates.
     caller_fields = caller_fields - {key for key in ("root", "cwd") if not payload.get(key)}
-    if "host" not in payload or "port" not in payload:
-        missing = [key for key in ("host", "port") if key not in payload]
-        if "host" in caller_fields or "port" in caller_fields:
-            raise caller_error("direct endpoint requires host and port",
-                               EndpointError, repair=_endpoint_repair(missing))
-        raise EndpointError("direct endpoint requires host and port")
+    if not payload.get("host") or "port" not in payload:
+        missing = "host" if not payload.get("host") else "port"
+        raise caller_error(f"endpoint requires host and port together (missing {missing})",
+                           EndpointError, error_code="endpoint_incomplete", field=missing,
+                           repair=_endpoint_repair([key for key in ("host", "port")
+                                                    if not payload.get(key)]))
     try:
         port = int(payload["port"])
     except (TypeError, ValueError) as exc:
@@ -558,7 +558,8 @@ def resolve_endpoint(payload: dict[str, Any]) -> Endpoint:
             endpoint = _endpoint_from_resolver(entry, payload)
             if endpoint is not None:
                 return endpoint
-        raise EndpointError(f"endpoint alias {alias!r} is not configured")
+        raise caller_error(f"endpoint alias {alias!r} is not configured",
+                           EndpointError, error_code="endpoint_alias_unknown", field="alias")
     for entry in registered_resolvers():
         endpoint = _endpoint_from_resolver(entry, payload)
         if endpoint is not None:
@@ -570,6 +571,11 @@ def resolve_endpoint(payload: dict[str, Any]) -> Endpoint:
             merged = {**aliases[default_alias], **overrides}
             merged["alias"] = default_alias
             return _direct_endpoint(merged, caller_fields=set(overrides))
+    if payload.get("host") or payload.get("port"):
+        raise caller_error("direct endpoint requires host and port together; no implicit port 22",
+                           EndpointError, error_code="endpoint_incomplete",
+                           field="port" if payload.get("host") else "host",
+                           repair=_endpoint_repair(["port" if payload.get("host") else "host"]))
     known = ", ".join(selector_fields())
     resolvers = ", ".join(entry.name for entry in registered_resolvers()) or "none"
     missing = [key for key in ("host", "port") if not payload.get(key)]
@@ -577,6 +583,6 @@ def resolve_endpoint(payload: dict[str, Any]) -> Endpoint:
         "no endpoint target: provide host and port together, an alias from the "
         f"endpoint alias files, or a selector understood by a registered resolver "
         f"(known selector fields: {known}; registered resolvers: {resolvers})",
-        EndpointError,
+        EndpointError, error_code="endpoint_incomplete", field="host",
         repair=_endpoint_repair(missing),
     )

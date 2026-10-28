@@ -221,17 +221,17 @@ def _require(
     missing_repair = {"missing": [key],
                       "action": f"Retry with {key}{hint} supplied; no remote effect occurred."}
     if key not in args or value is None:
-        raise caller_error(f"{tool} requires {key}{hint}", repair=missing_repair)
+        raise caller_error(f"{tool} requires {key}{hint}", field=key, repair=missing_repair)
     if allow_empty:
         if not isinstance(value, str):
             raise caller_error(
                 f"{tool} requires {key} to be a string{hint}",
-                repair={"action": f"Retry with {key}{hint} as a string; "
+                field=key, repair={"action": f"Retry with {key}{hint} as a string; "
                                   "the supplied value is not missing."},
             )
         return value
     if isinstance(value, str) and not value:
-        raise caller_error(f"{tool} requires {key}{hint}", repair=missing_repair)
+        raise caller_error(f"{tool} requires {key}{hint}", field=key, repair=missing_repair)
     return value
 
 
@@ -266,7 +266,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
     missing = [key for key in TOOL_SCHEMAS[name].get("required", ()) if key not in args]
     if missing:
         raise caller_error(
-            f"{name} requires {', '.join(missing)}", KeyError,
+            f"{name} requires {', '.join(missing)}", KeyError, field=missing[0],
             repair={"missing": missing,
                     "action": f"Retry with {', '.join(missing)} supplied; no remote effect occurred."},
         )
@@ -458,7 +458,10 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
                 endpoint,
                 job_id=str(args["job_id"]),
                 lines=int(args.get("lines") or 80),
+                stream=str(args.get("stream") or "both"),
                 yield_time_ms=args.get("yield_time_ms"),
+                max_output_tokens=int(args["max_output_tokens"]) if args.get("max_output_tokens") is not None else None,
+                timeout_ms=timeout_ms,
             )
         return remote_job_status(endpoint, job_id=str(args["job_id"]))
     if name == "remote.job_tail":
@@ -468,6 +471,8 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             lines=int(args.get("lines") or 80),
             stream=str(args.get("stream") or "both"),
             yield_time_ms=args.get("yield_time_ms"),
+            max_output_tokens=int(args["max_output_tokens"]) if args.get("max_output_tokens") is not None else None,
+            timeout_ms=timeout_ms,
         )
     if name == "remote.job_output":
         return remote_job_output(
@@ -476,6 +481,8 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             lines=int(args.get("lines") or 200),
             stream=str(args.get("stream") or "both"),
             yield_time_ms=args.get("yield_time_ms"),
+            max_output_tokens=int(args["max_output_tokens"]) if args.get("max_output_tokens") is not None else None,
+            timeout_ms=timeout_ms,
         )
     if name == "remote.job_stop":
         return remote_job_stop(endpoint, job_id=str(args["job_id"]), force=bool(args.get("force", False)))

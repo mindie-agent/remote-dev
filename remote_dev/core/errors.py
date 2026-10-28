@@ -12,6 +12,16 @@
 from __future__ import annotations
 
 
+CALLER_ERROR_HINTS = {
+    "invalid_argument": "Correct the named argument to the type and range declared in the tool schema, then retry; nothing was sent.",
+    "endpoint_incomplete": "Provide host together with port (no implicit port 22), or select a configured endpoint with alias.",
+    "endpoint_alias_unknown": "Use an alias from the endpoint alias files that defines host and port, or pass host and port explicitly.",
+    "unknown_job": "Use the job_id or session_id returned by a command started in this session. Inspect legacy string IDs with remote_job_status or remote_job_tail.",
+    "path_policy": "Use an absolute path on the remote endpoint inside its configured root; local filesystem paths are not valid here.",
+    "unsupported_shell_for_runtime_env": "runtime_env needs a POSIX-family shell (bash, sh, dash, zsh, ksh); choose one of these or disable runtime_env.",
+}
+
+
 class RemoteDevError(RuntimeError):
     """Base class for deterministic remote-dev failures."""
 
@@ -21,7 +31,11 @@ class EndpointError(RemoteDevError):
 
 
 class PathPolicyError(RemoteDevError):
-    """Raised when a remote path violates root/cwd policy."""
+    """Raised when a remote path violates root/cwd policy (a pre-dispatch caller error)."""
+
+    category = "caller"
+    error_code = "path_policy"
+    field = "path"
 
 
 class RemoteExecutionError(RemoteDevError):
@@ -96,6 +110,12 @@ def error_details(exc):
             if repair is not None:
                 result["input_repair"] = repair
             result.update(category="caller", submission_state="not_sent", retryable=False)
+            code = getattr(current, "error_code", None)
+            if code in CALLER_ERROR_HINTS:
+                result["error_code"] = code
+                field = getattr(current, "field", None)
+                if isinstance(field, str) and field.isidentifier():
+                    result["field"] = field
             break
         if isinstance(current, RemoteExecutionError) or hasattr(current, "submission_state"):
             result.update(category=getattr(current, "category", "remote_execution"), retryable=getattr(current, "retryable", False))
@@ -110,10 +130,12 @@ def error_details(exc):
     return result
 
 
-def caller_error(message, exception_type=ValueError, *, repair=None):
+def caller_error(message, exception_type=ValueError, *, error_code="invalid_argument", field=None, repair=None):
     """Only known pre-dispatch input checks may use this classification."""
     error = exception_type(message)
     error.category = "caller"
+    error.error_code = error_code if error_code in CALLER_ERROR_HINTS else "invalid_argument"
+    error.field = field
     if repair is not None:
         error.input_repair = repair
     return error

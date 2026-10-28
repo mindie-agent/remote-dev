@@ -324,6 +324,7 @@ class EndpointErrorProvenanceTests(unittest.TestCase):
                 self.assertEqual(error_details(caught.exception), {
                     "type": "EndpointError", "category": "caller",
                     "submission_state": "not_sent", "retryable": False,
+                    "error_code": "invalid_argument",
                 })
         for source in ("direct", "alias"):
             for value in ("bad", -1, True):
