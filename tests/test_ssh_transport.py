@@ -138,7 +138,8 @@ class SshTransportTests(unittest.TestCase):
     def test_control_path_is_scoped_per_identity_file(self) -> None:
         # OpenSSH %C does not hash the identity file, so endpoints that differ
         # only by SSH key must get distinct ControlPath sockets (D9).
-        with mock.patch.object(ssh_transport, "_MUX_READY", True):
+        with mock.patch.object(ssh_transport, "_MUX_READY", True), mock.patch.object(
+                ssh_transport, "_MUX_DIR", "/test-mux"):
             plain = self._control_path(ssh_transport._control_master_options())
             first = self._control_path(ssh_transport._control_master_options("/keys/a"))
             second = self._control_path(ssh_transport._control_master_options("/keys/b"))

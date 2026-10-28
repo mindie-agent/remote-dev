@@ -196,7 +196,8 @@ def _hostkey_error(result):
 def _require_success(result, stage):
     if result.returncode == 0:
         return
-    category = "authentication_rejected" if _auth_rejected(result) else "connection_unavailable"
+    category = "host_key" if _hostkey_error(result) else (
+        "authentication_rejected" if _auth_rejected(result) else "connection_unavailable")
     error = auth_error(f"{stage} failed: {result.stderr.strip()[-2000:] or 'exit ' + str(result.returncode)}", category)
     error.exit_code = result.returncode
     error.stderr_tail = result.stderr[-2000:]
@@ -461,9 +462,11 @@ def _repair_profile(endpoint, profile, profiles, budget):
                                "local_recording_failed")
             error.bootstrap = {**facts, "profile_saved": False}
             raise error from exc
-        from .events import record
-        record({"auth_ref": profile["auth_ref"], "auth_method": profile["auth_method"],
-                "bootstrap": facts})
+        from remote_dev.observability import _authentication_event
+        _authentication_event.set({
+            "auth_ref": profile["auth_ref"], "auth_method": profile["auth_method"],
+            "bootstrap": facts,
+        })
     return profile
 
 

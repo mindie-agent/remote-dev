@@ -313,7 +313,7 @@ def test_repair_reloads_profile_after_a_concurrent_credential_rotation(auth_home
 
 
 def test_missing_local_key_uses_verified_recovery_password(auth_home, endpoint, monkeypatch, tmp_path):
-    from remote_dev.auth import events
+    from remote_dev.observability import _authentication_event
     private = _key(monkeypatch, tmp_path)
     _probes(monkeypatch, [_deny(), _outcome(), _outcome(), _outcome()])
     setup_access(endpoint, password="fixture-secret")
@@ -323,11 +323,12 @@ def test_missing_local_key_uses_verified_recovery_password(auth_home, endpoint, 
         raise access.auth_error("SSH identity file does not exist: " + private, "configuration")
 
     monkeypatch.setattr(access, "ensure_key", missing_key)
-    token = events.begin()
+    token = _authentication_event.set(None)
     try:
         plan = prepare_auth(endpoint)
     finally:
-        event = events.finish(token)
+        event = _authentication_event.get()
+        _authentication_event.reset(token)
     assert plan.endpoint.ssh_mux is False
     assert "BatchMode=no" in plan.options
     assert len(calls) == 3

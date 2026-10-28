@@ -179,7 +179,7 @@ def test_revoked_key_is_repaired_before_exactly_one_business_write(acceptance):
     observed = acceptance.inspect()
     assert observed["counter"] == "once\n"
     assert observed["authorized_keys"] == [installed]
-    assert called["authentication"]["bootstrap"]["key_verified"], called
+    assert called["result"]["authentication"]["bootstrap"]["key_verified"], called
 
 
 def test_coordinator_kimi_two_chats_and_monitor_share_default_store(acceptance):

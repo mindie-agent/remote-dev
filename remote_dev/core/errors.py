@@ -21,6 +21,49 @@ CALLER_ERROR_HINTS = {
     "unsupported_shell_for_runtime_env": "runtime_env needs a POSIX-family shell (bash, sh, dash, zsh, ksh); choose one of these or disable runtime_env.",
 }
 
+AUTH_ERROR_HINTS = {
+    "authentication": "Configure SSH access with remote_auth using password_env, or run remote-dev auth setup --prompt once.",
+    "authentication_rejected": "SSH authentication was rejected. Check the login user and credential, then configure access with remote_auth using password_env.",
+    "authentication_timeout": "SSH authentication timed out. Check endpoint connectivity before configuring access again.",
+    "host_key": "SSH host-key verification failed. Confirm the server fingerprint with its administrator before updating known_hosts; do not automatically delete trust records or bypass verification.",
+    "credential_required": "Provide a password once through remote_auth password_env or remote-dev auth setup --prompt; subsequent calls reuse the shared SSH profile.",
+    "credential_unavailable": "The saved SSH credential or profile is unavailable. Configure access again with remote_auth using password_env.",
+    "configuration": "Check the SSH host, port, user, auth_ref, identity_file and known_hosts_file; configure the matching endpoint again if needed.",
+    "connection_unavailable": "Check endpoint connectivity and SSH host-key trust. Do not bypass host-key verification.",
+    "local_recording_failed": "Saving local SSH access state failed. Check the shared SSH state directory before configuring access again.",
+}
+
+
+def safe_auth_error_details(details):
+    """Project authentication failures without SSH stderr, paths or credentials."""
+    category = details.get("category")
+    if not isinstance(category, str) or category not in AUTH_ERROR_HINTS:
+        return None
+    if (category in {"configuration", "connection_unavailable", "local_recording_failed"}
+            and details.get("authentication") is not True
+            and not isinstance(details.get("bootstrap"), dict)):
+        return None
+    public = {"category": category, "hint": AUTH_ERROR_HINTS[category],
+              "retryable": details.get("retryable") is True}
+    state = details.get("submission_state")
+    if state in ("not_sent", "acknowledged", "uncertain"):
+        public["submission_state"] = state
+    if type(details.get("operation_completed")) is bool:
+        public["operation_completed"] = details["operation_completed"]
+    bootstrap = details.get("bootstrap")
+    if isinstance(bootstrap, dict):
+        maintenance = {}
+        for field in ("status", "installation", "verification"):
+            value = bootstrap.get(field)
+            if value in ("completed", "failed", "unknown", "not_sent", "already_configured", "not_requested"):
+                maintenance[field] = value
+        for field in ("key_verified", "profile_saved", "credential_retained"):
+            if type(bootstrap.get(field)) is bool:
+                maintenance[field] = bootstrap[field]
+        if maintenance:
+            public["bootstrap"] = maintenance
+    return public
+
 
 class RemoteDevError(RuntimeError):
     """Base class for deterministic remote-dev failures."""
@@ -83,6 +126,8 @@ def error_details(exc):
     current, seen = exc, set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
+        if getattr(current, "authentication", False) is True:
+            result["authentication"] = True
         if getattr(current, "cleanup_error", None) is not None:
             result["cleanup_error"] = current.cleanup_error
         if getattr(current, "operation_completed", None) is not None:

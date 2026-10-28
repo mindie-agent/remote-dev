@@ -2,6 +2,7 @@
 [Role] Structured operation span adapter over `mindie_diagnostics` and MCP stdio descriptor guard (`observability.py`).
 [Invariants]
 - Logs only operation names and public outcome metadata (`outcome`, `status`, `state`, `job_id`, `duration_ms`); never inspects or logs user commands, environment variables, or file contents.
+- Authentication-maintenance facts stay in this lightweight context; local-only calls never load SSH authentication or transports.
 - `protocol_streams()` duplicates and redirects `stdin`/`stdout` before serving MCP so child processes or stray library prints cannot corrupt the JSON-RPC wire stream.
 [Timeouts & Locks]
 - Uses `contextvars.ContextVar` for per-request span correlation and non-blocking `stderr` warning emission.
@@ -23,6 +24,7 @@ from mindie_diagnostics import get_recorder, current_context, bind_context, wrap
 from remote_dev.core.errors import RemoteDevError, error_details
 
 _tool = contextvars.ContextVar("remote_dev_tool_operation", default=None)
+_authentication_event = contextvars.ContextVar("remote_dev_auth_maintenance", default=None)
 
 _REPORT_OPERATIONS = frozenset({
     "remote.read", "remote.write", "remote.edit", "remote.multi_edit", "remote.bash",
@@ -163,13 +165,12 @@ def current_tool():
 @contextlib.contextmanager
 def detached_tool():
     """Background work keeps trace correlation, not a live caller's result scope."""
-    from remote_dev.auth import events as auth_events
     token = _tool.set(None)
-    auth_token = auth_events.begin()
+    auth_token = _authentication_event.set(None)
     try:
         yield
     finally:
-        auth_events.finish(auth_token)
+        _authentication_event.reset(auth_token)
         _tool.reset(token)
 
 
@@ -186,10 +187,9 @@ def observed_tool(name, *, component="remote-dev"):
             started = time.monotonic()
             operation = {"name": label, "started_at": started_at, "started": started}
             with get_recorder(component).operation(label) as op:
-                from remote_dev.auth import events as auth_events
                 operation["op"] = op
                 token = _tool.set(operation)
-                auth_token = auth_events.begin()
+                auth_token = _authentication_event.set(None)
                 try:
                     value = function(*args, **kwargs)
                     result = value.get("result", value.get("structuredContent", value)) if isinstance(value, dict) else None
@@ -231,9 +231,10 @@ def observed_tool(name, *, component="remote-dev"):
                         pass
                     raise
                 finally:
-                    authentication = auth_events.finish(auth_token)
+                    authentication = _authentication_event.get()
+                    _authentication_event.reset(auth_token)
                     if authentication is not None and previous is not None:
-                        auth_events.record(authentication)
+                        _authentication_event.set(authentication)
                     _tool.reset(token)
             minimal_result = bool(isinstance(value, dict) and value.pop("_native_minimal", False))
             if isinstance(result, dict) and authentication is not None:

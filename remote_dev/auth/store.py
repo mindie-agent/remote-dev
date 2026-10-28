@@ -32,7 +32,9 @@ def _seconds(timeout_ms):
 
 
 def auth_error(message, category="authentication"):
-    return RemoteExecutionError(message, category=category, submission_state="not_sent")
+    error = RemoteExecutionError(message, category=category, submission_state="not_sent")
+    error.authentication = True
+    return error
 
 
 def auth_root() -> Path:

@@ -75,14 +75,14 @@ def test_error_certainty_survives_wrapped_exception():
 
 
 def test_auth_maintenance_facts_survive_nested_tools_without_leaking_calls(tmp_path):
-    from remote_dev.auth import events as auth_events
+    from remote_dev.observability import _authentication_event
     configure("remote-dev", root=tmp_path)
     maintenance = {"auth_ref": "ssh-test", "auth_method": "password",
                    "bootstrap": {"status": "failed", "installation": "failed", "key_verified": False}}
 
     @observed_tool("remote.read")
     def inner():
-        auth_events.record(maintenance)
+        _authentication_event.set(maintenance)
         return {"outcome": "success"}
 
     @observed_tool("remote.bash")
