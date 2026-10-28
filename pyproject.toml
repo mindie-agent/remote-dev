@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remote-dev"
-version = "0.10.8"
+version = "0.11.0.dev0"
 description = "Remote development substrate: SSH-backed twins of local agent tools"
 readme = "README.md"
 license = { text = "MIT" }
@@ -28,6 +28,7 @@ test = ["pytest", "mcp==1.30.0"]
 
 [project.scripts]
 remote-dev = "remote_dev.cli:main"
+remote-dev-askpass = "remote_dev.auth.askpass:main"
 
 [project.urls]
 Homepage = "https://github.com/mindie-agent/remote-dev"
@@ -64,4 +65,4 @@ allow-direct-references = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
-markers = ["live_npu: live SSH integration tests against real Ascend NPU hosts"]
+markers = ["live_npu: live SSH integration tests against real Ascend NPU hosts", "live_ssh: real authentication acceptance in an explicitly configured disposable SSH server"]

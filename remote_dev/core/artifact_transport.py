@@ -44,21 +44,27 @@ class ArtifactStream:
         timeout_value(timeout_ms)
         from .container_endpoint import pin_container_endpoint
         from .rpc_transport import _worker_command
-        from .ssh_transport import ssh_command
+        from .ssh_transport import ssh_launch, _remaining_timeout_ms
+        started = time.monotonic()
         endpoint = pin_container_endpoint(endpoint, timeout_ms=timeout_ms)
         source = (Path(__file__).parents[1] / "processes" / "artifact_worker.py").read_text(encoding="utf-8")
         helper = (Path(__file__).parents[1] / "processes" / "mutation.py").read_text(encoding="utf-8")
         source = source.replace("# REMOTE_DEV_MUTATION_LOCK", helper)
+        launch = ssh_launch(replace(endpoint, ssh_mux=False, keepalive=True),
+                            _worker_command(source),
+                            timeout_ms=_remaining_timeout_ms(timeout_ms, started))
+        remaining_ms = _remaining_timeout_ms(timeout_ms, started)
         self.owner = OwnedProcess(
-            ssh_command(replace(endpoint, ssh_mux=False, keepalive=True), _worker_command(source)),
+            launch.argv,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            **({"env": launch.env} if launch.env is not None else {}),
         )
         self.proc = self.owner.process
         self.stop_lock = threading.Lock()
         self.cleanup_error = None
         self.done = threading.Event()
         self.cancelled = current_event()
-        self.deadline = None if timeout_ms is None else time.monotonic() + timeout_ms / 1000
+        self.deadline = None if timeout_ms is None else started + timeout_ms / 1000
         self.operation = operation
         self.commit_possible = False
         self.phase = "prepare"
@@ -70,7 +76,7 @@ class ArtifactStream:
         self.guard.start()
         self.drain.start()
         try:
-            self.send({"root": endpoint.root, "operation": operation, "count": count, "timeout_ms": timeout_ms})
+            self.send({"root": endpoint.root, "operation": operation, "count": count, "timeout_ms": remaining_ms})
         except BaseException as error:
             try:
                 self.close()

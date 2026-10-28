@@ -163,10 +163,13 @@ def current_tool():
 @contextlib.contextmanager
 def detached_tool():
     """Background work keeps trace correlation, not a live caller's result scope."""
+    from remote_dev.auth import events as auth_events
     token = _tool.set(None)
+    auth_token = auth_events.begin()
     try:
         yield
     finally:
+        auth_events.finish(auth_token)
         _tool.reset(token)
 
 
@@ -183,8 +186,10 @@ def observed_tool(name, *, component="remote-dev"):
             started = time.monotonic()
             operation = {"name": label, "started_at": started_at, "started": started}
             with get_recorder(component).operation(label) as op:
+                from remote_dev.auth import events as auth_events
                 operation["op"] = op
                 token = _tool.set(operation)
+                auth_token = auth_events.begin()
                 try:
                     value = function(*args, **kwargs)
                     result = value.get("result", value.get("structuredContent", value)) if isinstance(value, dict) else None
@@ -226,8 +231,21 @@ def observed_tool(name, *, component="remote-dev"):
                         pass
                     raise
                 finally:
+                    authentication = auth_events.finish(auth_token)
+                    if authentication is not None and previous is not None:
+                        auth_events.record(authentication)
                     _tool.reset(token)
             minimal_result = bool(isinstance(value, dict) and value.pop("_native_minimal", False))
+            if isinstance(result, dict) and authentication is not None:
+                result["authentication"] = authentication
+                bootstrap = authentication.get("bootstrap") or {}
+                if bootstrap.get("status") in {"failed", "unknown"}:
+                    warning = "SSH password login succeeded; public-key maintenance " + bootstrap["status"] + "."
+                    result.setdefault("warnings", []).append(warning)
+                    if isinstance(value, dict) and "text" in value:
+                        value["text"] = str(value["text"]) + "\n" + warning + "\n"
+                if isinstance(value, dict) and value.get("structuredContent") is result:
+                    value["content"] = [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
             if isinstance(result, dict) and not minimal_result:
                 if operation.get("cleanup_errors"):
                     result["cleanup_errors"] = operation["cleanup_errors"]

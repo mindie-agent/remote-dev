@@ -97,10 +97,13 @@ def test_pool_close_attempts_every_owned_connection_and_aggregates_failures():
     assert not rpc._pool
 
 
-def test_binary_capture_owns_descendants_after_ssh_parent_exit(tmp_path):
+@pytest.mark.parametrize("parent_exit", [True, False])
+def test_binary_capture_owns_descendants_after_ssh_parent_exit_or_timeout(tmp_path, parent_exit):
     from test_local_process import tree_command, assert_tree_stopped
-    result = ssh_transport._capture_command(tree_command(tmp_path, True))
-    assert result.returncode == 0
+    launch = ssh_transport.SshLaunch(tree_command(tmp_path, parent_exit), None, ("test",))
+    result = ssh_transport.capture_launch(launch, timeout_ms=None if parent_exit else 300)
+    assert result.returncode == (0 if parent_exit else None)
+    assert result.timed_out is not parent_exit
     assert b'parent ready' in result.stdout
     assert result.cleanup_error is None
     assert_tree_stopped(tmp_path)
@@ -115,7 +118,8 @@ def test_binary_capture_cancellation_ends_silent_process_without_business_deadli
     def call():
         with request_context(cancelled):
             entered.set()
-            return ssh_transport._capture_command([sys.executable, '-c', 'import time; time.sleep(10)'])
+            return ssh_transport.capture_launch(ssh_transport.SshLaunch(
+                [sys.executable, '-c', 'import time; time.sleep(10)'], None, ("test",)))
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(call)
         assert entered.wait(1)
@@ -134,7 +138,9 @@ def test_binary_capture_keeps_completed_result_when_cleanup_fails():
         stop(self, **kwargs)
         raise OSError('cleanup fixture')
     with mock.patch.object(OwnedProcess, 'stop', fail_cleanup):
-        result = ssh_transport._capture_command([sys.executable, '-c', "import sys; sys.stdout.buffer.write(b'completed\\n'); raise SystemExit(9)"])
+        result = ssh_transport.capture_launch(ssh_transport.SshLaunch(
+            [sys.executable, '-c', "import sys; sys.stdout.buffer.write(b'completed\\n'); raise SystemExit(9)"],
+            None, ("test",)))
     assert result.returncode == 9 and result.stdout == b'completed\n'
     assert 'cleanup fixture' in result.cleanup_error
 

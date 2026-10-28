@@ -73,6 +73,17 @@ def error_details(exc):
             result["cleanup_error"] = current.cleanup_error
         if getattr(current, "operation_completed", None) is not None:
             result["operation_completed"] = current.operation_completed
+        bootstrap = getattr(current, "bootstrap", None)
+        if isinstance(bootstrap, dict):
+            # Auth maintenance may have changed authorized_keys even though
+            # the caller's business operation has not been submitted.
+            result["bootstrap"] = {
+                key: bootstrap[key] for key in (
+                    "status", "installation", "verification", "key_verified",
+                    "exit_code", "error", "cleanup_error", "profile_saved",
+                    "credential_retained", "credential_ref",
+                ) if key in bootstrap
+            }
         for key in ("exit_code", "stderr_tail"):
             if getattr(current, key, None) is not None:
                 result[key] = getattr(current, key)

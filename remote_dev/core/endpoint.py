@@ -55,6 +55,8 @@ class Endpoint:
     source: dict[str, Any] | None = None
     container: str | None = None
     container_selector: str | None = None
+    auth_ref: str | None = None
+    known_hosts_file: str | None = None
 
     def __post_init__(self):
         from .container_endpoint import validate_container
@@ -134,6 +136,8 @@ class Endpoint:
             payload["ssh_mux"] = self.ssh_mux
         if self.keepalive:
             payload["keepalive"] = True
+        if self.auth_ref:
+            payload["auth_ref"] = self.auth_ref
         return payload
 
 
@@ -300,6 +304,8 @@ def _direct_endpoint(payload: dict[str, Any], *, caller_fields: set[str]) -> End
         runtime_env=bool(payload.get("runtime_env", True)),
         runtime_env_file=str(runtime_env_file) if runtime_env_file else None,
         identity_file=str(payload["identity_file"]) if payload.get("identity_file") else None,
+        auth_ref=str(payload["auth_ref"]) if payload.get("auth_ref") else None,
+        known_hosts_file=str(payload["known_hosts_file"]) if payload.get("known_hosts_file") else None,
         connect_timeout_ms=_connect_timeout_ms(payload, caller_fields),
         ssh_mux=_optional_bool(payload, "ssh_mux", caller_fields),
         keepalive=_bool_field(payload, "keepalive", caller_fields, False),
@@ -514,6 +520,8 @@ def _endpoint_from_resolver(entry: RegisteredResolver, payload: dict[str, Any]) 
             "runtime_env",
             "runtime_env_file",
             "identity_file",
+            "auth_ref",
+            "known_hosts_file",
             "connect_timeout_ms",
             "ssh_mux",
             "keepalive",

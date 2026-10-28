@@ -74,6 +74,41 @@ def test_error_certainty_survives_wrapped_exception():
     assert details["category"] == "rpc_send"
 
 
+def test_auth_maintenance_facts_survive_nested_tools_without_leaking_calls(tmp_path):
+    from remote_dev.auth import events as auth_events
+    configure("remote-dev", root=tmp_path)
+    maintenance = {"auth_ref": "ssh-test", "auth_method": "password",
+                   "bootstrap": {"status": "failed", "installation": "failed", "key_verified": False}}
+
+    @observed_tool("remote.read")
+    def inner():
+        auth_events.record(maintenance)
+        return {"outcome": "success"}
+
+    @observed_tool("remote.bash")
+    def outer(repair):
+        if repair:
+            inner()
+        return {"text": "business succeeded\n", "result": {"outcome": "success"}}
+
+    result = outer(True)
+    assert result["result"]["outcome"] == "success"
+    assert result["result"]["authentication"] == maintenance
+    assert "public-key maintenance failed" in result["text"]
+    assert "authentication" not in outer(False)["result"]
+
+
+def test_auth_installation_facts_do_not_reclassify_unsent_business():
+    original = RemoteExecutionError("key verification timed out",
+                                    category="authentication_timeout", submission_state="not_sent")
+    original.bootstrap = {"installation": "completed", "key_verified": False, "verification": "unknown"}
+    wrapped = RuntimeError("tool failed")
+    wrapped.__cause__ = original
+    details = error_details(wrapped)
+    assert details["submission_state"] == "not_sent"
+    assert details["bootstrap"] == original.bootstrap
+
+
 def test_lost_launch_reply_keeps_original_job_reference(tmp_path, monkeypatch):
     from remote_dev.core import job_ops
     from remote_dev.core.endpoint import resolve_endpoint

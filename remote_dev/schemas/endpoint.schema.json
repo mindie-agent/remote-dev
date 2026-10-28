@@ -13,6 +13,8 @@
     "cwd": {"type": "string"},
     "runtime_env": {"type": "boolean", "default": true},
     "identity_file": {"type": "string"},
+    "auth_ref": {"type": "string", "description": "Reference to a shared user-level authentication profile; never a password."},
+    "known_hosts_file": {"type": "string", "description": "Optional existing SSH host trust file."},
     "connect_timeout_ms": {"type": "integer", "minimum": 1},
     "ssh_mux": {
       "type": "boolean",

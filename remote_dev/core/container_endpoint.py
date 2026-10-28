@@ -57,8 +57,10 @@ def pin_container_endpoint(endpoint, *, timeout_ms=None):
     from .rpc_transport import request
     host = replace(endpoint, container=None, container_selector=None, root="/", cwd="/",
                    runtime_env=False, runtime_env_file=None)
-    row = request(host, "python", _INSPECT, {"container": endpoint.container},
-                  timeout_ms=timeout_ms)
+    from remote_dev.auth import read_only
+    with read_only():
+        row = request(host, "python", _INSPECT, {"container": endpoint.container},
+                      timeout_ms=timeout_ms)
     if row.get("returncode") != 0 or row.get("timed_out") or row.get("cancelled"):
         detail = str(row.get("stderr") or row.get("stdout") or "Docker inspect did not complete")[-4000:]
         raise EndpointError("Cannot resolve existing container " + repr(endpoint.container) + ": " + detail)

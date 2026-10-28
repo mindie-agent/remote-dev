@@ -46,6 +46,8 @@ def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-runtime-env", dest="runtime_env", action="store_false")
     parser.add_argument("--runtime-env-file", dest="runtime_env_file", help="Remote profile script sourced before commands when runtime env is enabled.")
     parser.add_argument("--identity-file")
+    parser.add_argument("--auth-ref", help="Shared user-level SSH authentication reference.")
+    parser.add_argument("--known-hosts-file", help="Use an existing SSH host trust file.")
     parser.add_argument("--connect-timeout-ms", type=int)
     parser.add_argument("--alias", help="Endpoint alias from the endpoint alias files.")
     parser.add_argument(
@@ -80,6 +82,8 @@ def endpoint_payload(args: argparse.Namespace) -> dict[str, Any]:
         "runtime_env",
         "runtime_env_file",
         "identity_file",
+        "auth_ref",
+        "known_hosts_file",
         "connect_timeout_ms",
         "alias",
     ):
@@ -129,7 +133,14 @@ def build_parser(tool: str) -> argparse.ArgumentParser:
     parser.add_argument("--input-json", help="Read complete tool arguments from a JSON file, or '-' for stdin.")
     parser.add_argument("--timeout-ms", type=int, default=None)
     parser.add_argument("--client-context-id")
-    if tool == "bash":
+    if tool == "auth":
+        parser.add_argument("--action", choices=["setup", "status", "forget"], default="setup")
+        secret = parser.add_mutually_exclusive_group()
+        secret.add_argument("--password-env")
+        secret.add_argument("--password-stdin", action="store_true")
+        secret.add_argument("--prompt", action="store_true", help="Read the SSH password once without echo.")
+        parser.add_argument("--no-install-key", dest="install_key", action="store_false", default=True)
+    elif tool == "bash":
         parser.add_argument("--command", "--cmd", dest="command", required=False, help="Shell command (--cmd is the Codex exec_command habit).")
         parser.add_argument("--description")
         parser.add_argument("--yield-time-ms", type=int, default=None, help="Wait for new output or completion, default 10000 ms, then return a session id.")
@@ -258,6 +269,25 @@ def run_tool_main(tool: str, argv: list[str] | None = None) -> int:
     parser = build_parser(tool)
     args = parser.parse_args(argv)
     try:
+        if tool == "auth" and (args.password_stdin or args.prompt):
+            from remote_dev.auth import setup_access
+            import getpass
+            if args.action != "setup":
+                raise ValueError("password input is only valid for auth setup")
+            if args.input_json:
+                raise ValueError("use endpoint flags with --prompt or --password-stdin")
+            password = sys.stdin.readline().rstrip("\r\n") if args.password_stdin else getpass.getpass("SSH password: ")
+            endpoint = resolve_endpoint(endpoint_payload(args))
+            facts = setup_access(endpoint, password=password, identity_file=args.identity_file,
+                                 install_key=args.install_key, timeout_ms=args.timeout_ms or 30000)
+            del password
+            result = make_result(tool="remote.auth", target=endpoint.to_result_target(),
+                                 outcome="success", status=str(facts.get("status") or "ok"),
+                                 summary="SSH authentication setup completed.", extra=facts)
+            return print_payload({"result": result})
+        if tool == "auth":
+            del args.password_stdin
+            del args.prompt
         return print_payload(run_tool(tool, args))
     except EndpointError as exc:
         return print_payload(error_payload(tool, outcome="needs_input", status="endpoint_required", error=str(exc), exception=exc))
@@ -319,6 +349,8 @@ def main(argv: list[str] | None = None) -> int:
 
         return validate_main(rest)
     tool = command.replace("-", "_")
+    if tool == "auth" and rest and rest[0] in {"setup", "status", "forget"}:
+        rest = ["--action", rest[0], *rest[1:]]
     if tool in TOOL_NAMES:
         return run_tool_main(tool, rest)
     _build_root_parser().print_help()

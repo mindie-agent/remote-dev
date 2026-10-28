@@ -73,11 +73,12 @@ class NativeToolSpec:
 
 _ENDPOINT_KEYS = (
     "host", "port", "user", "container", "root", "cwd", "runtime_env",
-    "identity_file", "connect_timeout_ms", "runtime_env_file", "alias",
+    "identity_file", "auth_ref", "known_hosts_file", "connect_timeout_ms", "runtime_env_file", "alias",
 )
 
 def _endpoint_args(args: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: args[key] for key in _ENDPOINT_KEYS if key in args}
+    from remote_dev.core.endpoint import selector_fields
+    return {key: args[key] for key in (*_ENDPOINT_KEYS, *selector_fields()) if key in args}
 
 def _number(value: Any) -> Any:
     """JSON numbers are not booleans; keep integral values integral."""

@@ -59,16 +59,18 @@ def _worker_command(source):
 
 
 class RpcConnection:
-    def __init__(self, endpoint):
-        from .ssh_transport import ssh_command
+    def __init__(self, endpoint, timeout_ms=None):
+        from .ssh_transport import ssh_launch
         endpoint = pin_container_endpoint(endpoint)
         source = (Path(__file__).parents[1] / "processes" / "rpc_worker.py").read_text(encoding="utf-8")
         helper = (Path(__file__).parents[1] / "processes" / "mutation.py").read_text(encoding="utf-8")
         source = source.replace("# REMOTE_DEV_MUTATION_LOCK", helper)
         transport_endpoint = replace(endpoint, ssh_mux=False, keepalive=True)
+        launch = ssh_launch(transport_endpoint, _worker_command(source), timeout_ms=timeout_ms)
         self.owner = OwnedProcess(
-            ssh_command(transport_endpoint, _worker_command(source)),
+            launch.argv,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            **({"env": launch.env} if launch.env is not None else {}),
         )
         self.proc = self.owner.process
         self.write_lock = threading.Lock()
@@ -401,7 +403,8 @@ def _acquire(endpoint, key, *, deadline=None):
         try:
             if retired is not None:
                 retired.close()
-            connection = RpcConnection(endpoint)
+            remaining_ms = None if deadline is None else max(1, math.ceil((deadline - time.monotonic()) * 1000))
+            connection = RpcConnection(endpoint, timeout_ms=remaining_ms)
         except BaseException:
             with _pool_lock:
                 if _pool.get(key) is entry:
@@ -431,8 +434,11 @@ def request(endpoint, kind, source, payload, *, timeout_ms=None):
     # choices separate. Code caches are source-digest keyed; job receipts,
     # locks and cancellation remain per request/job.
     endpoint = pin_container_endpoint(endpoint, timeout_ms=timeout_ms)
+    from remote_dev.auth import connection_identity
+    from remote_dev.auth.policy import repair_allowed
     key = (endpoint.host, endpoint.port, endpoint.user, endpoint.identity_file,
-           endpoint.connect_timeout_ms, endpoint.container)
+           endpoint.connect_timeout_ms, endpoint.container, endpoint.known_hosts_file,
+           connection_identity(endpoint), repair_allowed())
     with get_recorder("remote-dev").operation("rpc.pool.acquire", level="DEBUG"):
         entry = _acquire(endpoint, key, deadline=acquire_deadline)
     acquired = time.monotonic()

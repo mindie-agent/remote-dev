@@ -39,6 +39,8 @@ ENDPOINT_PROPS: dict[str, Any] = {
     "cwd": {"type": "string"},
     "runtime_env": {"type": "boolean", "default": True},
     "identity_file": {"type": "string"},
+    "auth_ref": {"type": "string", "description": "Shared user-level SSH authentication reference from remote_auth. Passwords never belong in endpoint records."},
+    "known_hosts_file": {"type": "string", "description": "Optional existing SSH host trust file; authentication never removes conflicting host keys."},
     "connect_timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional caller connection limit in milliseconds; omitted by default."},
     "runtime_env_file": {"type": "string", "description": "Remote profile script sourced before commands when runtime_env is true."},
     "alias": {"type": "string", "description": "Name from the endpoint alias files."},
@@ -92,6 +94,11 @@ def schema(
 
 
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "remote.auth": schema({
+        "action": {"type": "string", "enum": ["setup", "status", "forget"], "default": "setup"},
+        "password_env": {"type": "string", "description": "Name of a local environment variable to import once into the shared credential store. Never put the password itself here."},
+        "install_key": {"type": "boolean", "default": True, "description": "Install and independently verify a public key; retain the password for recovery. If key authentication remains unavailable, use verified password authentication."},
+    }),
     "remote.read": schema(
         {
             "file_path": {"type": "string"},
@@ -705,6 +712,7 @@ def normalize_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
 
 
 CANONICAL_DESCRIPTIONS: dict[str, str] = {
+    "remote.auth": "Configure shared SSH access, inspect its non-secret status, or forget local credentials. Automatically install and verify a public key, retain password recovery, and support password-only hosts across processes and harnesses.",
     "remote.read": "Read a remote file with native Read-like pagination and a read ledger.",
     "remote.write": "Write a remote file with overwrite support and optional read-ledger concurrency checks.",
     "remote.edit": "Edit a remote file with exact string replacement and optional read-ledger concurrency checks.",

@@ -145,6 +145,33 @@ python -m pytest
 remote-dev validate --local-only
 ```
 
+### 一次录入密码，所有入口共用
+
+`remote-dev` 统一拥有 SSH 认证、公钥维护和凭据存储。coordinator 的服务器注册、npu-top 的连接检查，以及各插件的远端工具都使用这套实现。
+
+```bash
+# 隐藏输入一次密码；验证密码后安装并独立验证公钥
+remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt
+
+# 服务器只允许密码时，保存密码供后续进程使用
+remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt --no-install-key
+
+remote-dev auth status --host 192.0.2.10 --port 22 --user root
+remote-dev bash --host 192.0.2.10 --port 22 --user root --command 'hostname'
+```
+
+配置默认放在当前操作系统用户的 `~/.mindie/ssh`，以准确的 `host + port + user` 区分连接。配置只含 `auth_ref`、凭据引用、所用钥匙、主机信任文件及验证结果；密码统一保存在该目录的 `credentials.json` 中。它们不属于某个聊天、工作目录或 `REMOTE_DEV_STATE_DIR`，因此同一用户更换进程、聊天或插件后可以继续使用。若覆盖 `REMOTE_DEV_AUTH_DIR`，所有入口必须使用同一个目录；主机别名和 IP 不会自动合并为同一身份。
+
+本模块不调用系统钥匙串、凭据保险库或桌面授权程序，不要求系统登录密码、解锁密码或另一把主密码。`credentials.json` 是本地明文秘密文件；POSIX 下管理目录和秘密文件分别使用 `0700`、`0600`，原生 Windows 下使用当前用户配置目录继承的访问控制。私钥也由同一模块维护，不生成需要额外口令的钥匙。部署时应将该目录当作 SSH 私钥目录保护。
+
+首次配置优先验证已有 OpenSSH 身份；需要生成钥匙时，默认使用 `~/.mindie/ssh/keys/id_ed25519`。已保存的恢复密码会保留。公钥被远端拒绝后，普通开发调用会在提交业务命令前验证保存的密码、重新安装并验证同一公钥。修复失败但密码可用时，连接转为密码模式并返回维护结果；不会重放业务命令。只读诊断和监控可使用保存的密码回退，但不会修改远端 `authorized_keys`。主机指纹冲突始终报错。
+
+部署方可用 `REMOTE_DEV_CREDENTIAL_FILE` 显式指定另一个本地秘密文件，所有入口应使用同一配置。`--password-env VARIABLE` 和 MCP `remote.auth` 的 `password_env` 只用于首次导入，后续进程不需要保留该变量；也可从秘密管理器通过 `--password-stdin` 导入。不要把密码放到命令行参数、MCP 参数或聊天文本中。
+
+macOS 和 WSL 使用各自用户主目录下的 `.mindie/ssh`；原生 PowerShell 使用 Windows 用户主目录（通常是 `%USERPROFILE%\.mindie\ssh`）。WSL 与 Windows 原生用户目录相互独立，不会自动混用凭据或 SSH 路径。原生 Windows 沿用本组件的 Git for Windows SSH 客户端要求；WSL 使用发行版内的 OpenSSH。本地锁和进程回收分别使用各平台已有实现，远端公钥安装脚本只在目标 Linux 主机执行。
+
+密码轮换后重新执行 `auth setup --prompt`。`auth forget` 删除该连接的本地配置及保存的密码，不删除远端公钥或共享私钥。一次性验证码、交互式 MFA 和密码过期后的修改流程不属于可保存密码登录。跨操作系统用户不共享凭据。
+
 ---
 
 ## 真实使用场景

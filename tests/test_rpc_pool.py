@@ -14,7 +14,7 @@ from remote_dev.core.errors import RemoteExecutionError
 
 
 class Connection:
-    def __init__(self, endpoint):
+    def __init__(self, endpoint, *, timeout_ms=None):
         self.endpoint = endpoint
         self.closed = False
         self.proc = mock.Mock()
@@ -45,7 +45,7 @@ def invoke(endpoint, payload=None, **kwargs):
 def test_same_endpoint_coalesces_without_blocking_other_endpoint(pool):
     endpoint = Endpoint(host="slow.example", port=22)
     opening, release = threading.Event(), threading.Event()
-    def construct(target):
+    def construct(target, *, timeout_ms=None):
         if target.host == endpoint.host:
             opening.set()
             assert release.wait(5)
@@ -164,7 +164,8 @@ def test_connection_acquisition_cannot_restart_control_budget(pool):
     connection = Connection(endpoint)
     connection.request = mock.Mock(wraps=connection.request)
 
-    def construct(target):
+    def construct(target, *, timeout_ms=None):
+        assert timeout_ms == 100
         clock[0] += 0.075
         return connection
 
@@ -180,7 +181,8 @@ def test_expired_acquisition_does_not_submit_or_cancel_an_operation(pool):
     connection = Connection(endpoint)
     connection.request = mock.Mock(wraps=connection.request)
 
-    def construct(target):
+    def construct(target, *, timeout_ms=None):
+        assert timeout_ms == 100
         clock[0] += 0.2
         return connection
 

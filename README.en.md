@@ -145,6 +145,33 @@ python -m pytest
 remote-dev validate --local-only
 ```
 
+### Enter a password once, reuse it across consumers
+
+`remote-dev` owns SSH authentication, public-key maintenance, and credential storage. Coordinator enrollment, npu-top connection checks, and plugin remote tools use the same implementation.
+
+```bash
+# Read a hidden password once, install a public key, and verify it independently
+remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt
+
+# Persist password access when the server only permits passwords
+remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt --no-install-key
+
+remote-dev auth status --host 192.0.2.10 --port 22 --user root
+remote-dev bash --host 192.0.2.10 --port 22 --user root --command 'hostname'
+```
+
+Profiles live in the local OS user's `~/.mindie/ssh`, keyed by the exact `host + port + user`. They contain `auth_ref`, a credential reference, the selected identity and host-trust file, and verification facts. Passwords are stored in that directory's `credentials.json`. Neither belongs to a chat, workspace, or `REMOTE_DEV_STATE_DIR`, so a new process, chat, or plugin can reuse the same access. Consumers overriding `REMOTE_DEV_AUTH_DIR` must share that directory. Host aliases and IP addresses are separate principals.
+
+The module never calls an OS keychain, credential vault, or desktop authorization program. It requires no system login password, unlock password, or separate master password. `credentials.json` is a local plaintext secret file. Managed directories and secret files use `0700` and `0600` on POSIX; native Windows inherits access controls from the current user's profile directory. The same module maintains private keys without generating an extra passphrase. Protect the directory as you would an SSH private-key directory.
+
+Enrollment first checks existing OpenSSH identities. When a managed key is needed, it uses `~/.mindie/ssh/keys/id_ed25519`. The verified recovery password is retained. If a public key is rejected, a development call verifies the stored password, reinstalls the same key, and verifies it before submitting the business command. If key maintenance fails but the password works, the profile uses password access and reports the maintenance result. Business commands are never replayed. Read-only diagnostics and monitor probes can fall back to the stored password without modifying `authorized_keys`. Host-key conflicts remain errors.
+
+Deployments can explicitly override the secret file with `REMOTE_DEV_CREDENTIAL_FILE`; all consumers must share that configuration. CLI `--password-env VARIABLE` and MCP `remote.auth` `password_env` import a password once; future processes do not need the variable. Secret managers can also use `--password-stdin`. Keep passwords out of command arguments, MCP arguments, and chat text.
+
+macOS and WSL use `.mindie/ssh` under their respective user homes. Native PowerShell uses the Windows user home, normally `%USERPROFILE%\.mindie\ssh`. WSL and native Windows homes remain independent; credentials and SSH paths are not automatically mixed between them. Native Windows retains this component's Git for Windows SSH requirement; WSL uses its distribution's OpenSSH. Locks and process cleanup use existing platform implementations. Public-key installation shell code runs only on the remote Linux target.
+
+After a password rotation, rerun `auth setup --prompt`. `auth forget` removes the local profile and saved password, leaving remote public keys and the shared private key in place. One-time codes, interactive MFA, and expired-password change dialogs cannot be automated using a saved password. Credentials are not shared across OS users.
+
 ---
 
 ## Real-World Usage Examples

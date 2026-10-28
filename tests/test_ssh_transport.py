@@ -97,6 +97,13 @@ def _openssh_G(
 
 
 class SshTransportTests(unittest.TestCase):
+    def test_known_hosts_with_spaces_remains_one_file_in_real_openssh_parser(self):
+        with tempfile.TemporaryDirectory(prefix="ssh user home ") as home:
+            known_hosts = str(Path(home) / "shared trust" / "known_hosts")
+            endpoint = Endpoint("example.invalid", 22, ssh_mux=False, known_hosts_file=known_hosts)
+            parsed, _ = _openssh_G(ssh_transport.ssh_command(endpoint, "true"))
+            self.assertEqual(parsed["userknownhostsfile"], known_hosts)
+
     def test_run_remote_python_uses_rpc_and_parses_json(self) -> None:
         endpoint = Endpoint(host="192.0.2.10", port=22)
         from remote_dev.core import rpc_transport
