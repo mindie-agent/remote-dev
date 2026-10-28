@@ -3,6 +3,7 @@
 [Invariants]
 - Defines `TOOL_SCHEMAS` for all 18 canonical `remote.*` tools, `ALIASES` (portable `remote_*` wire names), `HARNESS_TOOL_ALIASES` (40 native tool habits across 6 Harnesses), and `PARAM_ALIASES`.
 - Keeps aliasable required parameters enforced in `mcp/tools.py` so provider-side JSON Schema validators never reject valid alias-only calls.
+- Advertises conditional endpoint selection in actual endpoint-bound tool descriptions and host/port property descriptions while keeping a plain object schema.
 [Timeouts & Locks]
 - Pure in-memory schema and argument normalization (`normalize_arguments`).
 [Side-Effect Policy]
@@ -14,8 +15,24 @@ from typing import Any
 
 
 ENDPOINT_PROPS: dict[str, Any] = {
-    "host": {"type": "string", "description": "SSH host; must be given together with port unless alias is used."},
-    "port": {"type": "integer", "description": "SSH port; must be given together with host unless alias is used."},
+    "host": {
+        "type": "string",
+        "description": (
+            "Remote SSH host. For a direct endpoint supply host and port "
+            "together; alternatively use an alias or a resolver selector. To "
+            "use the configured default endpoint, omit endpoint selectors; a "
+            "partial host selector does not use the default."
+        ),
+    },
+    "port": {
+        "type": "integer",
+        "description": (
+            "Remote SSH port for a direct endpoint, for example 22. Supply it "
+            "together with host; there is no implicit default. An alias or "
+            "resolver may provide the port instead, or omit endpoint selectors "
+            "to use the configured default endpoint."
+        ),
+    },
     "user": {"type": "string", "default": "root"},
     "container": {"type": "string", "description": "Existing Docker container name or ID on the SSH host. All tools operate inside it; results return a full ID for reuse without another name lookup. No provisioning or managed allocation."},
     "root": {"type": "string", "default": "/"},
@@ -31,11 +48,22 @@ ENDPOINT_PROPS: dict[str, Any] = {
 # session or machine name). Schemas keep additionalProperties open so those
 # keys pass through; the server rejects payloads no resolver claims.
 ENDPOINT_SELECTOR_DESCRIPTION = (
-    "Provide at least one endpoint selector: host and port together, or an "
-    "alias from the endpoint alias files. A consumer-registered resolver may "
-    "claim additional keys; remote-dev does not interpret session, profile, "
-    "or binding identifiers itself. The server validates the selector before "
-    "connecting."
+    "Endpoint selection is conditional: for a direct SSH endpoint provide host "
+    "and port together (port is the SSH port; for example 22; there is no "
+    "implicit default). Alternatively provide an alias from the endpoint alias "
+    "files, or a selector understood by a registered resolver. To use the "
+    "configured default endpoint, omit endpoint selectors; a partial host/port "
+    "selector does not use that default. The server validates the selector "
+    "before connecting."
+)
+
+
+ENDPOINT_TOOL_DESCRIPTION = (
+    "Endpoint selection is conditional: for a direct SSH endpoint provide host "
+    "and port together (port is the SSH port; for example 22; there is no "
+    "implicit default). Alternatively provide an alias or a resolver selector. "
+    "To use the configured default endpoint, omit endpoint selectors; a partial "
+    "host/port selector does not use that default."
 )
 
 
@@ -701,6 +729,20 @@ CANONICAL_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+JOB_BOUND_TOOLS = frozenset({
+    "remote.job_status", "remote.job_tail", "remote.job_output",
+    "remote.job_stop", "remote.job_stdin",
+})
+ENDPOINT_BOUND_TOOLS = frozenset(set(TOOL_SCHEMAS) - JOB_BOUND_TOOLS)
+
+
+def _advertised_description(name: str, base: str) -> str:
+    """Keep conditional endpoint selection visible in tools/list text."""
+    if name in ENDPOINT_BOUND_TOOLS:
+        return base + " " + ENDPOINT_TOOL_DESCRIPTION
+    return base
+
+
 def harness_catalog(profile: str | None = None) -> list[dict[str, Any]]:
     """Return the exact tools/list payload for a trusted harness profile.
 
@@ -719,7 +761,9 @@ def harness_catalog(profile: str | None = None) -> list[dict[str, Any]]:
     # successfully lists them. Advertise the portable aliases to every client;
     # call_tool still accepts canonical dotted names for existing integrations.
     tools = [
-        {"name": alias, "description": CANONICAL_DESCRIPTIONS.get(name, name), "inputSchema": TOOL_SCHEMAS[name]}
+        {"name": alias,
+         "description": _advertised_description(name, CANONICAL_DESCRIPTIONS.get(name, name)),
+         "inputSchema": TOOL_SCHEMAS[name]}
         for alias, name in ALIASES.items()
     ]
     if resolved == CANONICAL_PROFILE:
@@ -728,7 +772,7 @@ def harness_catalog(profile: str | None = None) -> list[dict[str, Any]]:
     for spec in specs_for(resolved).values():
         entry = {
             "name": spec.wire,
-            "description": spec.description,
+            "description": _advertised_description(spec.canonical, spec.description),
             "inputSchema": native_input_schema(spec, ENDPOINT_PROPS, ENDPOINT_SELECTOR_DESCRIPTION),
         }
         # A native name that equals a portable canonical alias (for example

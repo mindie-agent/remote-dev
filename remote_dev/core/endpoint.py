@@ -215,6 +215,19 @@ def _read_endpoint_aliases() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+_ENDPOINT_REPAIR_ACTION = (
+    "Retry with host and port together for a direct SSH endpoint "
+    "(for example host=192.0.2.10 and port=22; port 22 is an example, not an "
+    "implicit default), or use an alias or a registered resolver selector. To "
+    "use the configured default endpoint, omit endpoint selectors; a partial "
+    "host/port selector does not use that default."
+)
+
+
+def _endpoint_repair(missing):
+    return {"missing": list(missing), "action": _ENDPOINT_REPAIR_ACTION}
+
+
 def _field_error(message: str, key: str, caller_fields: set[str]) -> EndpointError:
     return caller_error(message, EndpointError) if key in caller_fields else EndpointError(message)
 
@@ -251,7 +264,9 @@ def _direct_endpoint(payload: dict[str, Any], *, caller_fields: set[str]) -> End
     if not payload.get("host") or "port" not in payload:
         missing = "host" if not payload.get("host") else "port"
         raise caller_error(f"endpoint requires host and port together (missing {missing})",
-                           EndpointError, error_code="endpoint_incomplete", field=missing)
+                           EndpointError, error_code="endpoint_incomplete", field=missing,
+                           repair=_endpoint_repair([key for key in ("host", "port")
+                                                    if not payload.get(key)]))
     try:
         port = int(payload["port"])
     except (TypeError, ValueError) as exc:
@@ -551,12 +566,15 @@ def resolve_endpoint(payload: dict[str, Any]) -> Endpoint:
     if payload.get("host") or payload.get("port"):
         raise caller_error("direct endpoint requires host and port together; no implicit port 22",
                            EndpointError, error_code="endpoint_incomplete",
-                           field="port" if payload.get("host") else "host")
+                           field="port" if payload.get("host") else "host",
+                           repair=_endpoint_repair(["port" if payload.get("host") else "host"]))
     known = ", ".join(selector_fields())
     resolvers = ", ".join(entry.name for entry in registered_resolvers()) or "none"
+    missing = [key for key in ("host", "port") if not payload.get(key)]
     raise caller_error(
         "no endpoint target: provide host and port together, an alias from the "
         f"endpoint alias files, or a selector understood by a registered resolver "
         f"(known selector fields: {known}; registered resolvers: {resolvers})",
         EndpointError, error_code="endpoint_incomplete", field="host",
+        repair=_endpoint_repair(missing),
     )

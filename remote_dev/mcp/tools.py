@@ -2,7 +2,7 @@
 [Role] MCP tool dispatcher, 6-Harness tool/parameter alias router, and `remote://` resource reader (`mcp/tools.py`).
 [Invariants]
 - Exposes 18 canonical `remote.*` tools (`remote_read`..`remote_probe`) and routes 40 native Harness tool aliases (Claude Code, Codex, Kimi, Cursor, Antigravity, DSH) via `canonical_name` and `normalize_arguments`.
-- Validates required fields and `execution_timeout` before endpoint resolution or any external side effect.
+- Validates required fields and `execution_timeout` before endpoint resolution or any external side effect; missing required fields carry bounded repair metadata.
 [Timeouts & Locks]
 - Forwards validated `timeout_ms` to all underlying `core.*_ops` implementations.
 [Side-Effect Policy]
@@ -217,17 +217,21 @@ def _require(
     instead, with an actionable message.
     """
     value = args.get(key)
+    hint = f" (alias: {alias_hint})" if alias_hint else ""
+    missing_repair = {"missing": [key],
+                      "action": f"Retry with {key}{hint} supplied; no remote effect occurred."}
     if key not in args or value is None:
-        hint = f" (alias: {alias_hint})" if alias_hint else ""
-        raise caller_error(f"{tool} requires {key}{hint}", field=key)
+        raise caller_error(f"{tool} requires {key}{hint}", field=key, repair=missing_repair)
     if allow_empty:
         if not isinstance(value, str):
-            hint = f" (alias: {alias_hint})" if alias_hint else ""
-            raise caller_error(f"{tool} requires {key} to be a string{hint}", field=key)
+            raise caller_error(
+                f"{tool} requires {key} to be a string{hint}",
+                field=key, repair={"action": f"Retry with {key}{hint} as a string; "
+                                  "the supplied value is not missing."},
+            )
         return value
     if isinstance(value, str) and not value:
-        hint = f" (alias: {alias_hint})" if alias_hint else ""
-        raise caller_error(f"{tool} requires {key}{hint}", field=key)
+        raise caller_error(f"{tool} requires {key}{hint}", field=key, repair=missing_repair)
     return value
 
 
@@ -261,7 +265,11 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
     args = normalize_arguments(name, args)
     missing = [key for key in TOOL_SCHEMAS[name].get("required", ()) if key not in args]
     if missing:
-        raise caller_error(f"{name} requires {', '.join(missing)}", KeyError, field=missing[0])
+        raise caller_error(
+            f"{name} requires {', '.join(missing)}", KeyError, field=missing[0],
+            repair={"missing": missing,
+                    "action": f"Retry with {', '.join(missing)} supplied; no remote effect occurred."},
+        )
     # Validate before endpoint resolution or any external effect. A normal
     # operation has no total execution limit; timeout aliases are opt-in.
     from remote_dev.core.execution import execution_timeout

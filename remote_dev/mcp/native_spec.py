@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
+from remote_dev.core.errors import caller_error
+
 PROFILE_ENV = "REMOTE_DEV_HARNESS_PROFILE"
 
 CANONICAL_PROFILE = "canonical"
@@ -235,7 +237,12 @@ def validate_native_arguments(spec: NativeToolSpec, args: Mapping[str, Any], all
         if key not in args or args[key] is None:
             if any(alias in args for alias in required_aliases.get(key, ())):
                 continue
-            raise HarnessProfileError(f"{spec.wire} requires {key}", field=key)
+            raise caller_error(
+                f"{spec.wire} requires {key}",
+                HarnessProfileError, field=key,
+                repair={"missing": [key],
+                        "action": f"Retry with {key} supplied; no remote effect occurred."},
+            )
     for key, value in args.items():
         schema = spec.properties.get(key)
         if schema is not None:
