@@ -1,7 +1,10 @@
 """Native claude tool descriptors and argument normalizers.
 
-Schemas/defaults/units are derived from the installed claude artifact; the MCP
-profile validator remains strict and no canonical-compat bypass is applied.
+[Role] Translate the native claude tool contract into canonical remote operations.
+[Invariants] Preserve artifact-derived schemas, defaults and units; validation stays
+strict and never treats local approval controls as remote authorization.
+[Timeouts & Locks] Pure argument normalization; no I/O, waits or locks.
+[Side-Effect Policy] Construct descriptors and argument mappings only.
 """
 from __future__ import annotations
 

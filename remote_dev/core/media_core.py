@@ -111,6 +111,8 @@ def _read_bounded(path: Path, limit: int, label: str) -> bytes:
     """Read a renderer output only after its on-disk size is known to be bounded."""
     try:
         size = path.stat().st_size
+    except TimeoutError:
+        raise
     except OSError as exc:
         raise MediaOpError(f"{label} is missing: {exc}") from exc
     if size > limit:

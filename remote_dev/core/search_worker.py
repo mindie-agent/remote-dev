@@ -292,6 +292,8 @@ def filter_gitignored_paths(base, paths):
     for path in paths:
         try:
             relative = pathlib.Path(path).resolve().relative_to(base_resolved)
+        except TimeoutError:
+            raise
         except (OSError, ValueError):
             continue
         items.append({"path": path, "relpath": str(relative).replace("\\", "/"), "type": "file"})
@@ -413,6 +415,8 @@ def sort_files_by_mtime(lines):
     for index, line in enumerate(lines):
         try:
             mtime = os.stat(line).st_mtime
+        except TimeoutError:
+            raise
         except OSError:
             mtime = 0.0
         entries.append((mtime, index, line))

@@ -12,7 +12,7 @@ from unittest import mock
 import remote_dev.core.job_ops as job_ops
 import remote_dev.core.state_store as state_store
 import remote_dev.mcp.tools as tools
-from remote_dev.core import job_logs
+from remote_dev.core import job_logs, job_results
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core.shell_ops import remote_bash
 from remote_dev.core.preview import MAX_TEXT_CHARS
@@ -264,6 +264,17 @@ class SessionResultPreviewTests(unittest.TestCase):
         self.assertIn("ERR-TAIL", payload["result"]["preview"]["stderr"])
         self.assertIn("remote raw stdout", payload["text"])
         self.assertEqual(payload["result"]["exit_code"], 7)
+
+    def test_cache_preview_deadline_is_not_reported_as_missing_output(self) -> None:
+        row = self._row("HEAD\n", "", state="succeeded", exit_code=0)
+        with mock.patch.object(job_results, "local_stream_preview",
+                               side_effect=TimeoutError("cache preview deadline")):
+            with self.assertRaisesRegex(TimeoutError, "cache preview deadline"):
+                job_ops._session_result(
+                    self.endpoint, json.loads(self.record_path.read_text()), self.record_path,
+                    row, tool="remote.bash", started="2026-10-25T00:00:00Z",
+                    start=0.0, budget=10000, prefer_cache_edges=True,
+                )
 
     def test_preview_degradation_preserves_command_result_and_refs(self) -> None:
         row = self._row("HEAD\n", "ERR\n", state="failed", exit_code=7)
