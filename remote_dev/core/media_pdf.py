@@ -110,6 +110,8 @@ def _pdf_page_count(path: Path, data: bytes) -> int | None:
                 document.close()
             if count > 0:
                 return int(count)
+        except TimeoutError:
+            raise
         except Exception:
             pass
     if _module_available("fitz"):
@@ -123,6 +125,8 @@ def _pdf_page_count(path: Path, data: bytes) -> int | None:
                 document.close()
             if count > 0:
                 return count
+        except TimeoutError:
+            raise
         except Exception:
             pass
     # Last resort for uncompressed PDFs. Compressed page trees may return None.
@@ -243,6 +247,8 @@ def _render_pdf_pdftoppm(
         total_bytes += len(page["data"])
         try:
             output.unlink()
+        except TimeoutError:
+            raise
         except OSError:
             pass
     return pages
@@ -255,6 +261,8 @@ def _loaded_pypdfium2_document(path: Path) -> tuple[Any, int]:
         raise MediaOpError("pypdfium2 is not importable") from exc
     try:
         document = pdfium.PdfDocument(str(path))
+    except TimeoutError:
+        raise
     except Exception as exc:
         raise MediaOpError(f"pypdfium2 could not open the PDF: {exc}") from exc
     count = len(document) if hasattr(document, "__len__") else document.get_page_count()
@@ -331,6 +339,8 @@ def _render_pdf_fitz(
         raise MediaOpError("PyMuPDF is not importable") from exc
     try:
         document = fitz.open(str(pdf_path))
+    except TimeoutError:
+        raise
     except Exception as exc:
         raise MediaOpError(f"PyMuPDF could not open the PDF: {exc}") from exc
     pages: list[dict[str, Any]] = []
@@ -380,6 +390,8 @@ def pdf_page_count(data: bytes) -> dict[str, Any]:
         pdf_path.write_bytes(raw)
         count = _pdf_page_count(pdf_path, raw)
         return {"status": "ok", "page_count": count}
+    except TimeoutError:
+        raise
     except (MediaOpError, OSError, ValueError) as exc:
         return _failed(exc)
     finally:
@@ -455,12 +467,16 @@ def render_pdf(
                     "count": len(rendered_pages),
                     "renderer": renderer_name,
                 }
+            except TimeoutError:
+                raise
             except (MediaOpError, OSError) as exc:
                 failures.append(f"{renderer_name}: {exc}")
         raise MediaOpError(
             "local PDF rendering failed; "
             + ("; ".join(failures) if failures else "no usable renderer")
         )
+    except TimeoutError:
+        raise
     except (MediaOpError, OSError, ValueError) as exc:
         return _failed(exc)
     finally:

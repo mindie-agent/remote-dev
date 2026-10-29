@@ -1,7 +1,7 @@
 """
 [Role] Remote file operations (`remote.read`, `remote.ls`, `remote.write`, `remote.edit`, `remote.multi_edit`) (`file_ops.py`).
 [Invariants]
-- Loads the standalone `remote_file_worker.py` script via `functools.lru_cache(maxsize=1)` (Iron Rule 4 — no giant inline Python string blobs).
+- Bundles standalone file/text worker modules via `functools.lru_cache(maxsize=1)`; no inline Python implementation blobs.
 - Enforces `join_under_root` workspace containment and read-ledger SHA-256 optimistic concurrency on mutations.
 - Preserves succeeded remote mutations if local read-ledger recording fails (`operation_completed=True` via `recording_failure`).
 [Timeouts & Locks]
@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import ast
 from functools import lru_cache
 from remote_dev.observability import observed_tool
 
@@ -33,7 +34,23 @@ from pathlib import Path
 
 @lru_cache(maxsize=1)
 def _remote_file_source() -> str:
-    return Path(__file__).with_name("remote_file_worker.py").read_text(encoding="utf-8")
+    """Bundle maintained modules into one isolated remote program.
+
+    The import block is needed only for direct local/module execution. Remote
+    workers share one namespace, so helper definitions precede the dispatcher.
+    """
+    directory = Path(__file__).parent
+    helpers = (directory / "remote_file_text.py").read_text(encoding="utf-8")
+    worker = (directory / "remote_file_worker.py").read_text(encoding="utf-8")
+    removed = set()
+    for node in ast.parse(worker).body:
+        if (isinstance(node, ast.ImportFrom) and node.module == "__future__"
+                or isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+                and node.test.id == "__package__"):
+            removed.update(range(node.lineno, node.end_lineno + 1))
+    dispatcher = "".join(line for number, line in enumerate(worker.splitlines(keepends=True), 1)
+                         if number not in removed)
+    return helpers + "\n\n" + dispatcher
 
 
 REMOTE_FILE_PY = _remote_file_source()

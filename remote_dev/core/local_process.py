@@ -3,6 +3,7 @@
 [Invariants]
 - POSIX children launch under `_posix_owner.py` in a dedicated session (`start_new_session=True`) with a parent-death pipe guardian; Windows children launch suspended and bind to a `KILL_ON_JOB_CLOSE` Job Object before resuming.
 - `stop()` terminates the entire descendant group and is idempotent after completion.
+- Memory enforcement is separate: a configured Windows Job or joined cgroup v2 is `hard-limit`; all other cases explicitly remain `observed-only`.
 [Timeouts & Locks]
 - Bounded `stop(timeout=5.0)` wait before escalating to `SIGKILL` / `TerminateJobObject`.
 [Side-Effect Policy]
@@ -15,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import select
 import subprocess
 import sys
 import time
@@ -22,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .errors import RemoteExecutionError, record_cleanup_failure
+from .cgroup_memory import MemoryCgroup, memory_limit_report
 
 
 JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
@@ -48,8 +51,10 @@ class OwnedProcess:
             raise ValueError("process ownership controls " + ", ".join(sorted(forbidden)))
         self._closed = False
         self._owner_fd = None
+        self._memory_cgroup = None
         self.max_memory_mb = max_memory_mb
         self._job = _WindowsJob(max_memory_mb=max_memory_mb) if os.name == "nt" else None
+        self.memory_limit = memory_limit_report(max_memory_mb, reason="no memory limit requested")
         options = dict(stdio, cwd=cwd, env=None if env is None else {**os.environ, **env})
         if self._job is None:
             options["start_new_session"] = True
@@ -57,10 +62,16 @@ class OwnedProcess:
             options["creationflags"] = subprocess.CREATE_NO_WINDOW | 0x00000004  # CREATE_SUSPENDED
         try:
             if self._job is None:
+                if max_memory_mb is not None:
+                    self._memory_cgroup, reason = MemoryCgroup.create(max_memory_mb)
+                    self.memory_limit = memory_limit_report(max_memory_mb, reason=reason)
                 self._spawn_posix(list(argv), options)
+                if self._memory_cgroup is not None:
+                    self.memory_limit = memory_limit_report(max_memory_mb, mechanism="cgroup-v2-memory.max")
             else:
                 self.process = subprocess.Popen(list(argv), **options)
                 self._job.assign_and_resume(self.process)
+                self.memory_limit = self._job.memory_limit
         except BaseException as primary:
             process = getattr(self, "process", None)
             try:
@@ -71,6 +82,8 @@ class OwnedProcess:
                         process.wait(timeout=5)
                 elif process is not None:
                     self.stop()
+                elif self._memory_cgroup is not None:
+                    self._memory_cgroup.close()
             except Exception as cleanup_error:
                 record_cleanup_failure(primary, cleanup_error)
             finally:
@@ -88,6 +101,10 @@ class OwnedProcess:
                                 record_cleanup_failure(primary, cleanup_error)
             raise
 
+    @property
+    def memory_limit_mode(self) -> str:
+        return self.memory_limit["mode"]
+
     def _spawn_posix(self, argv, options):
         """Do not release target code until its caller-death guardian exists."""
         owner_read, owner_write = os.pipe()
@@ -99,17 +116,30 @@ class OwnedProcess:
             raise
         try:
             inherited = options.pop("pass_fds", ())
+            ownership = (list(inherited) if self._memory_cgroup is None else
+                         {"pass_fds": list(inherited), "memory_cgroup": str(self._memory_cgroup.path)})
             self.process = subprocess.Popen(
                 [sys.executable, "-I", str(Path(__file__).with_name("_posix_owner.py")),
-                 str(owner_read), str(notify), json.dumps(list(inherited)), *argv],
+                 str(owner_read), str(notify), json.dumps(ownership), *argv],
                 pass_fds=(*inherited, owner_read, notify), **options)
         finally:
             os.close(owner_read)
             os.close(notify)
             if not hasattr(self, "process"):
                 os.close(started)
-        with os.fdopen(started, "rb") as stream:
-            raw = stream.read(1025)
+        raw = bytearray()
+        deadline = time.monotonic() + 5.0
+        try:
+            while len(raw) <= 1024:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([started], [], [], remaining)[0]:
+                    raise TimeoutError("owned process startup receipt timed out")
+                chunk = os.read(started, 1025 - len(raw))
+                if not chunk:
+                    break
+                raw.extend(chunk)
+        finally:
+            os.close(started)
         if len(raw) > 1024:
             raise RemoteExecutionError("owned process startup receipt exceeds its bound",
                                        category="process_start", submission_state="uncertain")
@@ -118,7 +148,12 @@ class OwnedProcess:
         except (ValueError, UnicodeError) as exc:
             raise RemoteExecutionError("owned process could not confirm target startup",
                                        category="process_start", submission_state="uncertain") from exc
-        if receipt != {"started": True}:
+        expected = {"started": True}
+        if self._memory_cgroup is not None:
+            expected["memory_cgroup"] = str(self._memory_cgroup.path)
+        if receipt != expected:
+            if isinstance(receipt, dict) and receipt.get("memory_error"):
+                raise RuntimeError("owned process memory enforcement failed: " + receipt["memory_error"])
             number = receipt.get("errno") if isinstance(receipt, dict) else None
             if isinstance(receipt, dict) and receipt.get("started") is False and type(number) is int:
                 raise OSError(number, os.strerror(number), os.fspath(argv[0]))
@@ -154,6 +189,7 @@ class OwnedProcess:
 
     def stop(self, *, force: bool = True, timeout: float = 5.0) -> int | None:
         if self._closed:
+            self._close_memory_cgroup(timeout)
             return self.process.returncode
         if self._job is not None:
             try:
@@ -187,7 +223,23 @@ class OwnedProcess:
                         raise
                     record_cleanup_failure(primary, cleanup_error)
         self._closed = True
+        self._close_memory_cgroup(timeout)
         return result
+
+    def _close_memory_cgroup(self, timeout):
+        cgroup = getattr(self, "_memory_cgroup", None)
+        if cgroup is None:
+            return
+        try:
+            cgroup.close(timeout=timeout)
+        except Exception as exc:
+            # A cleanup failure must not erase the target's confirmed exit
+            # status. Keep both facts inspectable and permit cleanup retries.
+            self.memory_limit["cleanup_error"] = str(exc)
+            self.memory_limit["exit_code"] = self.process.returncode
+            raise
+        self._memory_cgroup = None
+        self.memory_limit.pop("cleanup_error", None)
 
     def __enter__(self) -> OwnedProcess:
         return self
@@ -212,6 +264,7 @@ class _WindowsJob:
 
         self.ctypes = ctypes
         self.max_memory_mb = max_memory_mb
+        self.memory_limit = memory_limit_report(max_memory_mb, reason="no memory limit requested")
 
         class BasicLimits(ctypes.Structure):
             _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
@@ -256,6 +309,8 @@ class _WindowsJob:
                 value.job_memory = int(max_memory_mb) * 1024 * 1024
             value.basic.flags = flags
             self.check(limits(self.handle, 9, ctypes.byref(value), ctypes.sizeof(value)))
+            if max_memory_mb is not None:
+                self.memory_limit = memory_limit_report(max_memory_mb, mechanism="windows-job-memory")
         except BaseException:
             self.close()
             raise

@@ -121,6 +121,8 @@ def _probe_image_dimensions(path: Path) -> tuple[int, int] | None:
     """Probe dimensions from the produced file itself, with sips as a fallback."""
     try:
         data = path.read_bytes()
+    except TimeoutError:
+        raise
     except OSError:
         return None
     dimensions = _image_dimensions_from_bytes(data)
@@ -321,6 +323,8 @@ def _pillow_render_image(
         return destination
     except MediaOpError:
         raise
+    except TimeoutError:
+        raise
     except Exception as exc:  # Pillow raises a variety of decode/save errors.
         raise MediaOpError(f"Pillow failed to crop/resize image: {exc}") from exc
 
@@ -490,6 +494,8 @@ def render_image(
                         "resized": resized,
                         "cropped": cropped,
                     }
+                except TimeoutError:
+                    raise
                 except (MediaOpError, OSError, struct.error) as exc:
                     failures.append(f"{name}: {exc}")
             raise MediaOpError(
@@ -498,6 +504,8 @@ def render_image(
             )
         finally:
             _cleanup_temp(temporary)
+    except TimeoutError:
+        raise
     except (MediaOpError, OSError, ValueError, struct.error) as exc:
         return _failed(exc)
 

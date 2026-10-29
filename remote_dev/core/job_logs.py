@@ -459,6 +459,8 @@ def _record_cursors(record: Mapping[str, Any]) -> dict[str, int]:
 def _cache_size(path: Path) -> int | None:
     try:
         return path.stat().st_size
+    except TimeoutError:
+        raise
     except OSError:
         return None
 

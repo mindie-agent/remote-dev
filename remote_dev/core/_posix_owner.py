@@ -4,6 +4,7 @@
 [Invariants]
 - Run as an isolated interpreter, never imported into a threaded caller.
 - Forks the guardian before the target starts and stays in the same process group until caller pipe EOF.
+- A configured cgroup is joined before either fork or target launch; descendants inherit memory.max.
 [Timeouts & Locks]
 - Blocks on `select.select([owner_pipe])` until caller EOF, then sends `SIGTERM`, waits `0.2s`, and escalates to `SIGKILL`.
 [Side-Effect Policy]
@@ -14,6 +15,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+from pathlib import Path
 import select
 import signal
 import subprocess
@@ -22,11 +24,23 @@ import sys
 
 def main() -> int:
     owner_pipe, notification = int(sys.argv[1]), int(sys.argv[2])
-    inherited = tuple(json.loads(sys.argv[3]))
+    ownership = json.loads(sys.argv[3])
+    inherited = tuple(ownership["pass_fds"] if isinstance(ownership, dict) else ownership)
+    memory_cgroup = ownership.get("memory_cgroup") if isinstance(ownership, dict) else None
     command = sys.argv[4:]
     group = os.getpid()
     if not command or os.getpgrp() != group:
         return 125
+    if memory_cgroup:
+        try:
+            with (Path(memory_cgroup) / "cgroup.procs").open("w") as members:
+                members.write(str(group))
+        except TimeoutError:
+            raise
+        except OSError as exc:
+            os.write(notification, json.dumps({"started": False, "memory_error": str(exc)}).encode())
+            os.close(notification)
+            return 125
     if os.fork() == 0:
         os.close(notification)
         # A graceful stop must not disarm the guardian before all children
@@ -62,7 +76,10 @@ def main() -> int:
         os.write(notification, json.dumps({"started": False, "errno": exc.errno}).encode("ascii"))
         os.close(notification)
         return 127
-    os.write(notification, b'{"started":true}')
+    receipt = {"started": True}
+    if memory_cgroup:
+        receipt["memory_cgroup"] = memory_cgroup
+    os.write(notification, json.dumps(receipt).encode())
     os.close(notification)
     child.wait()
     if child.returncode < 0:

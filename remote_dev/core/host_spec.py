@@ -1,11 +1,11 @@
 """
 [Role] Cross-platform hardware specification probing (`HostHardwareSpec`), workload resource expectation normalization (`WorkloadExpectation`), and spec-driven local vs. remote placement (`host_spec.py`).
 [Invariants]
-- Probing works identically across Windows (`os.name == "nt"`), macOS (`sys.platform == "darwin"`), and Linux (`sys.platform.startswith("linux")`) with zero subprocess launches.
+- Probe available kernel interfaces (Win32 memory, procfs, sysctl); OS labels are descriptive and never decide execution placement.
 - Placement compares `WorkloadExpectation` (`cpu_cores`, `memory_mb`, `vram_mb`/`hbm_mb`, `npu_count`) purely against candidate `HostHardwareSpec` headroom (`mem_usable_mb`, `cpu_cores`, `vram_free_mb`, `free_npus`); never rejects local execution based on OS platform name.
 - `npu_count`/`free_npus` count independently leasable physical execution units (A3 dual-die cards contribute two), matching the Phy-IDs a host queue leases; `free_phy_ids` is authoritative when present, including an empty list.
 - `vram_free_mb` is observed free HBM only. Total capacity is never substituted for an unobserved free figure; `vram_free_observed` reports which of the two a caller received.
-- Worker concurrency is bounded by both usable CPU cores and usable memory (`max(1, min(usable_cpu_cores, mem_usable_mb // max(1, per_worker_memory_mb)))`).
+- Worker concurrency is bounded by usable CPU and memory; fewer than one worker worth of capacity yields zero, never a forced launch.
 [Timeouts & Locks]
 - Pure in-memory / kernel syscall (`GlobalMemoryStatusEx`, `/proc/meminfo`, `sysconf`/`sysctl`) probing and placement evaluation; zero subprocess launches, zero network I/O, zero locks.
 [Side-Effect Policy]
@@ -20,11 +20,12 @@ import math
 import os
 from pathlib import Path
 import sqlite3
-import subprocess
 import sys
 import time
 from typing import Any
 import uuid
+
+from .cgroup_memory import capacity_limits
 
 TIER_PRESETS: dict[str, dict[str, Any]] = {
     "light": {"tier": "light", "cpu_cores": 1, "memory_mb": 512, "vram_mb": 0, "npu_count": 0, "expected_seconds": 15.0, "per_worker_memory_mb": 256},
@@ -118,30 +119,45 @@ def _parse_macos_vm_stat(content: str, total_mb: int) -> tuple[int, int]:
 
 
 def _probe_macos_memory_mb() -> tuple[int, int]:
-    total_bytes, page_size = 0, 4096
-    try:
-        pages, page_size = int(os.sysconf("SC_PHYS_PAGES")), int(os.sysconf("SC_PAGE_SIZE"))
-        total_bytes = max(0, pages * page_size)
-    except TimeoutError:
-        raise
-    except (AttributeError, ValueError, OSError):
-        pass
-    total_mb = total_bytes // (1024 * 1024)
-    try:
-        import ctypes
+    """Use observed sysctl and Mach VM counters, without guessed free memory."""
+    import ctypes
 
-        libc, reclaimable_pages = ctypes.CDLL(None), 0
-        for name in (b"vm.page_free_count", b"vm.page_speculative_count", b"vm.page_pageable_internal_count"):
-            val, size = ctypes.c_uint64(0), ctypes.c_size_t(8)
-            if libc.sysctlbyname(name, ctypes.byref(val), ctypes.byref(size), None, 0) == 0:
-                reclaimable_pages += int(val.value)
-        if reclaimable_pages > 0:
-            return total_mb, min(total_mb, (reclaimable_pages * page_size) // (1024 * 1024))
-    except TimeoutError:
-        raise
-    except (subprocess.SubprocessError, OSError, ValueError):
-        pass
-    return total_mb, int(total_mb * 0.65)
+    libc = ctypes.CDLL(None)
+    if not hasattr(libc, "sysctlbyname") or not hasattr(libc, "host_statistics64"):
+        raise OSError("kernel has no sysctl/Mach memory interface")
+    total, size = ctypes.c_uint64(), ctypes.c_size_t(8)
+    if libc.sysctlbyname(b"hw.memsize", ctypes.byref(total), ctypes.byref(size), None, 0):
+        raise OSError("hw.memsize could not be observed")
+    page_size = ctypes.c_uint(0)
+    host = libc.mach_host_self()
+    try:
+        if libc.host_page_size(host, ctypes.byref(page_size)):
+            raise OSError("Mach VM page size could not be observed")
+        # The stable first revision is 38 natural_t units. Speculative pages
+        # are already counted in free_count; never credit them twice.
+        counters = (ctypes.c_uint32 * 38)()
+        count = ctypes.c_uint32(38)
+        if libc.host_statistics64(host, 4, counters, ctypes.byref(count)):
+            raise OSError("Mach VM free pages could not be observed")
+        available_pages = int(counters[0]) + int(counters[2])
+        total_mb = int(total.value) // (1024 * 1024)
+        return total_mb, min(total_mb, available_pages * page_size.value // (1024 * 1024))
+    finally:
+        task = ctypes.c_uint32.in_dll(libc, "mach_task_self_").value
+        libc.mach_port_deallocate(task, host)
+
+
+def _probe_memory_mb() -> tuple[int, int]:
+    """Choose a real kernel capability instead of an operating-system label."""
+    import ctypes
+
+    if hasattr(ctypes, "windll"):
+        return _probe_windows_memory_mb()
+    try:
+        content = Path("/proc/meminfo").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _probe_macos_memory_mb()
+    return _parse_linux_meminfo(content)
 
 
 def _compute_usable_memory_mb(
@@ -266,7 +282,7 @@ def probe_local_hardware_spec(*, desktop_reserve_ratio: float = 0.20, min_deskto
             raise
         except OSError:
             load_1m = 0.0
-    elif os_family == "linux":
+    elif Path("/proc/loadavg").is_file():
         try:
             load_1m = max(0.0, float(Path("/proc/loadavg").read_text(encoding="utf-8").split()[0]))
         except TimeoutError:
@@ -281,24 +297,26 @@ def probe_local_hardware_spec(*, desktop_reserve_ratio: float = 0.20, min_deskto
         vm = psutil.virtual_memory()
         mem_total_mb, mem_available_mb = int(vm.total // (1024 * 1024)), int(vm.available // (1024 * 1024))
     except ImportError:
-        try:
-            if os_family == "windows":
-                mem_total_mb, mem_available_mb = _probe_windows_memory_mb()
-            elif os_family == "macos":
-                mem_total_mb, mem_available_mb = _probe_macos_memory_mb()
-            else:
-                mem_total_mb, mem_available_mb = _parse_linux_meminfo(Path("/proc/meminfo").read_text(encoding="utf-8"))
-        except TimeoutError:
-            raise
-        except (subprocess.SubprocessError, OSError, ValueError):
-            mem_total_mb = mem_available_mb = 0
+        mem_total_mb, mem_available_mb = _probe_memory_mb()
     if mem_total_mb <= 0:
         raise RuntimeError("Failed to probe local host memory specification")
 
-    usable_cpu_cores = round(max(1.0, float(cpu_cores) - load_1m), 2)
+    cpu_quota, cgroup_memory_mb = capacity_limits()
+    cpu_available = max(0.0, float(cpu_cores) - load_1m)
+    if hasattr(os, "sched_getaffinity"):
+        cpu_available = min(cpu_available, len(os.sched_getaffinity(0)))
+    if cpu_quota is not None:
+        cpu_available = min(cpu_available, cpu_quota)
+    usable_cpu_cores = round(cpu_available, 2)
     mem_usable_mb = _compute_usable_memory_mb(
         mem_total_mb, mem_available_mb, desktop_reserve_ratio=desktop_reserve_ratio, min_desktop_reserve_mb=min_desktop_reserve_mb
     )
+    # Desktop reserve belongs to the host observation. Apply the container's
+    # remaining allowance afterwards, rather than deducting host-sized reserve
+    # from a small container a second time.
+    if cgroup_memory_mb is not None:
+        mem_available_mb = min(mem_available_mb, cgroup_memory_mb)
+        mem_usable_mb = min(mem_usable_mb, cgroup_memory_mb)
     return HostHardwareSpec(os_family, cpu_cores, usable_cpu_cores, mem_total_mb, mem_available_mb, mem_usable_mb).to_dict()
 
 
@@ -436,10 +454,10 @@ def normalize_workload_expectation(spec: Mapping[str, Any] | WorkloadExpectation
 
 def recommend_worker_count(hardware_spec: Mapping[str, Any], *, per_worker_memory_mb: int = 512, max_workers: int | None = None) -> int:
     usable_cpu = float(hardware_spec.get("usable_cpu_cores") if hardware_spec.get("usable_cpu_cores") is not None else (hardware_spec.get("cpu_cores") or 1))
-    cpu_cap = max(1, int(math.floor(usable_cpu)))
+    cpu_cap = max(0, int(math.floor(usable_cpu)))
     mem_usable = int(hardware_spec.get("mem_usable_mb") if hardware_spec.get("mem_usable_mb") is not None else (hardware_spec.get("mem_available_mb") or hardware_spec.get("mem_total_mb") or 0))
-    workers = max(1, min(cpu_cap, max(0, mem_usable) // max(1, int(per_worker_memory_mb or 512))))
-    return max(1, min(workers, int(max_workers))) if max_workers is not None else workers
+    workers = min(cpu_cap, max(0, mem_usable) // max(1, int(per_worker_memory_mb or 512)))
+    return max(0, min(workers, int(max_workers))) if max_workers is not None else workers
 
 
 def _candidate_shortfall(spec: Mapping[str, Any], exp: Mapping[str, Any]) -> dict[str, dict[str, int]]:
@@ -448,6 +466,8 @@ def _candidate_shortfall(spec: Mapping[str, Any], exp: Mapping[str, Any]) -> dic
         req, avail = int(exp[exp_key]), int(spec.get(spec_key) or 0)
         if req > avail:
             gaps[exp_key] = {"required": req, "available": avail}
+    if recommend_worker_count(spec, per_worker_memory_mb=int(exp["per_worker_memory_mb"])) == 0:
+        gaps["workers"] = {"required": 1, "available": 0}
     return gaps
 
 

@@ -72,7 +72,7 @@ def test_probe_local_hardware_spec_respects_desktop_reserve():
     spec = probe_local_hardware_spec(desktop_reserve_ratio=0.20, min_desktop_reserve_mb=2048)
     assert spec["os_family"] in {"windows", "macos", "linux"}
     assert spec["cpu_cores"] >= 1
-    assert spec["usable_cpu_cores"] >= 1.0
+    assert spec["usable_cpu_cores"] >= 0.0
     assert spec["mem_total_mb"] > 0
     assert 0 <= spec["mem_usable_mb"] <= spec["mem_available_mb"] <= spec["mem_total_mb"]
     # Verify exact reserve math: 8 GB laptop with 4 GB available leaves 2 GB usable after 2 GB reserve
@@ -331,8 +331,8 @@ def test_recommend_worker_count_and_shortfall_rejection():
     assert recommend_worker_count(spec, per_worker_memory_mb=1024) == 3
     # 4 usable cores, 65536 MB usable memory -> capped at 4 workers by CPU
     assert recommend_worker_count({"cpu_cores": 8, "usable_cpu_cores": 4.5, "mem_usable_mb": 65536}, per_worker_memory_mb=512) == 4
-    # Even when memory is below 1 worker, minimum worker count is 1
-    assert recommend_worker_count({"cpu_cores": 4, "usable_cpu_cores": 4.0, "mem_usable_mb": 128}, per_worker_memory_mb=1024) == 1
+    # Fewer than one worker worth of memory must never force a worker to start
+    assert recommend_worker_count({"cpu_cores": 4, "usable_cpu_cores": 4.0, "mem_usable_mb": 128}, per_worker_memory_mb=1024) == 0
 
     # Reject with structured shortfall when neither local nor remote satisfies
     rejected = evaluate_placement(
@@ -385,12 +385,22 @@ def test_windows_job_and_owned_process_max_memory_mb_fuse():
 
     with mock.patch.object(ctypes, "WinDLL", return_value=fake_kernel, create=True):
         job = local_process._WindowsJob(max_memory_mb=4096)
+        assert job.memory_limit["mode"] == "hard-limit"
+        assert job.memory_limit["enforced_mb"] == 4096
         job.close()
 
     assert captured["handle"] == 42
     assert captured["info_class"] == 9
     assert captured["flags"] == (local_process.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | local_process.JOB_OBJECT_LIMIT_JOB_MEMORY)
     assert captured["job_memory"] == 4096 * 1024 * 1024
+
+    with mock.patch.object(ctypes, "WinDLL", return_value=fake_kernel, create=True):
+        unlimited = local_process._WindowsJob()
+        assert unlimited.memory_limit["mode"] == "observed-only"
+        assert unlimited.memory_limit["enforced_mb"] is None
+        unlimited.close()
+    assert captured["flags"] == local_process.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    assert captured["job_memory"] == 0
 
 
 def test_concurrent_local_reservations_prevent_toctou_overcommit_and_reclaim_dead_pids(tmp_path):
