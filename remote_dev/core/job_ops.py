@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from remote_dev.core.command_policy import blocked_command_payload, inspect_dangerous_command
 from remote_dev.core.endpoint import DEFAULT_CWD, DEFAULT_ROOT, Endpoint
 from remote_dev.core.container_endpoint import FULL_CONTAINER_ID, pinned_endpoint
 from remote_dev.core import container_endpoint as _container_endpoint
@@ -155,7 +156,6 @@ def _endpoint_from_record(record: dict[str, Any]) -> Endpoint:
     return endpoint
 
 
-
 def endpoint_from_job_record(record: dict[str, Any]) -> Endpoint:
     return _endpoint_from_record(record)
 
@@ -164,8 +164,6 @@ def _load_record(endpoint: Endpoint | None, job_id: str) -> tuple[Endpoint, dict
     job_id = require_job_id(job_id)
     if endpoint is not None:
         path = job_record_path(endpoint, job_id)
-        import json
-
         try:
             content = path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -173,8 +171,7 @@ def _load_record(endpoint: Endpoint | None, job_id: str) -> tuple[Endpoint, dict
                 f"unknown remote job id for endpoint: {job_id}", FileNotFoundError,
                 error_code="unknown_job", field="job_id"
             ) from None
-        data = json.loads(content)
-        return endpoint, data, path
+        return endpoint, json.loads(content), path
     found = find_job_record(job_id)
     if not found:
         raise caller_error(f"unknown remote job id: {job_id}", FileNotFoundError,
@@ -184,25 +181,13 @@ def _load_record(endpoint: Endpoint | None, job_id: str) -> tuple[Endpoint, dict
 
 
 def _start_failure(
-    endpoint: Endpoint,
-    *,
-    cwd: str,
-    started: str,
-    start: float,
-    job_id: str,
-    outcome: str,
-    status: str,
-    summary: str,
-    error: str,
+    endpoint: Endpoint, *, cwd: str, started: str, start: float, job_id: str,
+    outcome: str, status: str, summary: str, error: str,
 ) -> dict[str, Any]:
     result = make_result(
-        tool="remote.bash",
-        target={**endpoint.to_result_target(), "cwd": cwd},
-        outcome=outcome,  # type: ignore[arg-type]
-        status=status,
-        summary=summary,
-        started_at=started,
-        duration_ms=_duration_ms(start),
+        tool="remote.bash", target={**endpoint.to_result_target(), "cwd": cwd},
+        outcome=outcome, status=status, summary=summary,  # type: ignore[arg-type]
+        started_at=started, duration_ms=_duration_ms(start),
         extra={"error": error[-4000:], "job_id": job_id},
     )
     return _failure_payload(result, text=summary + "\n")
@@ -259,9 +244,13 @@ def start_remote_job(
     job_id: str | None = None, yield_time_ms: int | None = None,
     max_output_tokens: int | None = None, tty: bool = False, wait: bool = False,
     shell: str | None = None, login: bool | None = None, foreground: bool = False,
+    confirm: bool = False,
 ) -> dict[str, Any]:
     started, start = utc_now_iso(), time.monotonic()
     env = env or {}
+    dangerous = inspect_dangerous_command(command, confirm=confirm, env=env)
+    if dangerous is not None:
+        return blocked_command_payload(tool="remote.bash", target=endpoint.to_result_target(), command=command, match=dangerous, job_id=job_id)
     runtime_enabled = endpoint.runtime_env if runtime_env is None else runtime_env
     job_id = require_job_id(job_id or new_job_id())
     cwd = cwd or endpoint.effective_cwd
@@ -696,7 +685,12 @@ def _output_budget_bytes(max_output_tokens: int | None) -> int:
 @pinned_endpoint
 def remote_job_stdin(endpoint: Endpoint | None, *, job_id: str, chars: str | None = None,
                      eof: bool = False, yield_time_ms: int | None = None,
-                     max_output_tokens: int | None = None) -> dict[str, Any]:
+                     max_output_tokens: int | None = None, confirm: bool = False) -> dict[str, Any]:
+    if chars:
+        dangerous = inspect_dangerous_command(chars, confirm=confirm)
+        if dangerous is not None:
+            target = endpoint.to_result_target() if endpoint is not None else {"kind": "job_session", "job_id": job_id}
+            return blocked_command_payload(tool="remote.job_stdin", target=target, command=chars, match=dangerous, job_id=job_id)
     endpoint, record, path = _load_record(endpoint, job_id)
     started, start = utc_now_iso(), time.monotonic()
     budget = _output_budget_bytes(max_output_tokens)

@@ -78,6 +78,76 @@ class RemoteBashTests(unittest.TestCase):
         finally:
             state_store.substrate_root = original_state_root  # type: ignore[assignment]
 
+    def test_dangerous_commands_blocked_until_confirmed(self) -> None:
+        endpoint = Endpoint(host="192.0.2.10", port=22)
+        calls: list[str] = []
+
+        def fake_control(_endpoint, _job_id, action, **parameters):
+            calls.append(parameters["spec"]["command"])
+            return {"state": "succeeded", "quiet": True, "stdout": "done\n", "result": {"exit_code": 0}}
+
+        blocked_cases = [
+            ("npu-smi set -t reset -i 0 -c 0", "npu_reset"),
+            ("echo y | sudo -E /usr/local/Ascend/driver/tools/npu-smi set -i 2 -c 0 -t reset", "npu_reset"),
+            ("reboot", "reboot"),
+            ("sudo shutdown -r now", "reboot"),
+            ("systemctl reboot", "reboot"),
+            ("init 6", "reboot"),
+            ("bash -lc 'sudo reboot'", "reboot"),
+            ("shutdown -h now", "shutdown"),
+            ("sudo poweroff", "shutdown"),
+            ("halt -p", "shutdown"),
+            ("systemctl poweroff", "shutdown"),
+            ("init 0", "shutdown"),
+        ]
+        safe_cases = [
+            "npu-smi info",
+            "npu-smi info -t usages -i 0 -c 0",
+            "docker restart mindie-container",
+            "docker stop mindie-container",
+            "podman restart test",
+            "systemctl restart docker",
+            "systemctl stop nginx",
+            "shutdown -c",
+            "echo 'do not reboot or shutdown'",
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(__import__("os").environ, REMOTE_DEV_STATE_DIR=tmp), \
+             unittest.mock.patch.object(job_ops, "control", fake_control):
+            for cmd, expected_category in blocked_cases:
+                with self.subTest(cmd=cmd):
+                    payload = shell_ops.remote_bash(endpoint, command=cmd)
+                    self.assertEqual(payload["result"]["outcome"], "blocked")
+                    self.assertEqual(payload["result"]["status"], "confirmation_required")
+                    self.assertEqual(payload["result"]["category"], expected_category)
+                    self.assertTrue(payload["result"]["requires_human_confirmation"])
+                    self.assertEqual(payload["result"]["error_details"]["submission_state"], "not_sent")
+            self.assertEqual(calls, [])
+
+            for cmd in safe_cases:
+                with self.subTest(safe_cmd=cmd):
+                    payload = shell_ops.remote_bash(endpoint, command=cmd)
+                    self.assertEqual(payload["result"]["outcome"], "success")
+
+            # Confirmed execution via confirm=True, env, or inline prefix succeeds
+            payload_flag = shell_ops.remote_bash(
+                endpoint, command="npu-smi set -t reset -i 0 -c 0", confirm=True
+            )
+            self.assertEqual(payload_flag["result"]["outcome"], "success")
+
+            payload_inline = shell_ops.remote_bash(
+                endpoint, command="REMOTE_DEV_CONFIRM_DANGEROUS=1 sudo reboot"
+            )
+            self.assertEqual(payload_inline["result"]["outcome"], "success")
+
+            # job_stdin also intercepts dangerous input unless confirmed
+            stdin_blocked = job_ops.remote_job_stdin(
+                endpoint, job_id="job-20261030T000000Z-12345678", chars="npu-smi set -t reset -i 0 -c 0\n"
+            )
+            self.assertEqual(stdin_blocked["result"]["outcome"], "blocked")
+            self.assertEqual(stdin_blocked["result"]["status"], "confirmation_required")
+            self.assertEqual(stdin_blocked["result"]["category"], "npu_reset")
+
 
 if __name__ == "__main__":
     unittest.main()

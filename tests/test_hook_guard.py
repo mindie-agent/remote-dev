@@ -48,6 +48,22 @@ class HookGuardTests(unittest.TestCase):
         self.assertEqual(codex_proc.returncode, 0)
         self.assertEqual(json.loads(codex_proc.stdout)["decision"], "allow")
 
+    def test_guard_blocks_unconfirmed_npu_reset_reboot_and_shutdown(self) -> None:
+        for cmd in (
+            "npu-smi set -t reset -i 0 -c 0",
+            "ssh root@1.2.3.4 'npu-smi set -t reset -i 0 -c 0'",
+            "sudo reboot",
+            "shutdown -h now",
+            "poweroff",
+        ):
+            decision = inspect_command(cmd)
+            self.assertTrue(decision.blocked, cmd)
+            self.assertIn("confirmation", decision.reason or "")
+
+        self.assertFalse(inspect_command("REMOTE_DEV_CONFIRM_DANGEROUS=1 npu-smi set -t reset -i 0 -c 0").blocked)
+        self.assertFalse(inspect_command("docker restart my-container").blocked)
+        self.assertFalse(inspect_command("npu-smi info").blocked)
+
 
 if __name__ == "__main__":
     unittest.main()

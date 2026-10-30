@@ -196,13 +196,12 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "job_id": {"type": "string", "description": "Optional caller-assigned job id. Native Codex session ids are numeric; the profile generates a numeric id and returns it as session_id."},
             "shell": {"type": "string", "description": "Shell binary for this command. Defaults to the remote user's bash."},
             "login": {"type": "boolean", "description": "Run the selected shell with login semantics (-l); native Codex default is true."},
+            "confirm": {"type": "boolean", "default": False, "description": "Explicitly confirm execution of a dangerous host/device command (npu-smi reset, reboot, shutdown) after obtaining human approval."},
         },
         description="command is required; the alias cmd / CommandLine is also accepted (Codex / Antigravity habit). Enforced by the server so alias-only calls pass provider schema validation.",
     ),
-    "remote.glob": schema(
-        {
-            "pattern": {"type": "string"},
-            "path": {"type": "string"},
+    "remote.glob": schema({
+            "pattern": {"type": "string"}, "path": {"type": "string"},
             "limit": {"type": "integer", "minimum": 0, "description": "Maximum paths after offset. 0 means no match-count limit for native Kimi Glob; canonical callers normally use a positive page size."},
             "offset": {"type": "integer", "minimum": 0, "description": "Number of matching paths to skip before the limit."},
             "respect_gitignore": {"type": "boolean", "description": "Omit paths ignored by .gitignore. Uses git check-ignore when the remote tree is a git worktree; otherwise applies .gitignore rules in-process."},
@@ -282,9 +281,9 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "lines": {"type": "integer", "maximum": 500, "description": "Line count when action='tail'."},
             "max_output_tokens": {"type": "integer", "description": "Output token cap for action='tail'; the preview keeps the newest max(4, min(32768, 2 * tokens)) UTF-8 bytes. Omitted means the global text preview limit applies."},
             "stream": {"type": "string", "enum": ["stdout", "stderr", "both"], "description": "Log stream for action='tail'. Defaults to both."},
+            "confirm": {"type": "boolean", "default": False, "description": "Explicitly confirm dangerous stdin commands when action='send_input'."},
         },
-        ["job_id"],
-        endpoint_selector=False,
+        ["job_id"], endpoint_selector=False,
     ),
     "remote.job_tail": schema(
         {
@@ -318,9 +317,9 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "eof": {"type": "boolean", "description": "Close the job's stdin after writing chars. Programs waiting for end-of-input then finish. If the write was only partially accepted (stdin_buffer_full), the close is deferred: resend the unwritten remainder with eof=true."},
             "yield_time_ms": {"type": "integer", "description": "After writing, keep polling up to this many milliseconds for output or completion before returning new output."},
             "max_output_tokens": {"type": "integer", "description": "Cap the new output returned by this call, counted as four UTF-8 bytes/token across text and structured previews, shared by stdout/stderr; metadata separate. Skipped bytes are not lost: the read cursor only advances past what was returned."},
+            "confirm": {"type": "boolean", "default": False, "description": "Explicitly confirm execution of a dangerous host/device command written to stdin after obtaining human approval."},
         },
-        ["job_id"],
-        endpoint_selector=False,
+        ["job_id"], endpoint_selector=False,
         description="Poll any session; non-empty chars requires writable stdin. Endpoint and identity are restored from the job record. Stop via remote.job_stop.",
     ),
     "remote.artifact_manifest": schema({"remote_path": {"type": "string"}}, ["remote_path"]),

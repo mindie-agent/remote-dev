@@ -41,6 +41,10 @@
         "max_output_tokens": {
           "type": "integer",
           "minimum": 1
+        },
+        "confirm": {
+          "type": "boolean",
+          "default": false
         }
       }
     }

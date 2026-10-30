@@ -147,6 +147,7 @@ def build_parser(tool: str) -> argparse.ArgumentParser:
         parser.add_argument("--max-output-tokens", type=int, default=None, help="Cap returned output, 4 UTF-8 bytes per token across both output projections; metadata separate.")
         parser.add_argument("--tty", action="store_true", help="Allocate a real remote PTY (24 rows, 80 columns); Ctrl-C signals the foreground group.")
         parser.add_argument("--env", action="append")
+        parser.add_argument("--confirm", action="store_true", default=None, help="Confirm execution of a dangerous host/device command after human approval.")
     elif tool == "read":
         parser.add_argument("--file-path", required=False)
         parser.add_argument("--offset", type=int, default=1)
@@ -211,6 +212,7 @@ def build_parser(tool: str) -> argparse.ArgumentParser:
             parser.add_argument("--eof", action="store_true", help="Close the job's stdin after writing.")
             parser.add_argument("--yield-time-ms", type=int, default=None, help="Poll up to this long before returning new output.")
             parser.add_argument("--max-output-tokens", type=int, default=None, help="Cap returned new output, 4 UTF-8 bytes per token across both output projections; metadata separate.")
+            parser.add_argument("--confirm", action="store_true", default=None, help="Confirm execution of a dangerous host/device command written to stdin.")
         if tool == "job_stop":
             parser.add_argument("--force", action="store_true")
     elif tool in {"artifact_manifest", "artifact_pull", "artifact_push"}:
