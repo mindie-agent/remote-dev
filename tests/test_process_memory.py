@@ -24,7 +24,7 @@ def test_cgroup_capacity_uses_tightest_ancestor_headroom_and_cpu_quota(monkeypat
         '/cg/memory.max': str(16 * 1024**3),
         '/cg/memory.current': str(13 * 1024**3),
     }
-    monkeypatch.setattr(Path, 'read_text', lambda path, **_: values[str(path)])
+    monkeypatch.setattr(Path, 'read_text', lambda path, **_: values[path.as_posix()])
     assert cgroup_memory.capacity_limits((Path('/cg/worker'), Path('/cg'))) == (2.5, 3072)
     values['/cg/memory.current'] = str(17 * 1024**3)
     assert cgroup_memory.capacity_limits((Path('/cg/worker'), Path('/cg'))) == (2.5, 0)
@@ -35,7 +35,7 @@ def test_cgroup_discovery_resolves_a_subtree_mount(monkeypatch):
         '/proc/self/cgroup': '0::/user.slice/session.scope/job\n',
         '/proc/self/mountinfo': '31 26 0:28 /user.slice/session.scope /sys/fs/cgroup rw - cgroup2 cgroup rw\n',
     }
-    monkeypatch.setattr(Path, 'read_text', lambda path, **_: values[str(path)])
+    monkeypatch.setattr(Path, 'read_text', lambda path, **_: values[path.as_posix()])
     assert cgroup_memory.current_cgroup() == (Path('/sys/fs/cgroup/job'), Path('/sys/fs/cgroup'))
 
 
