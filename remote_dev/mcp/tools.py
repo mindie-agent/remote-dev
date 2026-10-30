@@ -318,6 +318,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             shell=args.get("shell"),
             login=args.get("login"),
             foreground=foreground,
+            confirm=bool(args.get("confirm", False)),
         )
     if name == "remote.read":
         assert endpoint is not None
@@ -452,6 +453,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
                 endpoint,
                 job_id=str(args["job_id"]),
                 chars=args.get("chars") if args.get("chars") is None else str(args.get("chars")),
+                confirm=bool(args.get("confirm", False)),
             )
         if job_action == "tail":
             return remote_job_tail(
@@ -494,6 +496,7 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             eof=bool(args.get("eof", False)),
             yield_time_ms=int(args["yield_time_ms"]) if args.get("yield_time_ms") is not None else None,
             max_output_tokens=int(args["max_output_tokens"]) if args.get("max_output_tokens") is not None else None,
+            confirm=bool(args.get("confirm", False)),
         )
     if name == "remote.artifact_manifest":
         assert endpoint is not None

@@ -205,6 +205,9 @@ def dsh_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normali
     normalized["_foreground"] = not bool(native.get("run_in_background", False))
     payload = call_canonical("remote.bash", normalized)
     result = payload.get("result") or {}
+    if result.get("outcome") == "blocked":
+        result["tool"] = spec.wire
+        return payload
     state = str(result.get("state") or result.get("status") or "unknown")
     preview = result.get("preview") or {}
     stdout = str(preview.get("stdout") or "")

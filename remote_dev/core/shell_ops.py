@@ -1,6 +1,7 @@
 """
 [Role] Entry point for `remote.bash` command execution over the durable job supervisor (`shell_ops.py`).
 [Invariants]
+- Intercepts unconfirmed destructive host/NPU commands (`npu_reset`, `reboot`, `shutdown`) via `command_policy` before any remote dispatch.
 - Validates that `cwd` is an absolute path under `endpoint.root` before delegating to `start_remote_job`, returning an actionable `endpoint_patch` hint when blocked.
 [Timeouts & Locks]
 - Forwards `timeout_ms` and `yield_time_ms` to `start_remote_job`.
@@ -14,6 +15,7 @@ from remote_dev.observability import observed_tool
 import shlex
 from typing import Any
 
+from .command_policy import blocked_command_payload, inspect_dangerous_command
 from .endpoint import Endpoint
 from .container_endpoint import pinned_endpoint
 from .errors import PathPolicyError
@@ -58,9 +60,19 @@ def remote_bash(
     job_id: str | None = None,
     shell: str | None = None,
     login: bool | None = None,
+    confirm: bool = False,
 ) -> dict[str, Any]:
     env = env or {}
     runtime_enabled = endpoint.runtime_env if runtime_env is None else runtime_env
+    dangerous = inspect_dangerous_command(command, confirm=confirm, env=env)
+    if dangerous is not None:
+        return blocked_command_payload(
+            tool="remote.bash",
+            target=endpoint.to_result_target(),
+            command=command,
+            match=dangerous,
+            job_id=job_id,
+        )
     try:
         cwd = assert_under_root(cwd or endpoint.effective_cwd, endpoint.root)
     except PathPolicyError as exc:
@@ -87,5 +99,5 @@ def remote_bash(
         endpoint, command=command, cwd=cwd, env=env, timeout_ms=timeout_ms,
         runtime_env=runtime_enabled, description=description, yield_time_ms=yield_time_ms,
         max_output_tokens=max_output_tokens, tty=tty, wait=wait, job_id=job_id,
-        shell=shell, login=login, foreground=foreground,
+        shell=shell, login=login, foreground=foreground, confirm=confirm,
     )
