@@ -51,7 +51,7 @@ flowchart LR
 
 ## Quick Start
 
-Copy and paste this sentence to Claude Code, Codex, Kimi Code, or DeepSeek Harness (DSH) so your AI Agent installs and configures `remote-dev` automatically:
+Copy and paste this sentence to Claude Code, Codex, Kimi Code, DeepSeek Harness (DSH), or Google Antigravity (AGY) so your AI Agent installs and configures `remote-dev` automatically:
 
 ```text
 Please install and configure https://github.com/mindie-agent/remote-dev for me

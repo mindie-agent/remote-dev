@@ -51,7 +51,7 @@ flowchart LR
 
 ## 快速开始
 
-直接复制下面这句话发给你的 Claude Code、Codex、Kimi Code 或 DeepSeek Harness（DSH），由 AI Agent 自动完成安装和 MCP 配置：
+直接复制下面这句话发给你的 Claude Code、Codex、Kimi Code、DeepSeek Harness（DSH）或 Google Antigravity（AGY），由 AI Agent 自动完成安装和 MCP 配置：
 
 ```text
 帮我安装并配置 https://github.com/mindie-agent/remote-dev
