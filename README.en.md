@@ -51,9 +51,7 @@ flowchart LR
 
 ## Quick Start
 
-### Option 1: One-Sentence Setup via Your AI Agent (Recommended)
-
-Copy and paste this sentence to Claude Code, Codex, Kimi Code, or Cursor and let your agent install and configure `remote-dev` automatically:
+Copy and paste this sentence to Claude Code, Codex, Kimi Code, or DeepSeek Harness (DSH) so your AI Agent installs and configures `remote-dev` automatically:
 
 ```text
 Please install and configure https://github.com/mindie-agent/remote-dev for me
@@ -123,28 +121,6 @@ If you are an AI Agent receiving the prompt above, follow these exact steps to s
 4. **Notify the User**: Let the user know setup is complete and they can start a new session and ask you to inspect or edit files on any SSH host or Docker container.
 
 </details>
-
-### Option 2: One-Line Terminal Install for Humans
-
-With Python `>= 3.11` and `uv` installed, you can install the CLI globally or run the MCP server in one line:
-
-```bash
-# Install the remote-dev CLI globally
-uv tool install git+https://github.com/mindie-agent/remote-dev@main
-
-# Or launch the stdio MCP server directly without installing
-uvx --from git+https://github.com/mindie-agent/remote-dev@main remote-dev server
-```
-
-For local development from a Git checkout:
-
-```bash
-git clone https://github.com/mindie-agent/remote-dev.git
-cd remote-dev
-uv pip install -e ".[test]"
-python -m pytest
-remote-dev validate --local-only
-```
 
 ### Enter a password once, reuse it across consumers
 
@@ -240,8 +216,9 @@ Create an `endpoints.local.json` file in your working directory (or set `REMOTE_
 | `LS` | `remote.ls` (`remote_ls`) | `remote-dev ls` | List entries in a remote directory |
 | `apply_patch` | `remote.apply_patch` (`remote_apply_patch`) | `remote-dev apply-patch` | Atomically apply Codex patches or Git unified diffs on the remote target |
 | `write_stdin` | `remote.job_stdin` (`remote_job_stdin`) | `remote-dev job-stdin` | Send stdin characters to an interactive remote session or poll unread output |
-| *(Background Jobs)* | `remote.job_status` / `job_tail` / `job_stop` | `remote-dev job-status` / `job-tail` / `job-stop` | Check job status, read incremental logs, or stop an entire managed process tree |
+| *(Background Jobs)* | `remote.job_status` / `job_tail` / `job_output` / `job_stop` | `remote-dev job-status` / `job-tail` / `job-output` / `job-stop` | Check job status, read incremental or full logs, or stop an entire managed process tree |
 | *(File Sync)* | `remote.artifact_manifest` / `artifact_pull` / `artifact_push` | `remote-dev artifact-manifest` / `artifact-pull` / `artifact-push` | Stream files or directories in 1 MiB chunks with SHA-256 verification and atomic replacement |
+| *(SSH Auth & Profiles)* | `remote.auth` (`remote_auth`) | `remote-dev auth` | Configure, inspect, verify, or remove shared SSH keys and authentication profiles in `~/.mindie/ssh` |
 | *(Endpoint Probing)* | `remote.probe` / `remote.context_snapshot` | `remote-dev probe` / `context-snapshot` | Inspect remote OS, Python environment, working directory, and SSH phase timings |
 
 ---

@@ -51,9 +51,7 @@ flowchart LR
 
 ## 快速开始
 
-### 方式一：直接把链接发给你的 Agent 自动安装/接入（推荐）
-
-复制下面这句话发给你的 Claude Code、Codex、Kimi Code 或 Cursor，让它自己完成安装和 MCP 配置：
+直接复制下面这句话发给你的 Claude Code、Codex、Kimi Code 或 DeepSeek Harness（DSH），由 AI Agent 自动完成安装和 MCP 配置：
 
 ```text
 帮我安装并配置 https://github.com/mindie-agent/remote-dev
@@ -62,7 +60,7 @@ flowchart LR
 <details>
 <summary>🤖 <b>AI Agent 自动安装与配置协议（Instructions for AI Agents）</b></summary>
 
-如果你是收到上述指令的 AI Agent，请按以下步骤为当前用户完成 `remote-dev` 的环境检查与自动接入：
+如果你是收到上述指令的 AI Agent，请按以下步骤完成 `remote-dev` 的环境检查与自动接入：
 
 1. **检查基础依赖**：确认本机有 Python `>= 3.11`、`uv`（或 `pip`）以及 `ssh` 客户端（Windows 需 Git for Windows 内置的 `usr/bin/ssh.exe`）。
 2. **按当前宿主客户端写入 MCP 配置**（无需提前克隆仓库，`uvx` 会直接拉取运行）：
@@ -123,28 +121,6 @@ flowchart LR
 4. **告知用户**：提示用户开启新会话即可直接说“帮我连上 `<服务器IP>` 看看 `/work` 目录下的代码”。
 
 </details>
-
-### 方式二：终端手动一行安装（适合人类开发者）
-
-只要本机装有 Python `>= 3.11` 和 `uv`，一行命令即可把 `remote-dev` 命令行装到全局或直接启动：
-
-```bash
-# 安装为全局 CLI 工具
-uv tool install git+https://github.com/mindie-agent/remote-dev@main
-
-# 或者免安装，直接用 uvx 启动 MCP Server
-uvx --from git+https://github.com/mindie-agent/remote-dev@main remote-dev server
-```
-
-如果你想克隆源码做本地开发：
-
-```bash
-git clone https://github.com/mindie-agent/remote-dev.git
-cd remote-dev
-uv pip install -e ".[test]"
-python -m pytest
-remote-dev validate --local-only
-```
 
 ### 一次录入密码，所有入口共用
 
@@ -240,8 +216,9 @@ remote-dev job-stop --host 192.0.2.10 --port 22 --job-id <job_id>
 | `LS` | `remote.ls` (`remote_ls`) | `remote-dev ls` | 列出远端目录下的文件和子目录 |
 | `apply_patch` | `remote.apply_patch` (`remote_apply_patch`) | `remote-dev apply-patch` | 把 Codex 格式补丁或标准 Git Unified Diff 原子打到远端代码树上 |
 | `write_stdin` | `remote.job_stdin` (`remote_job_stdin`) | `remote-dev job-stdin` | 给正在运行的远端交互式命令输入内容，或者传空字符串轮询最新输出 |
-| *(后台任务管理)* | `remote.job_status` / `job_tail` / `job_stop` | `remote-dev job-status` / `job-tail` / `job-stop` | 查看远端后台任务跑完没、实时追日志、或者连同子进程一起干净停掉 |
+| *(后台任务管理)* | `remote.job_status` / `job_tail` / `job_output` / `job_stop` | `remote-dev job-status` / `job-tail` / `job-output` / `job-stop` | 查看远端后台任务跑完没、实时追增量日志或读取完整日志、或者连同子进程一起干净停掉 |
 | *(文件/目录互传)* | `remote.artifact_manifest` / `artifact_pull` / `artifact_push` | `remote-dev artifact-manifest` / `artifact-pull` / `artifact-push` | 按 1 MiB 分块流式上传/下载文件或目录树，自带 SHA-256 校验，传完原子替换 |
+| *(认证与凭据管理)* | `remote.auth` (`remote_auth`) | `remote-dev auth` | 配置、查看、校验或清理 `~/.mindie/ssh` 下的远端 SSH 免密公钥与认证档案 |
 | *(环境探测)* | `remote.probe` / `remote.context_snapshot` | `remote-dev probe` / `context-snapshot` | 查看远端系统版本、Python 路径、当前目录以及 SSH 各阶段连接耗时 |
 
 ---
