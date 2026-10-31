@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Release-v0.11.2-blue" alt="Release v0.11.2">
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI-00ADD8" alt="MCP & CLI">
   <img src="https://img.shields.io/badge/Target-Linux%20SSH%20%26%20Docker-2496ED?logo=docker&logoColor=white" alt="Linux SSH & Docker">
@@ -30,7 +31,7 @@
 - **19 个核心远端工具（外加 60+ 个 6-Harness 原生别名），跟本地习惯一模一样**：支持通过 MCP Server（`remote-dev server`）挂载给 AI 助手，也支持在终端用 `remote-dev <子命令>` 直接调用。
 - **免折腾直通远端 Docker 容器**：不用在容器里装 `sshd` 或任何后台服务，只要在参数里加上 `container="你的容器名"`，文件读写、打补丁、跑测试就全在容器里执行。
 - **SSH 长连接复用 + 独立控制通道**：内置跨平台（macOS / Linux / 原生 Windows）SSH 连接池。哪怕后台正在跑几个小时的大编译或压测，你随时查状态（`job_status`）、看实时日志（`job_tail`）或紧急喊停（`job_stop`）都秒回、绝不卡死。
-- **安全稳妥，不瞎猜、不乱试**：每次操作必须明确指定连哪台机器，不会因为你在哪个本地目录就偷偷连错服务器；改文件前如果发现文件被别人动过会自动拦截提醒；如果网络半路断开、不确定命令到底跑没跑上，会如实报告“状态不确定”，绝不自作主张再跑一遍闯祸。
+- **安全稳妥，不瞎猜、不乱试**：每次操作必须明确指定连哪台机器，不会因为你在哪个本地目录就偷偷连错服务器；内置**高危破坏性命令拦截保护**（`v0.11.2+` 自动拦截 `npu-smi set -t reset` 芯片复位、`reboot` / `shutdown` 整机重启关机、磁盘格式化等危险指令）；改文件前如果发现文件被别人动过会自动拦截提醒；如果网络半路断开、不确定命令到底跑没跑上，会如实报告“状态不确定”，绝不自作主张再跑一遍闯祸。
 
 ```mermaid
 flowchart LR
@@ -147,30 +148,23 @@ remote-dev validate --local-only
 
 ### 一次录入密码，所有入口共用
 
-`remote-dev` 统一拥有 SSH 认证、公钥维护和凭据存储。coordinator 的服务器注册、npu-top 的连接检查，以及各插件的远端工具都使用这套实现。
+`remote-dev` 提供统一的 SSH 认证、公钥维护与凭据管理底座。只需录入一次密码，`mindie-coordinator` 的机器注册、`npu-top` 的连通性检查以及各宿主插件的远端工具即可直接共用同一套连接配置：
 
 ```bash
-# 隐藏输入一次密码；验证密码后安装并独立验证公钥
+# 隐藏输入一次密码；验证通过后自动安装并验证免密公钥
 remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt
 
-# 服务器只允许密码时，保存密码供后续进程使用
+# 若目标服务器仅允许密码登录，可保存密码供后续进程直接复用
 remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt --no-install-key
 
+# 查看认证状态或直接执行远端命令
 remote-dev auth status --host 192.0.2.10 --port 22 --user root
 remote-dev bash --host 192.0.2.10 --port 22 --user root --command 'hostname'
 ```
 
-配置默认放在当前操作系统用户的 `~/.mindie/ssh`，以准确的 `host + port + user` 区分连接。配置只含 `auth_ref`、凭据引用、所用钥匙、主机信任文件及验证结果；密码统一保存在该目录的 `credentials.json` 中。它们不属于某个聊天、工作目录或 `REMOTE_DEV_STATE_DIR`，因此同一用户更换进程、聊天或插件后可以继续使用。若覆盖 `REMOTE_DEV_AUTH_DIR`，所有入口必须使用同一个目录；主机别名和 IP 不会自动合并为同一身份。
-
-本模块不调用系统钥匙串、凭据保险库或桌面授权程序，不要求系统登录密码、解锁密码或另一把主密码。`credentials.json` 是本地明文秘密文件；POSIX 下管理目录和秘密文件分别使用 `0700`、`0600`，原生 Windows 下使用当前用户配置目录继承的访问控制。私钥也由同一模块维护，不生成需要额外口令的钥匙。部署时应将该目录当作 SSH 私钥目录保护。
-
-首次配置优先验证已有 OpenSSH 身份；需要生成钥匙时，默认使用 `~/.mindie/ssh/keys/id_ed25519`。已保存的恢复密码会保留。公钥被远端拒绝后，普通开发调用会在提交业务命令前验证保存的密码、重新安装并验证同一公钥。修复失败但密码可用时，连接转为密码模式并返回维护结果；不会重放业务命令。只读诊断和监控可使用保存的密码回退，但不会修改远端 `authorized_keys`。主机指纹冲突始终报错。
-
-部署方可用 `REMOTE_DEV_CREDENTIAL_FILE` 显式指定另一个本地秘密文件，所有入口应使用同一配置。`--password-env VARIABLE` 和 MCP `remote.auth` 的 `password_env` 只用于首次导入，后续进程不需要保留该变量；也可从秘密管理器通过 `--password-stdin` 导入。不要把密码放到命令行参数、MCP 参数或聊天文本中。
-
-macOS 和 WSL 使用各自用户主目录下的 `.mindie/ssh`；原生 PowerShell 使用 Windows 用户主目录（通常是 `%USERPROFILE%\.mindie\ssh`）。WSL 与 Windows 原生用户目录相互独立，不会自动混用凭据或 SSH 路径。原生 Windows 沿用本组件的 Git for Windows SSH 客户端要求；WSL 使用发行版内的 OpenSSH。本地锁和进程回收分别使用各平台已有实现，远端公钥安装脚本只在目标 Linux 主机执行。
-
-密码轮换后重新执行 `auth setup --prompt`。`auth forget` 删除该连接的本地配置及保存的密码，不删除远端公钥或共享私钥。一次性验证码、交互式 MFA 和密码过期后的修改流程不属于可保存密码登录。跨操作系统用户不共享凭据。
+- **跨会话与跨组件持久化（`~/.mindie/ssh`）**：认证档案按精确的 `host + port + user` 存储在当前系统用户的 `~/.mindie/ssh` 目录（Windows 原生环境为 `%USERPROFILE%\.mindie\ssh`），与单个聊天窗口或工作目录解耦，切换终端、会话或插件后无需重新录入。可通过 `REMOTE_DEV_AUTH_DIR` 或 `REMOTE_DEV_CREDENTIAL_FILE` 自定义路径。
+- **公钥优先与自动修复**：首次配置优先验证现有 OpenSSH 密钥，需要时自动在 `~/.mindie/ssh/keys/id_ed25519` 生成无口令私钥并完成公钥安装。若后续远端公钥失效，开发调用会在下发业务命令前自动用已保存的密码修复公钥或回退为密码模式（只读探测与监控直接回退密码认证，不改写远端 `authorized_keys`）。
+- **无弹窗本地文件保护**：凭据保存在本地 `credentials.json`（POSIX 目录权限 `0700`、文件权限 `0600`），不调用系统钥匙串、不触发桌面授权弹窗。支持通过 `--prompt`、`--password-stdin` 或一次性环境变量（`--password-env VARIABLE` / MCP `password_env`）安全导入，请勿将明文密码直接写入命令行参数或聊天文本。密码更新后重新运行 `auth setup --prompt` 即可，执行 `remote-dev auth forget` 可随时清除本地保存的配置与密码。
 
 ---
 

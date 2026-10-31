@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Release-v0.11.2-blue" alt="Release v0.11.2">
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI-00ADD8" alt="MCP & CLI">
   <img src="https://img.shields.io/badge/Target-Linux%20SSH%20%26%20Docker-2496ED?logo=docker&logoColor=white" alt="Linux SSH & Docker">
@@ -30,7 +31,7 @@ When using AI coding agents like Claude Code, Codex, Kimi Code, or Cursor to wor
 - **18 Canonical Remote Tools (+ 40+ 6-Harness Native Aliases) Matching Local Habits**: Available both as a single stdio MCP server (`remote-dev server`) and as one-to-one CLI subcommands (`remote-dev <subcommand>`).
 - **Work Inside Existing Docker Containers with Zero Setup**: Pass `container="<name-or-id>"` on any SSH host endpoint to read, edit, patch, and run commands directly inside a running container — no container SSH daemon or extra agent install required.
 - **Pooled SSH Connections + Dedicated Control Lane**: Reuses persistent binary SSH RPC connections across macOS, Linux, and native Windows. Two dedicated control workers (`job_status` / `job_tail` / `job_stop` / `job_stdin`) ensure you can always check logs or stop a runaway task even when all regular execution slots are busy.
-- **Safe by Design — No Guessing, No Blind Retries**: Targets are always resolved from explicit arguments (never guessed from your local folder). Files read in the current session are protected against accidental concurrent overwrites. If a connection drops mid-flight and `remote-dev` cannot tell whether a command already ran, it reports `uncertain` instead of blindly re-running it.
+- **Safe by Design — No Guessing, No Blind Retries**: Targets are always resolved from explicit arguments (never guessed from your local folder). Built-in **destructive command guards** (`v0.11.2+`) automatically block dangerous operations such as `npu-smi set -t reset`, host `reboot` / `shutdown`, and root filesystem wipes before dispatch. Files read in the current session are protected against accidental concurrent overwrites, and if a connection drops mid-flight, `remote-dev` reports `uncertain` instead of blindly re-running a mutating command.
 
 ```mermaid
 flowchart LR
@@ -147,30 +148,23 @@ remote-dev validate --local-only
 
 ### Enter a password once, reuse it across consumers
 
-`remote-dev` owns SSH authentication, public-key maintenance, and credential storage. Coordinator enrollment, npu-top connection checks, and plugin remote tools use the same implementation.
+`remote-dev` provides the shared SSH authentication, public-key bootstrap, and credential store used across `mindie-coordinator` server enrollment, `npu-top` connection checks, and host plugin remote tools:
 
 ```bash
-# Read a hidden password once, install a public key, and verify it independently
+# Enter a password once, install an SSH public key, and verify key-based login
 remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt
 
-# Persist password access when the server only permits passwords
+# Or persist password authentication when the server only permits passwords
 remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt --no-install-key
 
+# Check authentication status or run a remote command
 remote-dev auth status --host 192.0.2.10 --port 22 --user root
 remote-dev bash --host 192.0.2.10 --port 22 --user root --command 'hostname'
 ```
 
-Profiles live in the local OS user's `~/.mindie/ssh`, keyed by the exact `host + port + user`. They contain `auth_ref`, a credential reference, the selected identity and host-trust file, and verification facts. Passwords are stored in that directory's `credentials.json`. Neither belongs to a chat, workspace, or `REMOTE_DEV_STATE_DIR`, so a new process, chat, or plugin can reuse the same access. Consumers overriding `REMOTE_DEV_AUTH_DIR` must share that directory. Host aliases and IP addresses are separate principals.
-
-The module never calls an OS keychain, credential vault, or desktop authorization program. It requires no system login password, unlock password, or separate master password. `credentials.json` is a local plaintext secret file. Managed directories and secret files use `0700` and `0600` on POSIX; native Windows inherits access controls from the current user's profile directory. The same module maintains private keys without generating an extra passphrase. Protect the directory as you would an SSH private-key directory.
-
-Enrollment first checks existing OpenSSH identities. When a managed key is needed, it uses `~/.mindie/ssh/keys/id_ed25519`. The verified recovery password is retained. If a public key is rejected, a development call verifies the stored password, reinstalls the same key, and verifies it before submitting the business command. If key maintenance fails but the password works, the profile uses password access and reports the maintenance result. Business commands are never replayed. Read-only diagnostics and monitor probes can fall back to the stored password without modifying `authorized_keys`. Host-key conflicts remain errors.
-
-Deployments can explicitly override the secret file with `REMOTE_DEV_CREDENTIAL_FILE`; all consumers must share that configuration. CLI `--password-env VARIABLE` and MCP `remote.auth` `password_env` import a password once; future processes do not need the variable. Secret managers can also use `--password-stdin`. Keep passwords out of command arguments, MCP arguments, and chat text.
-
-macOS and WSL use `.mindie/ssh` under their respective user homes. Native PowerShell uses the Windows user home, normally `%USERPROFILE%\.mindie\ssh`. WSL and native Windows homes remain independent; credentials and SSH paths are not automatically mixed between them. Native Windows retains this component's Git for Windows SSH requirement; WSL uses its distribution's OpenSSH. Locks and process cleanup use existing platform implementations. Public-key installation shell code runs only on the remote Linux target.
-
-After a password rotation, rerun `auth setup --prompt`. `auth forget` removes the local profile and saved password, leaving remote public keys and the shared private key in place. One-time codes, interactive MFA, and expired-password change dialogs cannot be automated using a saved password. Credentials are not shared across OS users.
+- **Shared Across Sessions & Components (`~/.mindie/ssh`)**: Profiles are keyed by exact `host + port + user` under `~/.mindie/ssh` (`%USERPROFILE%\.mindie\ssh` on native Windows), independent of individual chats or working directories. You can customize the location via `REMOTE_DEV_AUTH_DIR` or `REMOTE_DEV_CREDENTIAL_FILE`.
+- **Key-First with Automatic Recovery**: Setup checks existing OpenSSH keys first and generates `~/.mindie/ssh/keys/id_ed25519` when needed. If a remote public key is later rejected, development calls automatically verify the saved password and repair the key (or fall back to password mode) before dispatching your command, while read-only probes fall back to password auth without touching remote `authorized_keys`.
+- **Headless Local File Protection**: Credentials are stored in `~/.mindie/ssh/credentials.json` (`0700` directory / `0600` file on POSIX) without invoking OS keychains or desktop popups. Import passwords safely via `--prompt`, `--password-stdin`, or one-time `--password-env VARIABLE` / MCP `password_env` (never pass plaintext passwords in CLI flags or chat text). Re-run `auth setup --prompt` after password rotation, or run `remote-dev auth forget` to remove saved credentials.
 
 ---
 
