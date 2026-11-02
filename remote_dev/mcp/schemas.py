@@ -419,10 +419,9 @@ HARNESS_TOOL_ALIASES: dict[str, str] = {
     "remote_BashOutput": "remote.job_status",
     "remote.TaskOutput": "remote.job_status",
     "remote_TaskOutput": "remote.job_status",
-    "remote.KillShell": "remote.job_stop",
-    "remote_KillShell": "remote.job_stop",
-    "remote.TaskStop": "remote.job_stop",
-    "remote_TaskStop": "remote.job_stop",
+    "remote.KillShell": "remote.job_stop", "remote_KillShell": "remote.job_stop",
+    "remote.TaskStop": "remote.job_stop", "remote_TaskStop": "remote.job_stop",
+    "remote.ViewImage": "remote.read", "remote_ViewImage": "remote.read",
 }
 
 # Thin client-native parameter aliases folded into the canonical fields by
@@ -450,7 +449,7 @@ PARAM_ALIASES: dict[str, dict[str, str]] = {
         "symbol": "node_paths",
         "symbols": "node_paths",
         "should_read_entire_file": "_should_read_entire_file",
-        "explanation": "_explanation",
+        "image_path": "file_path", "query": "_explanation", "explanation": "_explanation",
     },
     "remote.write": {
         "path": "file_path",

@@ -79,6 +79,188 @@ BY_HARNESS = {item["harness"]: item for item in BASELINE["harnesses"]}
 BY_HARNESS["claude"]["tools"] = [
     tool for tool in BY_HARNESS["claude"]["tools"] if tool["name"] != "TaskList"
 ]
+BY_HARNESS.setdefault("wb", {
+    "harness": "wb",
+    "tools": [
+        {
+            "name": "Bash",
+            "schema_kind": "json",
+            "required": ["command"],
+            "defaults": {"timeout": 120000, "run_in_background": False, "dangerouslyDisableSandbox": False},
+            "input_schema": {
+                "properties": {
+                    "command": {"type": "string", "description": "The command to execute."},
+                    "timeout": {"type": "number", "description": "Optional timeout in milliseconds (max 600000; default 120000)."},
+                    "description": {"type": "string", "description": "Clear, concise description of what this command does in active voice."},
+                    "run_in_background": {"type": "boolean", "description": "Set to true to run this command in the background."},
+                    "dangerouslyDisableSandbox": {"type": "boolean", "description": "Local host sandbox override; rejected for remote calls."},
+                },
+                "required": ["command"],
+            },
+        },
+        {
+            "name": "Read",
+            "schema_kind": "json",
+            "required": ["file_path"],
+            "defaults": {"offset": 1, "limit": 2000},
+            "input_schema": {
+                "properties": {
+                    "file_path": {"type": "string", "description": "The absolute path to the file to read."},
+                    "offset": {"type": "integer", "minimum": 0, "description": "The line number to start reading from."},
+                    "limit": {"type": "integer", "minimum": 1, "description": "The number of lines to read."},
+                    "pages": {"type": "string", "description": "Page range for PDF files."},
+                },
+                "required": ["file_path"],
+            },
+        },
+        {
+            "name": "Write",
+            "schema_kind": "json",
+            "required": ["file_path", "content"],
+            "defaults": {},
+            "input_schema": {
+                "properties": {
+                    "file_path": {"type": "string", "description": "The absolute path to the file to write."},
+                    "content": {"type": "string", "description": "The content to write to the file."},
+                },
+                "required": ["file_path", "content"],
+            },
+        },
+        {
+            "name": "Edit",
+            "schema_kind": "json",
+            "required": ["file_path", "old_string", "new_string"],
+            "defaults": {"replace_all": False},
+            "input_schema": {
+                "properties": {
+                    "file_path": {"type": "string", "description": "The absolute path to the file to modify."},
+                    "old_string": {"type": "string", "description": "The text to replace."},
+                    "new_string": {"type": "string", "description": "The text to replace it with."},
+                    "replace_all": {"type": "boolean", "description": "Replace all occurrences."},
+                },
+                "required": ["file_path", "old_string", "new_string"],
+            },
+        },
+        {
+            "name": "MultiEdit",
+            "schema_kind": "json",
+            "required": ["file_path", "edits"],
+            "defaults": {},
+            "input_schema": {
+                "properties": {
+                    "file_path": {"type": "string", "description": "The path to the file to modify (can be absolute or relative)"},
+                    "edits": {"type": "array", "description": "Array of edit operations to perform sequentially on the file"},
+                },
+                "required": ["file_path", "edits"],
+            },
+        },
+        {
+            "name": "NotebookEdit",
+            "schema_kind": "json",
+            "required": ["notebook_path", "new_source"],
+            "defaults": {"edit_mode": "replace"},
+            "input_schema": {
+                "properties": {
+                    "notebook_path": {"type": "string", "description": "The absolute path to the Jupyter notebook file."},
+                    "new_source": {"type": "string", "description": "The new source for the cell."},
+                    "cell_id": {"type": "string", "description": "The ID of the cell to edit."},
+                    "cell_type": {"type": "string", "enum": ["code", "markdown"], "description": "The type of the cell."},
+                    "edit_mode": {"type": "string", "enum": ["replace", "insert", "delete"]},
+                },
+                "required": ["notebook_path", "new_source"],
+            },
+        },
+        {
+            "name": "Glob",
+            "schema_kind": "json",
+            "required": ["pattern"],
+            "defaults": {"limit": 100, "offset": 0},
+            "input_schema": {
+                "properties": {
+                    "pattern": {"type": "string", "description": "The glob pattern to match files against"},
+                    "path": {"type": "string", "description": "The directory to search in; defaults to the working directory."},
+                    "limit": {"type": "integer", "minimum": 1, "default": 100, "description": "Maximum number of results to return."},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Number of results to skip from the beginning."},
+                },
+                "required": ["pattern"],
+            },
+        },
+        {
+            "name": "Grep",
+            "schema_kind": "json",
+            "required": ["pattern"],
+            "defaults": {"output_mode": "files_with_matches", "-n": True, "-i": False, "-o": False, "head_limit": 250, "offset": 0, "multiline": False},
+            "input_schema": dict(BY_HARNESS["claude"]["tools"][6]["input_schema"]),
+        },
+        {
+            "name": "TaskOutput",
+            "schema_kind": "json",
+            "required": ["task_id"],
+            "defaults": {"block": True, "timeout": 60000},
+            "input_schema": {
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task ID to get output from."},
+                    "block": {"type": "boolean", "description": "Whether to wait for task completion."},
+                    "timeout": {"type": "integer", "minimum": 0, "maximum": 600000, "description": "Timeout in milliseconds."},
+                    "filter": {"type": "string", "description": "Optional regex pattern applied only to output read by this call."},
+                    "full": {"type": "boolean", "description": "Return the current accumulated output snapshot."},
+                },
+                "required": ["task_id"],
+            },
+        },
+        {
+            "name": "BashOutput",
+            "schema_kind": "json",
+            "required": ["shell_id"],
+            "defaults": {},
+            "input_schema": {
+                "properties": {
+                    "shell_id": {"type": "string", "description": "The ID of the background shell to retrieve output from."},
+                    "filter": {"type": "string", "description": "Optional regex pattern to filter output lines."},
+                },
+                "required": ["shell_id"],
+            },
+        },
+        {
+            "name": "TaskStop",
+            "schema_kind": "json",
+            "required": [],
+            "defaults": {},
+            "input_schema": {
+                "properties": {
+                    "task_id": {"type": "string", "description": "The ID of the background task to stop."},
+                    "shell_id": {"type": "string", "description": "Deprecated: use task_id instead."},
+                },
+                "required": [],
+            },
+        },
+        {
+            "name": "KillShell",
+            "schema_kind": "json",
+            "required": ["shell_id"],
+            "defaults": {},
+            "input_schema": {
+                "properties": {
+                    "shell_id": {"type": "string", "description": "The ID of the background shell to kill."},
+                },
+                "required": ["shell_id"],
+            },
+        },
+        {
+            "name": "ViewImage",
+            "schema_kind": "json",
+            "required": ["image_path", "query"],
+            "defaults": {},
+            "input_schema": {
+                "properties": {
+                    "image_path": {"type": "string", "minLength": 1, "description": "Absolute path to the image file to look at."},
+                    "query": {"type": "string", "minLength": 1, "description": "The specific information to extract from the image."},
+                },
+                "required": ["image_path", "query"],
+            },
+        },
+    ],
+})
 
 CORE_DIR = Path(remote_dev.__file__).resolve().parent / "core"
 FILE_WORKER = CORE_DIR / "remote_file_worker.py"
@@ -259,6 +441,8 @@ class CatalogContractTests(unittest.TestCase):
     def test_native_defaults_are_advertised_where_native_has_them(self) -> None:
         required_defaults = {
             ("claude", "remote_TaskOutput"): {"block": True, "timeout": 30000},
+            ("wb", "remote_TaskOutput"): {"block": True, "timeout": 60000},
+            ("wb", "remote_Glob"): {"limit": 100, "offset": 0},
             ("kimi", "remote_Bash"): {"timeout": 60},
             ("kimi", "remote_TaskList"): {"active_only": True, "limit": 20},
             ("kimi", "remote_TaskStop"): {"reason": "Stopped by TaskStop"},

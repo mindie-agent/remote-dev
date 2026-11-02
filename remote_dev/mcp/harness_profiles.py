@@ -10,12 +10,14 @@ from .profiles_codex import SPECS as CODEX_SPECS
 from .profiles_claude import SPECS as CLAUDE_SPECS
 from .profiles_kimi import SPECS as KIMI_SPECS
 from .profiles_dsh import SPECS as DSH_SPECS
+from .profiles_wb import SPECS as WB_SPECS
 
 NATIVE_TOOLS: dict[str, dict[str, NativeToolSpec]] = {
     "codex": CODEX_SPECS,
     "claude": CLAUDE_SPECS,
     "kimi": KIMI_SPECS,
     "dsh": DSH_SPECS,
+    "wb": WB_SPECS,
 }
 
 

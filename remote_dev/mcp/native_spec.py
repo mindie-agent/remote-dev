@@ -20,9 +20,10 @@ PROFILE_ENV = "REMOTE_DEV_HARNESS_PROFILE"
 
 CANONICAL_PROFILE = "canonical"
 
-NATIVE_PROFILES = ("codex", "claude", "kimi", "dsh")
+NATIVE_PROFILES = ("codex", "claude", "kimi", "dsh", "wb")
 
 PROFILES = (CANONICAL_PROFILE,) + NATIVE_PROFILES
+_PROFILE_ALIASES = {"workbuddy": "wb"}
 
 class HarnessProfileError(ValueError):
     """The requested profile is unknown or a native call is not bound to it.
@@ -53,6 +54,7 @@ def resolve_profile(value: str | None = None) -> str:
         candidate = os.environ.get(PROFILE_ENV, "").strip().lower()
     if not candidate:
         return CANONICAL_PROFILE
+    candidate = _PROFILE_ALIASES.get(candidate, candidate)
     if candidate not in PROFILES:
         raise HarnessProfileError(
             f"unknown {PROFILE_ENV}={candidate!r}; expected one of {', '.join(PROFILES)}"
@@ -202,9 +204,12 @@ def _validate_value(value: Any, schema: Mapping[str, Any], path: str) -> None:
             raise HarnessProfileError(f"{path} must have at most {schema['maxLength']} characters")
         if "pattern" in schema and not re.search(str(schema["pattern"]), value):
             raise HarnessProfileError(f"{path} does not match {schema['pattern']!r}")
-    if isinstance(value, list) and "items" in schema:
-        for index, item in enumerate(value):
-            _validate_value(item, schema["items"], f"{path}[{index}]")
+    if isinstance(value, list):
+        if "minItems" in schema and len(value) < schema["minItems"]:
+            raise HarnessProfileError(f"{path} must have at least {schema['minItems']} item(s)")
+        if "items" in schema:
+            for index, item in enumerate(value):
+                _validate_value(item, schema["items"], f"{path}[{index}]")
     if isinstance(value, dict):
         for key in schema.get("required", ()):
             if key not in value:
@@ -232,7 +237,9 @@ def validate_native_arguments(spec: NativeToolSpec, args: Mapping[str, Any], all
         "command": ("cmd",),
         "job_id": ("session_id", "task_id", "bash_id", "shell_id"),
         "task_id": ("bash_id", "shell_id"),
+        "shell_id": ("task_id", "job_id", "bash_id"),
         "path": ("file_path",),
+        "image_path": ("file_path", "path"),
     }
     for key in spec.required:
         if key not in args or args[key] is None:
