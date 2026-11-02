@@ -313,8 +313,8 @@ class CatalogTests(unittest.TestCase):
             }
             rec_path.write_text(json.dumps(initial_rec), encoding="utf-8")
             large_body = "".join(f"line {i:05d}: abcdefghijklmnopqrstuvwxyz\n" for i in range(1000))
-            stdout_log.write_text(large_body, encoding="utf-8")
-            stderr_log.write_text("", encoding="utf-8")
+            stdout_log.write_bytes(large_body.encode("utf-8"))
+            stderr_log.write_bytes(b"")
 
             def fake_status_and_refresh(name, args, *, profile="canonical"):
                 if name == "remote.job_stdin":
@@ -347,7 +347,7 @@ class CatalogTests(unittest.TestCase):
                 self.assertEqual(saved_after_first["wb_output_offsets"]["stdout_offset"], len(large_body.encode("utf-8")))
 
                 # Append new output beyond the 8KB preview window and verify incremental slice captures it
-                stdout_log.write_text(large_body + "NEW TAIL LINE\n", encoding="utf-8")
+                stdout_log.write_bytes((large_body + "NEW TAIL LINE\n").encode("utf-8"))
                 second_disk = tools.call_tool("remote_TaskOutput", {"task_id": "j-wb-disk"}, profile="wb")
                 self.assertEqual(second_disk["result"]["task"]["output"], "NEW TAIL LINE")
 
