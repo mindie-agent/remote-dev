@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import re
 import shutil
 import struct
@@ -85,6 +86,7 @@ def _run(argv: list[str], *, timeout: int = _SUBPROCESS_TIMEOUT_SECONDS) -> subp
             stderr=subprocess.PIPE,
             timeout=timeout,
             check=False,
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
         )
     except FileNotFoundError as exc:
         raise MediaOpError(f"renderer executable is unavailable: {argv[0]}") from exc
