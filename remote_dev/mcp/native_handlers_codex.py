@@ -114,17 +114,34 @@ def codex_write_stdin(profile: str, spec: NativeToolSpec, native: dict[str, Any]
     })
     return payload
 
+def _missing_image_key(spec_wire: str, key: str) -> dict[str, Any]:
+    return _media_failure(
+        spec_wire,
+        {"status": "invalid_media", "error": f"image payload is missing {key!r}"},
+    )
+
+
 @handler("codex_view_image")
 def codex_view_image(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
     payload = _read_media_payload(
         normalized, spec_wire=spec.wire, max_edge=None if native.get("detail") == "original" else 1568
     )
-    if payload.get("content"):
-        mime = payload["result"].get("mime_type") or "image/png"
-        data = payload["content"][0]["data"]
-        payload["result"].update({
-            "image_url": f"data:{mime};base64,{data}",
-            "detail": native.get("detail") or "high",
-        })
+    content = payload.get("content")
+    if not content:
+        return payload
+    # make_result flattens extra onto the result object. A partial image
+    # payload must be a tool failure; subscripting it is an internal KeyError
+    # (mindie-agent#282).
+    result = payload.get("result")
+    block = content[0] if isinstance(content, list) else None
+    if not isinstance(result, dict):
+        return _missing_image_key(spec.wire, "result")
+    if not isinstance(block, Mapping) or "data" not in block:
+        return _missing_image_key(spec.wire, "data")
+    mime = result.get("mime_type") or "image/png"
+    result.update({
+        "image_url": f"data:{mime};base64,{block['data']}",
+        "detail": native.get("detail") or "high",
+    })
     return payload
 
