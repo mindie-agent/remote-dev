@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v0.11.5-blue" alt="Release v0.11.5">
+  <img src="https://img.shields.io/badge/Release-v0.11.6-blue" alt="Release v0.11.6">
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI-00ADD8" alt="MCP & CLI">
   <img src="https://img.shields.io/badge/Target-Linux%20SSH%20%26%20Docker-2496ED?logo=docker&logoColor=white" alt="Linux SSH & Docker">
@@ -140,7 +140,8 @@ remote-dev bash --host 192.0.2.10 --port 22 --user root --command 'hostname'
 
 - **Shared Across Sessions & Components (`~/.mindie/ssh`)**: Profiles are keyed by exact `host + port + user` under `~/.mindie/ssh` (`%USERPROFILE%\.mindie\ssh` on native Windows), independent of individual chats or working directories. You can customize the location via `REMOTE_DEV_AUTH_DIR` or `REMOTE_DEV_CREDENTIAL_FILE`.
 - **Key-First with Automatic Recovery**: Setup checks existing OpenSSH keys first and generates `~/.mindie/ssh/keys/id_ed25519` when needed. If a remote public key is later rejected, development calls automatically verify the saved password and repair the key (or fall back to password mode) before dispatching your command, while read-only probes fall back to password auth without touching remote `authorized_keys`.
-- **Headless Local File Protection**: Credentials are stored in `~/.mindie/ssh/credentials.json` (`0700` directory / `0600` file on POSIX) without invoking OS keychains or desktop popups. Import passwords safely via `--prompt`, `--password-stdin`, or one-time `--password-env VARIABLE` / MCP `password_env` (never pass plaintext passwords in CLI flags or chat text). Re-run `auth setup --prompt` after password rotation, or run `remote-dev auth forget` to remove saved credentials.
+- **Use Credentials Already Supplied**: When the user supplies the SSH host, port, login user and password for a remote task, call `remote_auth(action="setup", host=..., port=..., user=..., password=...)`. Setup verifies the password, installs a public key and independently verifies key login, then the agent continues the task. A missing local `auth_ref` means first enrollment; it does not require the user to configure credentials again. Verified password access remains usable when public keys are unavailable.
+- **Headless Local File Protection**: Credentials are stored in `~/.mindie/ssh/credentials.json` (`0700` directory / `0600` file on POSIX) without OS keychains or desktop popups. The CLI accepts `--prompt`, `--password-stdin` or `--password-env VARIABLE`; MCP accepts mutually exclusive `password` and `password_env` inputs. Passwords are not echoed or written to SSH command-line arguments or endpoint records. `password_env` reads the running server's inherited environment; setting a variable in another terminal cannot update that process. With an older tool catalog lacking `password`, the agent can import the supplied password through a local process's stdin using `remote-dev auth setup --password-stdin` without asking again. Re-enroll after password rotation, or run `remote-dev auth forget` to remove saved credentials.
 
 ---
 

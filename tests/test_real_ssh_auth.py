@@ -189,6 +189,20 @@ def test_password_installs_key_and_new_process_reuses_it(auth_server, auth_env):
     assert profiles and all(auth_server.password not in p.read_text() for p in profiles)
 
 
+def test_public_mcp_password_enrollment_then_new_process_command(auth_server, auth_env):
+    from remote_dev.mcp.tools import call_tool
+
+    endpoint = auth_server.endpoint()
+    response = call_tool("remote_auth", {
+        "host": endpoint.host, "port": endpoint.port, "user": endpoint.user,
+        "password": auth_server.password, "timeout_ms": 30000,
+    })
+    assert response["result"]["auth_method"] == "publickey", response
+    assert response["result"]["bootstrap"]["key_verified"] is True
+    assert auth_server.password not in json.dumps(response)
+    assert "fresh-auth" in json.dumps(_fresh_call(endpoint, auth_env))
+
+
 def test_password_only_survives_process_chat_and_harness_changes(auth_server, auth_env):
     endpoint = auth_server.endpoint(password_only=True)
     result = setup_access(endpoint, password=auth_server.password)

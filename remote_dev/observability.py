@@ -239,6 +239,9 @@ def observed_tool(name, *, component="remote-dev"):
             minimal_result = bool(isinstance(value, dict) and value.pop("_native_minimal", False))
             if isinstance(result, dict) and authentication is not None:
                 result["authentication"] = authentication
+                if authentication.get("receipt_unconfirmed") is True:
+                    result["receipt_warning"] = authentication["receipt_warning"]
+                    result["receipt_unconfirmed"] = True
                 bootstrap = authentication.get("bootstrap") or {}
                 if bootstrap.get("status") in {"failed", "unknown"}:
                     warning = "SSH password login succeeded; public-key maintenance " + bootstrap["status"] + "."

@@ -376,16 +376,24 @@ def _setup_access(endpoint, *, password, password_env, identity_file, install_ke
             "known_hosts_file": known_hosts_file,
             "credential_ref": credential_ref, "revision": uuid.uuid4().hex, "bootstrap": bootstrap,
         }
+        recording_error = None
         try:
             profiles.save(profile, timeout_ms=budget.milliseconds())
+            saved_profile = True
         except Exception as exc:
-            raise auth_error(
-                "SSH access was verified but saving its local auth profile failed",
-                "local_recording_failed",
-            ) from exc
-        saved_profile = True
+            recording_error = {"stage": "profile_save", "error_type": type(exc).__name__}
         result = {"auth_ref": profile["auth_ref"], "auth_method": method,
                   "identity_file": selected_identity, "bootstrap": bootstrap}
+        if recording_error:
+            # Authentication completed; an unsaved reference is not reusable.
+            # The caller can still use the verified key or its supplied password.
+            result.update(auth_ref=None, identity_file=selected_identity if method == "publickey" else None,
+                          status="local_recording_failed", operation_completed=True,
+                          execution_outcome="success", receipt_warning=recording_error,
+                          receipt_unconfirmed=True, profile_saved=False)
+            result["bootstrap"] = {**bootstrap, "profile_saved": False,
+                                   "credential_retained": bool(credential_ref)}
+            return result
         if new_reference and previous and previous.get("credential_ref") and previous["credential_ref"] != new_reference:
             try:
                 credentials.delete(previous["credential_ref"], timeout_ms=budget.milliseconds(cleanup=True))
@@ -455,17 +463,17 @@ def _repair_profile(endpoint, profile, profiles, budget):
         profile = {**profile, "bootstrap": facts, "identity_file": identity}
         if not facts["key_verified"]:
             profile.update(auth_method="password", revision=uuid.uuid4().hex)
+        recording_error = None
         try:
             profiles.save(profile, timeout_ms=budget.milliseconds())
         except Exception as exc:
-            error = auth_error("SSH key maintenance finished but saving its local auth profile failed",
-                               "local_recording_failed")
-            error.bootstrap = {**facts, "profile_saved": False}
-            raise error from exc
+            recording_error = {"stage": "profile_save", "error_type": type(exc).__name__}
+            facts = {**facts, "profile_saved": False}
         from remote_dev.observability import _authentication_event
         _authentication_event.set({
             "auth_ref": profile["auth_ref"], "auth_method": profile["auth_method"],
             "bootstrap": facts,
+            **({"receipt_warning": recording_error, "receipt_unconfirmed": True} if recording_error else {}),
         })
     return profile
 

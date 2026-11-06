@@ -96,7 +96,8 @@ def schema(
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "remote.auth": schema({
         "action": {"type": "string", "enum": ["setup", "status", "forget"], "default": "setup"},
-        "password_env": {"type": "string", "description": "Name of a local environment variable to import once into the shared credential store. Never put the password itself here."},
+        "password": {"type": "string", "minLength": 1, "writeOnly": True, "description": "SSH password already supplied by the user, imported once for action=setup. Use it directly to install and verify a public key; never echo it. Mutually exclusive with password_env."},
+        "password_env": {"type": "string", "description": "For action=setup, name of a password environment variable already available to this server process. Variables set in a separate terminal do not reach a running MCP server; use password for credentials already supplied by the user. Mutually exclusive with password."},
         "install_key": {"type": "boolean", "default": True, "description": "Install and independently verify a public key; retain the password for recovery. If key authentication remains unavailable, use verified password authentication."},
     }),
     "remote.read": schema(
@@ -712,7 +713,7 @@ def normalize_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
 
 
 CANONICAL_DESCRIPTIONS: dict[str, str] = {
-    "remote.auth": "Configure shared SSH access, inspect its non-secret status, or forget local credentials. Automatically install and verify a public key, retain password recovery, and support password-only hosts across processes and harnesses.",
+    "remote.auth": "Configure shared SSH access, inspect its non-secret status, or forget local credentials. When the user has supplied an SSH password for the task, call action=setup with password and the target host/port/user, then continue the task; do not ask the user to configure credentials again. Setup automatically installs and independently verifies a public key, retains password recovery, and supports password-only hosts across processes and harnesses. For older tool catalogs, import the supplied password through remote-dev auth setup --password-stdin using a local process's stdin; never put it in command-line arguments.",
     "remote.read": "Read a remote file with native Read-like pagination and a read ledger.",
     "remote.write": "Write a remote file with overwrite support and optional read-ledger concurrency checks.",
     "remote.edit": "Edit a remote file with exact string replacement and optional read-ledger concurrency checks.",

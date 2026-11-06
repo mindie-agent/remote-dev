@@ -25,18 +25,20 @@ def _endpoint_arguments(payload):
 
 
 def _setup(payload):
-    from remote_dev.auth import setup_access
-    from remote_dev.core.endpoint import Endpoint
+    from remote_dev.mcp.tools import call_tool
 
-    endpoint = Endpoint(**_endpoint_arguments(payload))
-    password = payload.get("password")
-    if password is None:
-        return setup_access(endpoint, timeout_ms=30000)
-    os.environ["TEST_SSH_PASSWORD"] = password
-    try:
-        return setup_access(endpoint, password_env="TEST_SSH_PASSWORD", timeout_ms=30000)
-    finally:
-        os.environ.pop("TEST_SSH_PASSWORD", None)
+    # Exercise the public tool used by agents, including JSON stdin across
+    # processes. No environment variable is manufactured inside the server.
+    arguments = {**_endpoint_arguments(payload), "timeout_ms": 30000}
+    if payload.get("password") is not None:
+        arguments["password"] = payload["password"]
+    if payload.get("fail_profile_recording"):
+        from unittest.mock import patch
+        from remote_dev.auth import ProfileStore
+
+        with patch.object(ProfileStore, "save", side_effect=OSError("fixture profile recording failed")):
+            return call_tool("remote_auth", arguments)["result"]
+    return call_tool("remote_auth", arguments)["result"]
 
 
 def _call(payload):

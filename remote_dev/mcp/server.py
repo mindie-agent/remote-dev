@@ -101,41 +101,8 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
                 payload = call_tool(name, arguments)
             details = payload.get("result", {})
             details["runtime"] = runtime_status(LOADED_RUNTIME)
-            # A local receipt failure after a succeeded remote operation must
-            # not turn the remote result into an MCP error. Report the
-            # execution outcome, keeping the recording_failure diagnostic in
-            # structuredContent.
-            error_outcome = details.get("outcome")
-            error_details = details.get("error_details") if isinstance(details.get("error_details"), dict) else {}
-            completed_locally = (
-                details.get("operation_completed") is True
-                or error_details.get("operation_completed") is True
-            )
-            if details.get("status") == "local_recording_failed" and completed_locally:
-                error_outcome = details.get("execution_outcome", error_outcome)
-            # A command that really ran and returned a nonzero exit code is a
-            # native tool result, not an MCP/helper failure. Keep the exit code
-            # in structuredContent and only flag start/status/transport errors.
-            completed_command = (
-                details.get("state") in {"succeeded", "failed", "timeout", "cancelled"}
-                and isinstance(details.get("exit_code"), int)
-                and not isinstance(details.get("exit_code"), bool)
-                and (name.lower().endswith("bash") or name.lower().endswith("job_stdin")
-                     or name.lower().endswith("exec_command") or name.lower().endswith("write_stdin")
-                     or name.lower().endswith("shell"))
-            )
-            background_started = (
-                details.get("kind") == "background"
-                and details.get("jobId") not in (None, "")
-            )
-            if background_started or error_outcome in {"cancellation-requested", "already-finished"}:
-                # DSH's native background result is intentionally the minimal
-                # {kind:"background", jobId} shape and has no outcome field.
-                # Starting a supervised job, accepting its cancellation, or
-                # observing that it already finished are successful results.
-                error_outcome = "success"
-            if completed_command:
-                error_outcome = "success"
+            from .outcome import operation_outcome
+            outcome = operation_outcome(name, payload)
             blocks = payload.get("content")
             if not isinstance(blocks, list) or not blocks:
                 blocks = [{"type": "text", "text": tool_text(payload)}]
@@ -149,7 +116,7 @@ def handle(message: dict[str, Any], *, framed: bool = False) -> None:
                 {
                     "content": blocks,
                     "structuredContent": details,
-                    "isError": error_outcome not in {"success", "cancelled"},
+                    "isError": outcome != "succeeded",
                 },
                 framed=framed,
             )

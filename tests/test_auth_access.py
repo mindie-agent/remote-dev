@@ -251,16 +251,45 @@ def test_profile_recording_failure_keeps_installed_key_facts_and_recovery_creden
         raise OSError("fixture disk full")
 
     monkeypatch.setattr(ProfileStore, "save", unable_to_save)
-    with pytest.raises(RemoteExecutionError, match="saving its local auth profile failed") as caught:
-        setup_access(endpoint, password="fixture-secret")
-    facts = caught.value.bootstrap
+    result = setup_access(endpoint, password="fixture-secret")
+    facts = result["bootstrap"]
     assert facts["installation"] == "completed"
     assert facts["key_verified"] is True
     assert facts["profile_saved"] is False
     assert facts["credential_retained"] is True
-    assert CredentialStore().get(facts["credential_ref"]) == "fixture-secret"
-    assert caught.value.submission_state == "not_sent"
+    assert "fixture-secret" in json.loads(auth_home[1].read_text()).values()
+    assert result["operation_completed"] is True
+    assert result["receipt_unconfirmed"] is True
+    assert result["receipt_warning"] == {"stage": "profile_save", "error_type": "OSError"}
+    assert result["auth_ref"] is None
+    assert result["identity_file"] is not None
+    assert ProfileStore().resolve(endpoint) is None
     assert len(calls) == 4
+
+
+def test_repair_recording_failure_preserves_the_verified_business_plan(auth_home, endpoint, monkeypatch, tmp_path):
+    from remote_dev.observability import _authentication_event
+
+    _key(monkeypatch, tmp_path)
+    _probes(monkeypatch, [_deny(), _outcome(), _outcome(), _outcome()])
+    initial = setup_access(endpoint, password="fixture-secret")
+    calls = _probes(monkeypatch, [_deny(), _deny(), _outcome(), _outcome(), _outcome()])
+
+    def unable_to_save(*args, **kwargs):
+        raise OSError("fixture local recording failure")
+
+    monkeypatch.setattr(ProfileStore, "save", unable_to_save)
+    token = _authentication_event.set(None)
+    try:
+        plan = prepare_auth(endpoint)
+        event = _authentication_event.get()
+    finally:
+        _authentication_event.reset(token)
+    assert plan.endpoint.identity_file == initial["identity_file"]
+    assert plan.endpoint.auth_ref == initial["auth_ref"]
+    assert event["receipt_unconfirmed"] is True
+    assert event["bootstrap"]["key_verified"] is True
+    assert len(calls) == 5
 
 
 def test_rotation_changes_connection_identity_and_forget_is_local(auth_home, endpoint, monkeypatch):
