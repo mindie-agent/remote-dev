@@ -32,7 +32,4 @@ def operation_outcome(name, payload):
         return "succeeded"
     if outcome in {"success", "cancelled", "cancellation-requested", "already-finished"}:
         return "succeeded"
-    # Some consumer-local query tools retain their older explicit ok envelope.
-    if "outcome" not in details and details.get("ok") is True:
-        return "succeeded"
     return "failed"
