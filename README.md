@@ -167,6 +167,14 @@ remote-dev grep --host 192.0.2.10 --port 22 --container vllm-dev --path /workspa
 remote-dev bash --host 192.0.2.10 --port 22 --container vllm-dev --cwd /workspace/vllm --command "pytest tests/kernels -q"
 ```
 
+继续修改容器里已安装框架时，先定位业务解释器对应的源码，不依赖本地启动目录。MCP 调用 `remote_probe` 可传 `distributions=["vllm", "vllm-ascend"]` 和 `python_executable="/venv/bin/python"`；后者换成目标容器实际使用的绝对路径。工具在端点 runtime profile 后读取隔离解释器的安装元数据，不导入框架。结果区分未安装、无 `direct_url.json`（`editable=null`）、明确的 editable 源码路径和元数据错误；不会因没有本地源码而创建 `/opt` 副本。
+
+`root` 是远端文件操作边界，`cwd` 是命令目录，两者都不能证明业务安装绑定。复用已确认的原源码；只改 Python 时复用原生产物，覆盖原生产物前先保留可恢复基线，再用实际业务启动环境验证加载位置和正确性。探测元数据本身不证明新二进制已加载；通用命令执行器也不会自动替用户构建或恢复产物。完整约定见[源码开发、重编译与产物恢复契约](https://github.com/mindie-agent/mindie-agent/blob/main/docs/source-rebuild-contract.md)。
+
+用户明确选择新源码目录或切换 editable 绑定时，以该选择为准；新目录不自动意味着新建 Python 环境或删除旧源码。存在多个解释器时，`remote_probe(required_distributions=["torch", "torch-npu"], distributions=["vllm", "vllm-ascend"])` 会有限发现并检查候选；非常规路径通过 `python_candidates` 补充。只选择满足元数据条件的活动绑定或唯一候选，多个合格环境返回 `ambiguous`，显式指定解释器则不回退。不同 venv 的 prefix 保持独立；选择结果仍需经过目标源码版本 / ABI 和实际运行验证，控制 Python 不必装有业务依赖。
+
+探测和标准构建不适用时，Agent 可使用显式路径、已有 CLI 或自行编写的任务脚本，通过 `remote_bash` 或已授权原生 SSH 继续。失败结果保持可见，`next.endpoint_arguments` 返回本次已知端点参数；探测失败不会锁住后续 shell 操作。保留已确认结果与作业引用，未知写入先对账，上卡保持真实租约或已验证占用授权。
+
 ### 场景 3：运行耗时任务，随时看增量日志或安全停止
 
 跑一个耗时很长的训练或评测脚本时，如果超过等待时间（`yield_time_ms`，默认 10 秒）还没跑完，`remote-dev` 会自动返回一个 `session_id`（即 `job_id`），让你随时跟进或停止：
@@ -220,7 +228,7 @@ remote-dev job-stop --host 192.0.2.10 --port 22 --job-id <job_id>
 | *(后台任务管理)* | `remote.job_status` / `job_tail` / `job_output` / `job_stop` | `remote-dev job-status` / `job-tail` / `job-output` / `job-stop` | 查看远端后台任务跑完没、实时追增量日志或读取完整日志、或者连同子进程一起干净停掉 |
 | *(文件/目录互传)* | `remote.artifact_manifest` / `artifact_pull` / `artifact_push` | `remote-dev artifact-manifest` / `artifact-pull` / `artifact-push` | 按 1 MiB 分块流式上传/下载文件或目录树，自带 SHA-256 校验，传完原子替换 |
 | *(认证与凭据管理)* | `remote.auth` (`remote_auth`) | `remote-dev auth` | 配置、查看、校验或清理 `~/.mindie/ssh` 下的远端 SSH 免密公钥与认证档案 |
-| *(环境探测)* | `remote.probe` / `remote.context_snapshot` | `remote-dev probe` / `context-snapshot` | 查看远端系统版本、Python 路径、当前目录以及 SSH 各阶段连接耗时 |
+| *(环境探测)* | `remote.probe` / `remote.context_snapshot` | `remote-dev probe` / `context-snapshot` | 查看远端系统、Python、Git 与 SSH 信息；`remote.probe` 还可读取指定解释器的 editable 源码元数据，无需导入框架 |
 
 ---
 

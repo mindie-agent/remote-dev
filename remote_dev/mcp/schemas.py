@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from typing import Any
+from .source_context import PROBE_PROPERTIES, SOURCE_CHANGE_GUIDANCE, NATIVE_CONTINUATION_GUIDANCE
 
 
 ENDPOINT_PROPS: dict[str, Any] = {
@@ -35,8 +36,8 @@ ENDPOINT_PROPS: dict[str, Any] = {
     },
     "user": {"type": "string", "default": "root"},
     "container": {"type": "string", "description": "Existing Docker container name or ID on the SSH host. All tools operate inside it; results return a full ID for reuse without another name lookup. No provisioning or managed allocation."},
-    "root": {"type": "string", "default": "/"},
-    "cwd": {"type": "string"},
+    "root": {"type": "string", "default": "/", "description": "Remote file-operation boundary, not the source checkout. Defaults to /. Discover existing project paths on the selected endpoint before source edits or builds; the client's local working directory does not select remote sources."},
+    "cwd": {"type": "string", "description": "Absolute working directory on the selected remote endpoint. Defaults to endpoint cwd/root; set it to the existing source checkout for development."},
     "runtime_env": {"type": "boolean", "default": True},
     "identity_file": {"type": "string"},
     "auth_ref": {"type": "string", "description": "Shared user-level SSH authentication reference from remote_auth. Passwords never belong in endpoint records."},
@@ -327,7 +328,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "remote.artifact_pull": schema({"remote_path": {"type": "string"}, "local_dir": {"type": "string"}, "overwrite": {"type": "boolean", "default": False, "description": "Replace existing local files only when explicitly true. Hash-identical files are skipped."}}, ["remote_path"]),
     "remote.artifact_push": schema({"local_path": {"type": "string"}, "remote_path": {"type": "string"}}, ["local_path", "remote_path"]),
     "remote.context_snapshot": schema({"live_probe": {"type": "boolean", "default": True}}),
-    "remote.probe": schema({"modules": {"type": "array", "items": {"type": "string"}, "description": "Explicit module imports to check; default empty."}, "diagnose_connection": {"type": "boolean", "default": False, "description": "Compare SSH connections with a fixed read-only probe; never replays a business command."}}),
+    "remote.probe": schema(PROBE_PROPERTIES),
 }
 
 for _job_name in ("remote.job_status", "remote.job_tail", "remote.job_output", "remote.job_stop", "remote.job_stdin"):
@@ -732,7 +733,7 @@ CANONICAL_DESCRIPTIONS: dict[str, str] = {
     "remote.artifact_pull": "Pull a remote artifact through SSH streaming with hash verification; reject local overwrite by default.",
     "remote.artifact_push": "Push a local artifact through SSH streaming with hash verification.",
     "remote.context_snapshot": "Write a compact endpoint context snapshot.",
-    "remote.probe": "Probe basic endpoint facts.",
+    "remote.probe": "Probe endpoint Git/Python facts and installed-distribution source paths without workload imports. Use required_distributions to discover a compatible interpreter when several Pythons exist, or python_executable for an explicit choice; distributions adds source metadata. Preserve virtualenv identity. Metadata is not proof of ABI compatibility or actual native library loading.",
 }
 
 
@@ -745,6 +746,10 @@ ENDPOINT_BOUND_TOOLS = frozenset(set(TOOL_SCHEMAS) - JOB_BOUND_TOOLS)
 
 def _advertised_description(name: str, base: str) -> str:
     """Keep conditional endpoint selection visible in tools/list text."""
+    if name in {"remote.bash", "remote.write", "remote.edit", "remote.multi_edit", "remote.apply_patch"}:
+        base += SOURCE_CHANGE_GUIDANCE
+    elif name == "remote.probe":
+        base += NATIVE_CONTINUATION_GUIDANCE
     if name in ENDPOINT_BOUND_TOOLS:
         return base + " " + ENDPOINT_TOOL_DESCRIPTION
     return base
