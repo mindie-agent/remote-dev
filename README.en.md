@@ -167,6 +167,14 @@ remote-dev grep --host 192.0.2.10 --port 22 --container vllm-dev --path /workspa
 remote-dev bash --host 192.0.2.10 --port 22 --container vllm-dev --cwd /workspace/vllm --command "pytest tests/kernels -q"
 ```
 
+Before continuing changes to an installed framework, locate sources for the business interpreter independently of the local starting directory. The MCP remote_probe call accepts distributions such as vllm and vllm-ascend and an absolute python_executable, for example /venv/bin/python, replaced with the actual container interpreter. It reads isolated-interpreter metadata after the endpoint runtime profile without framework imports. Results distinguish missing packages, absent direct_url.json (editable=null), recorded editable sources and malformed metadata. Missing local sources do not cause it to create an /opt checkout.
+
+Root is a remote file-operation boundary and cwd is a command directory; neither proves the installation binding. Reuse verified existing sources and native artifacts for Python-only changes. Preserve a recoverable baseline before native overwrites, then validate loading and correctness in the actual business launch environment. Metadata discovery alone does not prove a new binary loaded, and the general command executor does not automatically build or restore artifacts. See the [Source Rebuild and Recovery Contract](https://github.com/mindie-agent/mindie-agent/blob/main/docs/source-rebuild-contract.en.md).
+
+Honor explicit new-source-directory or editable-binding choices; a new directory does not imply a new virtualenv or deletion of old sources. With multiple interpreters, use remote_probe with required_distributions such as torch and torch-npu and optional distributions such as vllm and vllm-ascend. Add nonstandard paths through python_candidates. Bounded discovery selects an eligible active binding or sole candidate, reports ambiguous for several eligible environments, and never falls back from an explicit interpreter. Preserve different virtualenv prefixes. Metadata selection still requires source-version/ABI and actual runtime validation; the control Python does not need business dependencies.
+
+If discovery or standard builds do not fit, use explicit paths, existing CLIs or task-local scripts through remote_bash or authorized native SSH. Keep failures visible; next.endpoint_arguments retains known connection parameters, and a failed probe never locks later shell operations. Reuse confirmed results and job references, reconcile uncertain writes and retain actual device ownership.
+
 ### Example 3: Manage long-running jobs, tail live output, and stop cleanly
 
 When a `remote-dev bash` command runs longer than `yield_time_ms` (default 10s), it automatically returns a `session_id` (`job_id`) so you can monitor or stop it anytime:
@@ -220,7 +228,7 @@ Create an `endpoints.local.json` file in your working directory (or set `REMOTE_
 | *(Background Jobs)* | `remote.job_status` / `job_tail` / `job_output` / `job_stop` | `remote-dev job-status` / `job-tail` / `job-output` / `job-stop` | Check job status, read incremental or full logs, or stop an entire managed process tree |
 | *(File Sync)* | `remote.artifact_manifest` / `artifact_pull` / `artifact_push` | `remote-dev artifact-manifest` / `artifact-pull` / `artifact-push` | Stream files or directories in 1 MiB chunks with SHA-256 verification and atomic replacement |
 | *(SSH Auth & Profiles)* | `remote.auth` (`remote_auth`) | `remote-dev auth` | Configure, inspect, verify, or remove shared SSH keys and authentication profiles in `~/.mindie/ssh` |
-| *(Endpoint Probing)* | `remote.probe` / `remote.context_snapshot` | `remote-dev probe` / `context-snapshot` | Inspect remote OS, Python environment, working directory, and SSH phase timings |
+| *(Endpoint Probing)* | `remote.probe` / `remote.context_snapshot` | `remote-dev probe` / `context-snapshot` | Inspect OS, Python, Git and SSH facts; `remote.probe` also reads editable-source metadata from a selected interpreter without framework imports |
 
 ---
 

@@ -517,7 +517,10 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
         return remote_context_snapshot(endpoint, timeout_ms=timeout_ms, live_probe=bool(args.get("live_probe", True)))
     if name == "remote.probe":
         assert endpoint is not None
-        return remote_probe(endpoint, timeout_ms=timeout_ms, diagnose_connection=bool(args.get("diagnose_connection", False)), modules=args.get("modules"))
+        return remote_probe(endpoint, timeout_ms=timeout_ms, diagnose_connection=bool(args.get("diagnose_connection", False)),
+                            modules=args.get("modules"), distributions=args.get("distributions"),
+                            python_executable=args.get("python_executable"), python_candidates=args.get("python_candidates"),
+                            required_distributions=args.get("required_distributions"))
     raise KeyError(f"unknown remote-dev tool: {name}")
 
 
