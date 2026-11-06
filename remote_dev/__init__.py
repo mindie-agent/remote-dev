@@ -9,7 +9,7 @@ def package_version() -> str:
     try:
         return version("remote-dev")
     except PackageNotFoundError:
-        return "0.11.6"
+        return "0.11.7"
 
 
 __version__ = package_version()
