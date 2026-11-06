@@ -98,3 +98,26 @@ def test_older_catalog_can_import_supplied_password_through_cli_stdin(enrollment
     profile = ProfileStore().resolve(Endpoint("auth.example", 2200, user="alice"))
     assert CredentialStore().get(profile["credential_ref"]) == secret
     assert secret not in output.out + output.err
+
+
+@pytest.mark.parametrize("install_key", [True, False])
+def test_verified_authentication_keeps_success_when_profile_recording_fails(enrollment, monkeypatch, install_key):
+    monkeypatch.setattr(access, "_probe", lambda *args, **kwargs: access._Outcome(0, "", ""))
+
+    def unable_to_save(*args, **kwargs):
+        raise OSError("PRIVATE_STORAGE_PATH")
+
+    monkeypatch.setattr(ProfileStore, "save", unable_to_save)
+    server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "remote_auth", "arguments": {
+            "host": "auth.example", "port": 22, "password": "fixture-secret", "install_key": install_key,
+        },
+    }})
+    result = enrollment[0]["result"]
+    assert result["isError"] is False
+    details = result["structuredContent"]
+    assert details["operation_completed"] is True
+    assert details["receipt_unconfirmed"] is True
+    assert details["auth_ref"] is None
+    assert details["receipt_warning"]["error_type"] == "OSError"
+    assert "PRIVATE_STORAGE_PATH" not in json.dumps(enrollment)

@@ -301,7 +301,10 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
             raise caller_error("remote.auth action must be setup, status, or forget")
         result = make_result(tool=name, target=endpoint.to_result_target(),
                              outcome="success", status=str(facts.get("status") or "ok"),
-                             summary=f"SSH authentication {action} completed.", extra=facts)
+                             summary=("SSH access verified; local profile recording failed. Use the verified key "
+                                      "or supplied password through native tooling; do not repeat key installation "
+                                      "to repair local recording." if facts.get("receipt_unconfirmed") else
+                                      f"SSH authentication {action} completed."), extra=facts)
         return {"text": json.dumps(facts, ensure_ascii=False) + "\n", "result": result}
     if name == "remote.bash":
         assert endpoint is not None

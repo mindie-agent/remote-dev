@@ -32,6 +32,12 @@ def _setup(payload):
     arguments = {**_endpoint_arguments(payload), "timeout_ms": 30000}
     if payload.get("password") is not None:
         arguments["password"] = payload["password"]
+    if payload.get("fail_profile_recording"):
+        from unittest.mock import patch
+        from remote_dev.auth import ProfileStore
+
+        with patch.object(ProfileStore, "save", side_effect=OSError("fixture profile recording failed")):
+            return call_tool("remote_auth", arguments)["result"]
     return call_tool("remote_auth", arguments)["result"]
 
 

@@ -168,6 +168,18 @@ def test_password_only_server_across_processes_and_profiles(acceptance):
     assert acceptance.inspect()["authorized_keys"] == before
 
 
+def test_verified_key_remains_usable_after_profile_recording_failure(acceptance):
+    endpoint = acceptance.endpoint()
+    configured = acceptance.invoke("setup", endpoint, password=True, fail_profile_recording=True)
+    assert configured["outcome"] == "success", configured
+    assert configured["receipt_unconfirmed"] is True
+    assert configured["auth_ref"] is None
+    assert configured["bootstrap"]["key_verified"] is True
+    direct = {**endpoint, "identity_file": configured["identity_file"]}
+    called = acceptance.invoke("call", direct, runtime=1, command="printf verified-key-without-profile")
+    acceptance.assert_success(called, "verified-key-without-profile")
+
+
 def test_revoked_key_is_repaired_before_exactly_one_business_write(acceptance):
     endpoint = acceptance.endpoint()
     configured = acceptance.invoke("setup", endpoint, password=True)
