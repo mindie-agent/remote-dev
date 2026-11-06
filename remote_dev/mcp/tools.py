@@ -286,8 +286,10 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
         from remote_dev.auth import setup_access, auth_status, forget_access
         from remote_dev.result import make_result
         action = str(args.get("action") or "setup")
+        if action != "setup" and (args.get("password") is not None or args.get("password_env") is not None):
+            raise caller_error("SSH password input is only valid for action=setup")
         if action == "setup":
-            facts = setup_access(endpoint, password_env=args.get("password_env"),
+            facts = setup_access(endpoint, password=args.get("password"), password_env=args.get("password_env"),
                                  identity_file=args.get("identity_file"),
                                  install_key=bool(args.get("install_key", True)),
                                  timeout_ms=timeout_ms or 30000)

@@ -140,7 +140,8 @@ remote-dev bash --host 192.0.2.10 --port 22 --user root --command 'hostname'
 
 - **跨会话与跨组件持久化（`~/.mindie/ssh`）**：认证档案按精确的 `host + port + user` 存储在当前系统用户的 `~/.mindie/ssh` 目录（Windows 原生环境为 `%USERPROFILE%\.mindie\ssh`），与单个聊天窗口或工作目录解耦，切换终端、会话或插件后无需重新录入。可通过 `REMOTE_DEV_AUTH_DIR` 或 `REMOTE_DEV_CREDENTIAL_FILE` 自定义路径。
 - **公钥优先与自动修复**：首次配置优先验证现有 OpenSSH 密钥，需要时自动在 `~/.mindie/ssh/keys/id_ed25519` 生成无口令私钥并完成公钥安装。若后续远端公钥失效，开发调用会在下发业务命令前自动用已保存的密码修复公钥或回退为密码模式（只读探测与监控直接回退密码认证，不改写远端 `authorized_keys`）。
-- **无弹窗本地文件保护**：凭据保存在本地 `credentials.json`（POSIX 目录权限 `0700`、文件权限 `0600`），不调用系统钥匙串、不触发桌面授权弹窗。支持通过 `--prompt`、`--password-stdin` 或一次性环境变量（`--password-env VARIABLE` / MCP `password_env`）安全导入，请勿将明文密码直接写入命令行参数或聊天文本。密码更新后重新运行 `auth setup --prompt` 即可，执行 `remote-dev auth forget` 可随时清除本地保存的配置与密码。
+- **已提供密码就直接接通**：用户为远端任务提供了 SSH 地址、端口、用户名和密码时，Agent 直接调用 `remote_auth(action="setup", host=..., port=..., user=..., password=...)`。工具自动完成密码验证、公钥安装和独立的公钥登录验证，随后继续原任务。没有本地 `auth_ref` 是首次登记状态，不是要求用户再次配置凭据的理由；公钥不可用时仍可使用已验证的密码模式。
+- **无弹窗本地文件保护**：凭据保存在本地 `credentials.json`（POSIX 目录权限 `0700`、文件权限 `0600`），不调用系统钥匙串、不触发桌面授权弹窗。CLI 通过 `--prompt`、`--password-stdin` 或 `--password-env VARIABLE` 导入，MCP 支持 `password` 与 `password_env` 两种互斥输入；不回显密码，不将密码写入 SSH 命令行或端点记录。`password_env` 只读取当前服务进程已继承的环境，另一终端临时设置的变量不会进入已运行的 MCP 服务。旧工具目录没有 `password` 参数时，Agent 可通过本地进程的标准输入调用 `remote-dev auth setup --password-stdin` 导入已有密码，无需重问用户。密码更新后重新运行认证登记，执行 `remote-dev auth forget` 可随时清除本地保存的配置与密码。
 
 ---
 
