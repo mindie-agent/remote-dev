@@ -1,6 +1,7 @@
 """
 [Role] Shared native job/media helpers used by host handler modules.
 [Invariants] Job scope checks, live status projection, bounded log tails, local media blocks.
+  Local job-log stat/read OSError is never replaced by an empty preview.
 [Timeouts & Locks] Delegates to canonical job control; no long local locks.
 [Side-Effect Policy] Read-only helpers except explicit stop handlers in host modules.
 """
@@ -9,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import codecs
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NoReturn
 
 from remote_dev.core.errors import caller_error
 _TERMINAL = {"cancelled", "succeeded", "failed", "timeout", "absent"}
@@ -157,6 +158,19 @@ def _job_file(path: Any, stream: str) -> Any:
     path = Path(path)
     return path.with_name(path.stem + f".{stream}.log")
 
+
+def _raise_job_log_read_error(path: Any, exc: OSError, *, kind: str = "job log") -> NoReturn:
+    """Raise a local file I/O failure that keeps the path and errno visible."""
+    errno_value = getattr(exc, "errno", None)
+    message = f"{kind} unreadable: {path}: {type(exc).__name__}: {errno_value}"
+    if errno_value is None:
+        error = OSError(message)
+        error.filename = str(path)
+    else:
+        error = OSError(errno_value, message, str(path))
+    raise error from exc
+
+
 def _tail_text(path: Any, limit: int = 32000) -> tuple[str, bool]:
     from pathlib import Path
 
@@ -218,16 +232,25 @@ def _job_stream_preview(
 
     from remote_dev.core.job_logs import preview_stream_edges, preview_stream_text
 
+    log_path = Path(path)
     try:
-        size = Path(path).stat().st_size
-    except OSError:
+        size = log_path.stat().st_size
+    except TimeoutError:
+        raise
+    except FileNotFoundError:
         size = 0
+    except OSError as exc:
+        _raise_job_log_read_error(log_path, exc)
     if 0 < size <= 4 * 1024 * 1024:
         try:
-            data = Path(path).read_bytes()
-        except OSError:
+            data = log_path.read_bytes()
+        except TimeoutError:
+            raise
+        except FileNotFoundError:
             data = None
-        if data is not None:
+        except OSError as exc:
+            _raise_job_log_read_error(log_path, exc)
+        else:
             return preview_stream_text(data.decode("utf-8", errors="replace"))
     reader = tail_reader or _tail_text
     tail, tail_truncated = reader(path, 32768)
