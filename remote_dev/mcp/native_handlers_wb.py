@@ -1,6 +1,6 @@
 """
 [Role] WorkBuddy (wb) native handlers (TaskOutput/BashOutput with raw-log incremental cursors & regex filter, ViewImage).
-[Invariants] Preserves Claude/CodeBuddy task output XML envelope while supporting raw-offset incremental vs full=true output reads, regex line filtering, and ViewImage query metadata. Existing log-file or job-record stat/read OSError is never disguised as an empty incremental delta or a missing cursor. Cursor-commit recording_failure never invents outcome=success, never treats a live job or status=None receipt as operation_completed, and distinguishes explicit wb_output_offsets null from a missing field.
+[Invariants] Preserves Claude/CodeBuddy task output XML envelope while supporting raw-offset incremental vs full=true output reads, regex line filtering, and ViewImage query metadata. Existing log-file or job-record stat/read OSError is never disguised as an empty incremental delta or a missing cursor. Cursor-commit recording_failure never invents outcome=success, never treats a live/non-FSM status as operation_completed, preserves real job execution_outcome over status-query success, and treats explicit wb_output_offsets or in-stream offset null as unreadable.
 [Timeouts & Locks] Canonical job control owns deadlines; cursor persistence acquires record_lock(record_path).
 [Side-Effect Policy] Read-only observation and media fetch via canonical core; persists wb_output_offsets into the reloaded job record and surfaces local_recording_failed on persistence errors.
 """
@@ -21,12 +21,20 @@ from remote_dev.mcp.native_runtime import CanonicalCall, handler
 _WB_CURSORS: dict[str, dict[str, Any]] = {}
 _MAX_DELTA_READ_BYTES = 4 * 1024 * 1024
 _LIVE_JOB_STATES = frozenset({"prepared", "running"})
-_TERMINAL_NATIVE_STATUS = frozenset({"completed", "killed", "failed", "timeout", "timed_out", "lost"})
+_FSM_EXECUTION_OUTCOME = {
+    "prepared": "success",
+    "running": "success",
+    "succeeded": "success",
+    "cancelled": "cancelled",
+    "failed": "failed",
+    "timeout": "timeout",
+    "absent": "failed",
+}
 
 
-def _wb_cursor_offset(value: Any, *, field: str, source: str, default: int = 0) -> int:
+def _wb_cursor_offset(value: Any, *, field: str, source: str) -> int:
     if value is None:
-        value = default
+        raise ValueError(f"job record unreadable: {source}: {field} is null")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"job record unreadable: {source}: {field} is {type(value).__name__}")
     if isinstance(value, float):
@@ -68,10 +76,16 @@ def _saved_wb_offsets(container: dict[str, Any], *, source: str) -> dict[str, An
     return _wb_cursor_from_saved(saved, source=source)
 
 
-def _cursor_commit_progress(observed: Any) -> str:
-    """Classify a TaskOutput receipt as live, terminal, or incomplete.
+def _fsm_states(observed: dict[str, Any]) -> tuple[Any, ...]:
+    job = observed.get("job") if isinstance(observed.get("job"), dict) else {}
+    return (job.get("state"), observed.get("state"), observed.get("status"))
 
-    Output observation succeeding is not the same as the remote job finishing.
+
+def _cursor_commit_progress(observed: Any) -> str:
+    """Classify a TaskOutput receipt as live, terminal, nonterminal, or incomplete.
+
+    Only the canonical job FSM (prepared/running vs succeeded/failed/timeout/cancelled/absent)
+    marks completion. Native projections and aliases (completed/success/finished/unknown) do not.
     """
     if not isinstance(observed, dict):
         return "incomplete"
@@ -81,19 +95,24 @@ def _cursor_commit_progress(observed: Any) -> str:
         return "incomplete"
     if not isinstance(status, str) or not status:
         return "incomplete"
-    job = observed.get("job") if isinstance(observed.get("job"), dict) else {}
-    task = observed.get("task") if isinstance(observed.get("task"), dict) else {}
-    for candidate in (job.get("state"), observed.get("state"), status):
+    for candidate in _fsm_states(observed):
         if candidate in _LIVE_JOB_STATES:
             return "live"
         if candidate in _TERMINAL:
             return "terminal"
-    task_status = task.get("status")
-    if task_status == "running":
-        return "live"
-    if task_status in _TERMINAL_NATIVE_STATUS:
-        return "terminal"
-    return "incomplete"
+    return "nonterminal"
+
+
+def _execution_outcome_from_fsm(observed: dict[str, Any]) -> str:
+    """Job execution outcome from the FSM, never the status-query success bit."""
+    for candidate in _fsm_states(observed):
+        mapped = _FSM_EXECUTION_OUTCOME.get(candidate)
+        if mapped is not None:
+            return mapped
+    outcome = observed.get("outcome")
+    if outcome in {"failed", "timeout", "cancelled", "blocked"}:
+        return str(outcome)
+    return "failed"
 
 
 def _load_wb_cursor(job_id: str, record_path: Path | None, record: dict[str, Any] | None) -> dict[str, Any]:
@@ -326,6 +345,7 @@ def wb_task_output(
         progress = _cursor_commit_progress(observed)
         if progress == "incomplete":
             raise
+        observed["outcome"] = _execution_outcome_from_fsm(observed)
         if not isinstance(observed.get("summary"), str):
             observed["summary"] = ""
         return recording_failure(

@@ -253,6 +253,10 @@ def _wb_output_payload(**result_fields):
     return body
 
 
+def _enospc() -> OSError:
+    return OSError(errno.ENOSPC, "No space left on device")
+
+
 def test_wb_cursor_commit_preserves_real_failed_outcome(tmp_path, monkeypatch):
     record_path = tmp_path / "job.json"
     record_path.write_text("{}", encoding="utf-8")
@@ -269,6 +273,30 @@ def test_wb_cursor_commit_preserves_real_failed_outcome(tmp_path, monkeypatch):
     assert result["outcome"] != "success"
 
 
+def test_failed_job_status_query_success_does_not_cover_execution_outcome(tmp_path, monkeypatch):
+    record_path = tmp_path / "job.json"
+    record_path.write_text("{}", encoding="utf-8")
+    payload = _wb_output_payload(
+        outcome="success",
+        status="failed",
+        summary="Remote job j is failed.",
+        job={"state": "failed", "remote_status": {"exit_code": 1}},
+        task={"output": "log", "status": "failed"},
+        preview={"stdout": "log", "stderr": ""},
+    )
+    monkeypatch.setattr(state_store, "find_job_record", lambda _job_id: (record_path, {"job_id": "j"}))
+    monkeypatch.setattr(wb_handlers, "claude_task_output", lambda *_a, **_k: payload)
+    monkeypatch.setattr(wb_handlers, "_save_wb_cursor", mock.Mock(side_effect=_enospc()))
+    out = wb_task_output("wb", SimpleNamespace(wire="TaskOutput"), {"task_id": "j"}, {}, lambda *_a, **_k: {})
+    result = out["result"]
+    assert result["status"] == "local_recording_failed"
+    assert result["operation_completed"] is True
+    assert result["execution_outcome"] == "failed"
+    assert result["execution_status"] == "failed"
+    assert result["outcome"] != "success"
+    assert operation_outcome("remote_TaskOutput", out) == "failed"
+
+
 def test_wb_cursor_commit_does_not_invent_success_receipt(tmp_path, monkeypatch):
     record_path = tmp_path / "job.json"
     record_path.write_text("{}", encoding="utf-8")
@@ -278,10 +306,6 @@ def test_wb_cursor_commit_does_not_invent_success_receipt(tmp_path, monkeypatch)
     monkeypatch.setattr(wb_handlers, "_save_wb_cursor", mock.Mock(side_effect=OSError("disk full")))
     with pytest.raises(OSError, match="disk full"):
         wb_task_output("wb", SimpleNamespace(wire="TaskOutput"), {"task_id": "j"}, {}, lambda *_a, **_k: {})
-
-
-def _enospc() -> OSError:
-    return OSError(errno.ENOSPC, "No space left on device")
 
 
 def test_running_job_cursor_enospc_is_not_completed(tmp_path, monkeypatch):
@@ -310,6 +334,63 @@ def test_running_job_cursor_enospc_is_not_completed(tmp_path, monkeypatch):
     assert result["operation_completed"] is False
     assert result["execution_outcome"] == "success"
     assert result["execution_status"] == "running"
+    assert operation_outcome("remote_TaskOutput", out) == "failed"
+
+
+@pytest.mark.parametrize("fake_status", ["unknown", "success", "finished", "ok", "completed"])
+def test_fake_terminal_status_is_not_completed(tmp_path, monkeypatch, fake_status):
+    record_path = tmp_path / "job.json"
+    record_path.write_text("{}", encoding="utf-8")
+    payload = _wb_output_payload(
+        outcome="success",
+        status=fake_status,
+        summary=f"Remote job j is {fake_status}.",
+        job={"state": fake_status},
+        task={"output": "log", "status": "failed"},
+        preview={"stdout": "log", "stderr": ""},
+    )
+    monkeypatch.setattr(state_store, "find_job_record", lambda _job_id: (record_path, {"job_id": "j"}))
+    monkeypatch.setattr(wb_handlers, "claude_task_output", lambda *_a, **_k: payload)
+    monkeypatch.setattr(wb_handlers, "_save_wb_cursor", mock.Mock(side_effect=_enospc()))
+    out = wb_task_output(
+        "wb",
+        SimpleNamespace(wire="TaskOutput"),
+        {"task_id": "j", "block": False},
+        {},
+        lambda *_a, **_k: {},
+    )
+    result = out["result"]
+    assert result["status"] == "local_recording_failed"
+    assert result["operation_completed"] is False
+    assert result["execution_outcome"] != "success"
+    assert operation_outcome("remote_TaskOutput", out) == "failed"
+
+
+def test_prepared_job_cursor_enospc_is_not_completed(tmp_path, monkeypatch):
+    record_path = tmp_path / "job.json"
+    record_path.write_text("{}", encoding="utf-8")
+    payload = _wb_output_payload(
+        outcome="success",
+        status="prepared",
+        summary="Remote job j is prepared.",
+        job={"state": "prepared"},
+        task={"output": "log", "status": "running"},
+        preview={"stdout": "log", "stderr": ""},
+    )
+    monkeypatch.setattr(state_store, "find_job_record", lambda _job_id: (record_path, {"job_id": "j"}))
+    monkeypatch.setattr(wb_handlers, "claude_task_output", lambda *_a, **_k: payload)
+    monkeypatch.setattr(wb_handlers, "_save_wb_cursor", mock.Mock(side_effect=_enospc()))
+    out = wb_task_output(
+        "wb",
+        SimpleNamespace(wire="TaskOutput"),
+        {"task_id": "j", "block": False},
+        {},
+        lambda *_a, **_k: {},
+    )
+    result = out["result"]
+    assert result["operation_completed"] is False
+    assert result["execution_outcome"] == "success"
+    assert result["execution_status"] == "prepared"
     assert operation_outcome("remote_TaskOutput", out) == "failed"
 
 
@@ -348,6 +429,21 @@ def test_load_wb_cursor_missing_field_falls_back_to_memory(tmp_path):
     )
     assert cursor["stdout_offset"] == 12
     assert cursor["stderr_offset"] == 3
+
+
+def test_load_wb_cursor_in_stream_null_offset_is_unreadable(tmp_path):
+    wb_handlers._WB_CURSORS.clear()
+    record_path = tmp_path / "job.json"
+    record_path.write_text(
+        json.dumps({"wb_output_offsets": {"stdout_offset": None, "stderr_offset": 4}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="stdout_offset is null"):
+        _load_wb_cursor(
+            "job-1",
+            record_path,
+            {"wb_output_offsets": {"stdout_offset": 12, "stderr_offset": 0, "stdout_head": "", "stderr_head": ""}},
+        )
 
 
 def test_load_wb_cursor_overflow_offset_is_diagnosed(tmp_path):
