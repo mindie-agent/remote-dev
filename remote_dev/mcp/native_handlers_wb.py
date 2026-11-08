@@ -1,6 +1,6 @@
 """
 [Role] WorkBuddy (wb) native handlers (TaskOutput/BashOutput with raw-log incremental cursors & regex filter, ViewImage).
-[Invariants] Preserves Claude/CodeBuddy task output XML envelope while supporting raw-offset incremental vs full=true output reads, regex line filtering, and ViewImage query metadata.
+[Invariants] Preserves Claude/CodeBuddy task output XML envelope while supporting raw-offset incremental vs full=true output reads, regex line filtering, and ViewImage query metadata. Existing log-file stat/read OSError is never disguised as an empty incremental delta.
 [Timeouts & Locks] Canonical job control owns deadlines; cursor persistence acquires record_lock(record_path).
 [Side-Effect Policy] Read-only observation and media fetch via canonical core; persists wb_output_offsets into the reloaded job record and surfaces local_recording_failed on persistence errors.
 """
@@ -13,7 +13,7 @@ from typing import Any
 
 from remote_dev.core.errors import caller_error
 from remote_dev.mcp.harness_profiles import NativeToolSpec
-from remote_dev.mcp.native_common import _read_media_payload
+from remote_dev.mcp.native_common import _raise_job_log_read_error, _read_media_payload
 from remote_dev.mcp.native_handlers_claude import claude_task_output
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
 
@@ -118,8 +118,12 @@ def _read_stream_incremental(
                         raw_delta = fh.read(read_len)
                 delta_text = raw_delta.decode("utf-8", errors="replace")
                 return preview_stream_text(delta_text)["text"], size, head_str
-            except OSError:
+            except TimeoutError:
+                raise
+            except FileNotFoundError:
                 pass
+            except OSError as exc:
+                _raise_job_log_read_error(log_path, exc)
 
         raw_text, _ = claude_handlers._tail_text(log_path)
     else:
