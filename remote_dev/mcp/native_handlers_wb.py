@@ -1,6 +1,6 @@
 """
 [Role] WorkBuddy (wb) native handlers (TaskOutput/BashOutput with raw-log incremental cursors & regex filter, ViewImage).
-[Invariants] Preserves Claude/CodeBuddy task output XML envelope while supporting raw-offset incremental vs full=true output reads, regex line filtering, and ViewImage query metadata. Existing log-file or job-record stat/read OSError is never disguised as an empty incremental delta or a missing cursor. Cursor-commit recording_failure never invents outcome=success.
+[Invariants] Preserves Claude/CodeBuddy task output XML envelope while supporting raw-offset incremental vs full=true output reads, regex line filtering, and ViewImage query metadata. Existing log-file or job-record stat/read OSError is never disguised as an empty incremental delta or a missing cursor. Cursor-commit recording_failure never invents outcome=success, never treats a live job or status=None receipt as operation_completed, and distinguishes explicit wb_output_offsets null from a missing field.
 [Timeouts & Locks] Canonical job control owns deadlines; cursor persistence acquires record_lock(record_path).
 [Side-Effect Policy] Read-only observation and media fetch via canonical core; persists wb_output_offsets into the reloaded job record and surfaces local_recording_failed on persistence errors.
 """
@@ -8,29 +8,92 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 import re
 from typing import Any
 
 from remote_dev.core.errors import caller_error
 from remote_dev.mcp.harness_profiles import NativeToolSpec
-from remote_dev.mcp.native_common import _raise_job_log_read_error, _read_media_payload
+from remote_dev.mcp.native_common import _TERMINAL, _raise_job_log_read_error, _read_media_payload
 from remote_dev.mcp.native_handlers_claude import claude_task_output
 from remote_dev.mcp.native_runtime import CanonicalCall, handler
 
 _WB_CURSORS: dict[str, dict[str, Any]] = {}
 _MAX_DELTA_READ_BYTES = 4 * 1024 * 1024
+_LIVE_JOB_STATES = frozenset({"prepared", "running"})
+_TERMINAL_NATIVE_STATUS = frozenset({"completed", "killed", "failed", "timeout", "timed_out", "lost"})
+
+
+def _wb_cursor_offset(value: Any, *, field: str, source: str, default: int = 0) -> int:
+    if value is None:
+        value = default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"job record unreadable: {source}: {field} is {type(value).__name__}")
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError(f"job record unreadable: {source}: {field} is not a finite integer")
+        try:
+            value = int(value)
+        except OverflowError as exc:
+            raise ValueError(f"job record unreadable: {source}: {field} overflows integer range") from exc
+    if value < 0:
+        raise ValueError(f"job record unreadable: {source}: {field} is negative")
+    return value
 
 
 def _wb_cursor_from_saved(saved: dict[str, Any], *, source: str) -> dict[str, Any]:
     try:
         return {
-            "stdout_offset": int(saved.get("stdout_offset", 0)),
-            "stderr_offset": int(saved.get("stderr_offset", 0)),
+            "stdout_offset": _wb_cursor_offset(saved.get("stdout_offset", 0), field="stdout_offset", source=source),
+            "stderr_offset": _wb_cursor_offset(saved.get("stderr_offset", 0), field="stderr_offset", source=source),
             "stdout_head": str(saved.get("stdout_head", "")),
             "stderr_head": str(saved.get("stderr_head", "")),
         }
-    except (TypeError, ValueError) as exc:
+    except TimeoutError:
+        raise
+    except (TypeError, ValueError, OverflowError) as exc:
+        if isinstance(exc, ValueError) and str(exc).startswith("job record unreadable:"):
+            raise
         raise ValueError(f"job record unreadable: {source}: invalid wb_output_offsets: {exc}") from exc
+
+
+def _saved_wb_offsets(container: dict[str, Any], *, source: str) -> dict[str, Any] | None:
+    if "wb_output_offsets" not in container:
+        return None
+    saved = container["wb_output_offsets"]
+    if saved is None:
+        raise ValueError(f"job record unreadable: {source}: wb_output_offsets is null")
+    if not isinstance(saved, dict):
+        raise ValueError(f"job record unreadable: {source}: wb_output_offsets is {type(saved).__name__}")
+    return _wb_cursor_from_saved(saved, source=source)
+
+
+def _cursor_commit_progress(observed: Any) -> str:
+    """Classify a TaskOutput receipt as live, terminal, or incomplete.
+
+    Output observation succeeding is not the same as the remote job finishing.
+    """
+    if not isinstance(observed, dict):
+        return "incomplete"
+    outcome = observed.get("outcome")
+    status = observed.get("status")
+    if not isinstance(outcome, str) or not outcome:
+        return "incomplete"
+    if not isinstance(status, str) or not status:
+        return "incomplete"
+    job = observed.get("job") if isinstance(observed.get("job"), dict) else {}
+    task = observed.get("task") if isinstance(observed.get("task"), dict) else {}
+    for candidate in (job.get("state"), observed.get("state"), status):
+        if candidate in _LIVE_JOB_STATES:
+            return "live"
+        if candidate in _TERMINAL:
+            return "terminal"
+    task_status = task.get("status")
+    if task_status == "running":
+        return "live"
+    if task_status in _TERMINAL_NATIVE_STATUS:
+        return "terminal"
+    return "incomplete"
 
 
 def _load_wb_cursor(job_id: str, record_path: Path | None, record: dict[str, Any] | None) -> dict[str, Any]:
@@ -52,21 +115,13 @@ def _load_wb_cursor(job_id: str, record_path: Path | None, record: dict[str, Any
                 raise ValueError(
                     f"job record unreadable: {record_path}: expected object, got {type(latest).__name__}"
                 )
-            saved = latest.get("wb_output_offsets")
-            if isinstance(saved, dict):
-                return _wb_cursor_from_saved(saved, source=str(record_path))
-            if saved is not None:
-                raise ValueError(
-                    f"job record unreadable: {record_path}: wb_output_offsets is {type(saved).__name__}"
-                )
-    if isinstance(record, dict) and "wb_output_offsets" in record:
-        saved = record.get("wb_output_offsets")
-        if isinstance(saved, dict):
-            return _wb_cursor_from_saved(saved, source="in-memory record")
-        if saved is not None:
-            raise ValueError(
-                f"job record unreadable: in-memory record: wb_output_offsets is {type(saved).__name__}"
-            )
+            loaded = _saved_wb_offsets(latest, source=str(record_path))
+            if loaded is not None:
+                return loaded
+    if isinstance(record, dict):
+        loaded = _saved_wb_offsets(record, source="in-memory record")
+        if loaded is not None:
+            return loaded
     key = f"{record_path or ''}:{job_id}"
     return dict(
         _WB_CURSORS.get(
@@ -268,11 +323,17 @@ def wb_task_output(
         raise
     except (OSError, ValueError, RuntimeError) as exc:
         observed = payload.get("result")
-        if not isinstance(observed, dict) or "outcome" not in observed or "status" not in observed:
+        progress = _cursor_commit_progress(observed)
+        if progress == "incomplete":
             raise
         if not isinstance(observed.get("summary"), str):
             observed["summary"] = ""
-        return recording_failure(payload, exc, stage="wb_cursor_commit", operation_completed=True)
+        return recording_failure(
+            payload,
+            exc,
+            stage="wb_cursor_commit",
+            operation_completed=progress == "terminal",
+        )
 
     return payload
 

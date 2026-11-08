@@ -14,6 +14,7 @@ import remote_dev.mcp.native_handlers_claude as claude_handlers
 import remote_dev.mcp.native_common as native_common
 import remote_dev.mcp.native_handlers_wb as wb_handlers
 from remote_dev.mcp.native_handlers_wb import _load_wb_cursor, _read_stream_incremental, wb_task_output
+from remote_dev.mcp.outcome import operation_outcome
 
 
 def _timeout(*_args, **_kwargs):
@@ -277,3 +278,92 @@ def test_wb_cursor_commit_does_not_invent_success_receipt(tmp_path, monkeypatch)
     monkeypatch.setattr(wb_handlers, "_save_wb_cursor", mock.Mock(side_effect=OSError("disk full")))
     with pytest.raises(OSError, match="disk full"):
         wb_task_output("wb", SimpleNamespace(wire="TaskOutput"), {"task_id": "j"}, {}, lambda *_a, **_k: {})
+
+
+def _enospc() -> OSError:
+    return OSError(errno.ENOSPC, "No space left on device")
+
+
+def test_running_job_cursor_enospc_is_not_completed(tmp_path, monkeypatch):
+    record_path = tmp_path / "job.json"
+    record_path.write_text("{}", encoding="utf-8")
+    payload = _wb_output_payload(
+        outcome="success",
+        status="running",
+        summary="Remote job j is running.",
+        job={"state": "running"},
+        task={"output": "log", "status": "running"},
+        preview={"stdout": "log", "stderr": ""},
+    )
+    monkeypatch.setattr(state_store, "find_job_record", lambda _job_id: (record_path, {"job_id": "j"}))
+    monkeypatch.setattr(wb_handlers, "claude_task_output", lambda *_a, **_k: payload)
+    monkeypatch.setattr(wb_handlers, "_save_wb_cursor", mock.Mock(side_effect=_enospc()))
+    out = wb_task_output(
+        "wb",
+        SimpleNamespace(wire="TaskOutput"),
+        {"task_id": "j", "block": False},
+        {},
+        lambda *_a, **_k: {},
+    )
+    result = out["result"]
+    assert result["status"] == "local_recording_failed"
+    assert result["operation_completed"] is False
+    assert result["execution_outcome"] == "success"
+    assert result["execution_status"] == "running"
+    assert operation_outcome("remote_TaskOutput", out) == "failed"
+
+
+def test_null_status_receipt_is_not_completed(tmp_path, monkeypatch):
+    record_path = tmp_path / "job.json"
+    record_path.write_text("{}", encoding="utf-8")
+    payload = _wb_output_payload(outcome="success", status=None, summary="partial receipt")
+    monkeypatch.setattr(state_store, "find_job_record", lambda _job_id: (record_path, {"job_id": "j"}))
+    monkeypatch.setattr(wb_handlers, "claude_task_output", lambda *_a, **_k: payload)
+    monkeypatch.setattr(wb_handlers, "_save_wb_cursor", mock.Mock(side_effect=_enospc()))
+    with pytest.raises(OSError) as caught:
+        wb_task_output("wb", SimpleNamespace(wire="TaskOutput"), {"task_id": "j"}, {}, lambda *_a, **_k: {})
+    assert caught.value.errno == errno.ENOSPC
+
+
+def test_load_wb_cursor_explicit_null_is_not_missing(tmp_path):
+    wb_handlers._WB_CURSORS.clear()
+    record_path = tmp_path / "job.json"
+    record_path.write_text(json.dumps({"wb_output_offsets": None}), encoding="utf-8")
+    with pytest.raises(ValueError, match="wb_output_offsets is null"):
+        _load_wb_cursor(
+            "job-1",
+            record_path,
+            {"wb_output_offsets": {"stdout_offset": 12, "stderr_offset": 0, "stdout_head": "", "stderr_head": ""}},
+        )
+
+
+def test_load_wb_cursor_missing_field_falls_back_to_memory(tmp_path):
+    wb_handlers._WB_CURSORS.clear()
+    record_path = tmp_path / "job.json"
+    record_path.write_text(json.dumps({"job_id": "job-1"}), encoding="utf-8")
+    cursor = _load_wb_cursor(
+        "job-1",
+        record_path,
+        {"wb_output_offsets": {"stdout_offset": 12, "stderr_offset": 3, "stdout_head": "ab", "stderr_head": ""}},
+    )
+    assert cursor["stdout_offset"] == 12
+    assert cursor["stderr_offset"] == 3
+
+
+def test_load_wb_cursor_overflow_offset_is_diagnosed(tmp_path):
+    record_path = tmp_path / "job.json"
+    record_path.write_text('{"wb_output_offsets": {"stdout_offset": 1e400, "stderr_offset": 0}}', encoding="utf-8")
+    with pytest.raises(ValueError, match="finite integer|overflows integer range|job record unreadable"):
+        _load_wb_cursor("job-1", record_path, None)
+
+
+def test_load_wb_cursor_timeout_still_raised_during_offset_parse(tmp_path, monkeypatch):
+    record_path = tmp_path / "job.json"
+    record_path.write_text(json.dumps({"wb_output_offsets": {"stdout_offset": 1}}), encoding="utf-8")
+
+    def boom(*_a, **_k):
+        raise TimeoutError("injected I/O deadline")
+
+    monkeypatch.setattr(wb_handlers, "_wb_cursor_offset", boom)
+    with pytest.raises(TimeoutError, match="I/O deadline"):
+        _load_wb_cursor("job-1", record_path, None)
