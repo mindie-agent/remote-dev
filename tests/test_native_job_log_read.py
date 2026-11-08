@@ -31,7 +31,7 @@ def _forbidden_tail(*_args, **_kwargs):
 
 def test_job_stream_preview_stat_timeout_is_not_empty_preview(tmp_path, monkeypatch):
     log = tmp_path / "job.stdout.log"
-    log.write_text("visible-log\n", encoding="utf-8")
+    log.write_text("visible-log\n", encoding="utf-8", newline="\n")
     original_stat = Path.stat
 
     def timed_out_stat(self, *args, **kwargs):
@@ -46,7 +46,7 @@ def test_job_stream_preview_stat_timeout_is_not_empty_preview(tmp_path, monkeypa
 
 def test_job_stream_preview_stat_permission_is_not_empty_preview(tmp_path, monkeypatch):
     log = tmp_path / "job.stdout.log"
-    log.write_text("visible-log\n", encoding="utf-8")
+    log.write_text("visible-log\n", encoding="utf-8", newline="\n")
     original_stat = Path.stat
 
     def denied_stat(self, *args, **kwargs):
@@ -63,7 +63,7 @@ def test_job_stream_preview_stat_permission_is_not_empty_preview(tmp_path, monke
 
 def test_job_stream_preview_read_timeout_is_not_empty_preview(tmp_path, monkeypatch):
     log = tmp_path / "job.stdout.log"
-    log.write_text("visible-log\n", encoding="utf-8")
+    log.write_text("visible-log\n", encoding="utf-8", newline="\n")
     monkeypatch.setattr(Path, "read_bytes", _timeout)
     with pytest.raises(TimeoutError, match="I/O deadline"):
         native_common._job_stream_preview(log, tail_reader=_forbidden_tail)
@@ -71,7 +71,7 @@ def test_job_stream_preview_read_timeout_is_not_empty_preview(tmp_path, monkeypa
 
 def test_job_stream_preview_read_permission_is_not_empty_preview(tmp_path, monkeypatch):
     log = tmp_path / "job.stdout.log"
-    log.write_text("visible-log\n", encoding="utf-8")
+    log.write_text("visible-log\n", encoding="utf-8", newline="\n")
 
     def denied_read(self):
         raise _permission(self)
@@ -92,7 +92,7 @@ def test_job_stream_preview_missing_file_stays_empty(tmp_path):
 
 def test_job_stream_preview_readable_file_keeps_content(tmp_path):
     log = tmp_path / "job.stdout.log"
-    log.write_text("hello-from-cache\n", encoding="utf-8")
+    log.write_text("hello-from-cache\n", encoding="utf-8", newline="\n")
     preview = native_common._job_stream_preview(log)
     assert "hello-from-cache" in preview["text"]
 
@@ -101,7 +101,7 @@ def test_read_stream_incremental_timeout_is_not_empty_delta(tmp_path, monkeypatc
     record = tmp_path / "job.json"
     record.write_text("{}", encoding="utf-8")
     log = tmp_path / "job.stdout.log"
-    log.write_text("real-output\n", encoding="utf-8")
+    log.write_text("real-output\n", encoding="utf-8", newline="\n")
     original_open = Path.open
 
     def timed_out_open(self, *args, **kwargs):
@@ -121,7 +121,7 @@ def test_read_stream_incremental_permission_is_not_empty_delta(tmp_path, monkeyp
     record = tmp_path / "job.json"
     record.write_text("{}", encoding="utf-8")
     log = tmp_path / "job.stdout.log"
-    log.write_text("real-output\n", encoding="utf-8")
+    log.write_text("real-output\n", encoding="utf-8", newline="\n")
     original_open = Path.open
 
     def denied_open(self, *args, **kwargs):
@@ -154,18 +154,19 @@ def test_read_stream_incremental_readable_log_returns_delta(tmp_path):
     record = tmp_path / "job.json"
     record.write_text("{}", encoding="utf-8")
     log = tmp_path / "job.stdout.log"
-    log.write_text("delta-line\n", encoding="utf-8")
+    payload = b"delta-line\n"
+    log.write_bytes(payload)
     text, size, head = _read_stream_incremental(
         record, "stdout", 0, "", full_snapshot=False, full_preview_text="unused"
     )
     assert "delta-line" in text
-    assert size == len("delta-line\n")
+    assert size == len(payload) == log.stat().st_size
     assert head.startswith("delta-line")
 
 
 def test_path_is_file_does_not_swallow_timeout_or_permission(tmp_path):
     log = tmp_path / "job.stdout.log"
-    log.write_text("visible-log\n", encoding="utf-8")
+    log.write_text("visible-log\n", encoding="utf-8", newline="\n")
     original_stat = Path.stat
 
     def timed_out_stat(self, *args, **kwargs):
