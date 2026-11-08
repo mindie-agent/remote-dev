@@ -159,10 +159,10 @@ def _job_file(path: Any, stream: str) -> Any:
     return path.with_name(path.stem + f".{stream}.log")
 
 
-def _raise_job_log_read_error(path: Any, exc: OSError) -> NoReturn:
-    """Raise a local job-log I/O failure that keeps the path and errno visible."""
+def _raise_job_log_read_error(path: Any, exc: OSError, *, kind: str = "job log") -> NoReturn:
+    """Raise a local file I/O failure that keeps the path and errno visible."""
     errno_value = getattr(exc, "errno", None)
-    message = f"job log unreadable: {path}: {type(exc).__name__}: {errno_value}"
+    message = f"{kind} unreadable: {path}: {type(exc).__name__}: {errno_value}"
     if errno_value is None:
         error = OSError(message)
         error.filename = str(path)

@@ -1,6 +1,6 @@
 """
 [Role] WorkBuddy (wb) native handlers (TaskOutput/BashOutput with raw-log incremental cursors & regex filter, ViewImage).
-[Invariants] Preserves Claude/CodeBuddy task output XML envelope while supporting raw-offset incremental vs full=true output reads, regex line filtering, and ViewImage query metadata. Existing log-file stat/read OSError is never disguised as an empty incremental delta.
+[Invariants] Preserves Claude/CodeBuddy task output XML envelope while supporting raw-offset incremental vs full=true output reads, regex line filtering, and ViewImage query metadata. Existing log-file or job-record stat/read OSError is never disguised as an empty incremental delta or a missing cursor. Cursor-commit recording_failure never invents outcome=success.
 [Timeouts & Locks] Canonical job control owns deadlines; cursor persistence acquires record_lock(record_path).
 [Side-Effect Policy] Read-only observation and media fetch via canonical core; persists wb_output_offsets into the reloaded job record and surfaces local_recording_failed on persistence errors.
 """
@@ -21,30 +21,52 @@ _WB_CURSORS: dict[str, dict[str, Any]] = {}
 _MAX_DELTA_READ_BYTES = 4 * 1024 * 1024
 
 
-def _load_wb_cursor(job_id: str, record_path: Path | None, record: dict[str, Any] | None) -> dict[str, Any]:
-    if record_path is not None and record_path.is_file():
-        try:
-            from remote_dev.core.state_store import read_json
-
-            latest = read_json(record_path)
-            if isinstance(latest, dict) and isinstance(latest.get("wb_output_offsets"), dict):
-                saved = latest["wb_output_offsets"]
-                return {
-                    "stdout_offset": int(saved.get("stdout_offset", 0)),
-                    "stderr_offset": int(saved.get("stderr_offset", 0)),
-                    "stdout_head": str(saved.get("stdout_head", "")),
-                    "stderr_head": str(saved.get("stderr_head", "")),
-                }
-        except (OSError, ValueError):
-            pass
-    if isinstance(record, dict) and isinstance(record.get("wb_output_offsets"), dict):
-        saved = record["wb_output_offsets"]
+def _wb_cursor_from_saved(saved: dict[str, Any], *, source: str) -> dict[str, Any]:
+    try:
         return {
             "stdout_offset": int(saved.get("stdout_offset", 0)),
             "stderr_offset": int(saved.get("stderr_offset", 0)),
             "stdout_head": str(saved.get("stdout_head", "")),
             "stderr_head": str(saved.get("stderr_head", "")),
         }
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"job record unreadable: {source}: invalid wb_output_offsets: {exc}") from exc
+
+
+def _load_wb_cursor(job_id: str, record_path: Path | None, record: dict[str, Any] | None) -> dict[str, Any]:
+    if record_path is not None:
+        try:
+            from remote_dev.core.state_store import read_json
+
+            latest = read_json(record_path)
+        except TimeoutError:
+            raise
+        except FileNotFoundError:
+            latest = None
+        except OSError as exc:
+            _raise_job_log_read_error(record_path, exc, kind="job record")
+        except ValueError as exc:
+            raise ValueError(f"job record unreadable: {record_path}: {type(exc).__name__}: {exc}") from exc
+        else:
+            if not isinstance(latest, dict):
+                raise ValueError(
+                    f"job record unreadable: {record_path}: expected object, got {type(latest).__name__}"
+                )
+            saved = latest.get("wb_output_offsets")
+            if isinstance(saved, dict):
+                return _wb_cursor_from_saved(saved, source=str(record_path))
+            if saved is not None:
+                raise ValueError(
+                    f"job record unreadable: {record_path}: wb_output_offsets is {type(saved).__name__}"
+                )
+    if isinstance(record, dict) and "wb_output_offsets" in record:
+        saved = record.get("wb_output_offsets")
+        if isinstance(saved, dict):
+            return _wb_cursor_from_saved(saved, source="in-memory record")
+        if saved is not None:
+            raise ValueError(
+                f"job record unreadable: in-memory record: wb_output_offsets is {type(saved).__name__}"
+            )
     key = f"{record_path or ''}:{job_id}"
     return dict(
         _WB_CURSORS.get(
@@ -96,34 +118,33 @@ def _read_stream_incremental(
 
     if record_path is not None:
         log_path = Path(claude_handlers._job_file(record_path, stream))
-        if log_path.is_file():
-            try:
-                size = log_path.stat().st_size
-                with log_path.open("rb") as fh:
-                    head_bytes = fh.read(64)
-                    head_str = head_bytes.decode("latin1")
-                    offset = prev_offset
-                    if offset < 0 or offset > size or (prev_head and not head_str.startswith(prev_head)):
-                        offset = 0
-                    if full_snapshot:
-                        return full_preview_text, size, head_str
-                    read_len = size - offset
-                    if read_len <= 0:
-                        return "", size, head_str
-                    if read_len > _MAX_DELTA_READ_BYTES:
-                        fh.seek(size - _MAX_DELTA_READ_BYTES)
-                        raw_delta = fh.read(_MAX_DELTA_READ_BYTES)
-                    else:
-                        fh.seek(offset)
-                        raw_delta = fh.read(read_len)
-                delta_text = raw_delta.decode("utf-8", errors="replace")
-                return preview_stream_text(delta_text)["text"], size, head_str
-            except TimeoutError:
-                raise
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                _raise_job_log_read_error(log_path, exc)
+        try:
+            size = log_path.stat().st_size
+            with log_path.open("rb") as fh:
+                head_bytes = fh.read(64)
+                head_str = head_bytes.decode("latin1")
+                offset = prev_offset
+                if offset < 0 or offset > size or (prev_head and not head_str.startswith(prev_head)):
+                    offset = 0
+                if full_snapshot:
+                    return full_preview_text, size, head_str
+                read_len = size - offset
+                if read_len <= 0:
+                    return "", size, head_str
+                if read_len > _MAX_DELTA_READ_BYTES:
+                    fh.seek(size - _MAX_DELTA_READ_BYTES)
+                    raw_delta = fh.read(_MAX_DELTA_READ_BYTES)
+                else:
+                    fh.seek(offset)
+                    raw_delta = fh.read(read_len)
+            delta_text = raw_delta.decode("utf-8", errors="replace")
+            return preview_stream_text(delta_text)["text"], size, head_str
+        except TimeoutError:
+            raise
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _raise_job_log_read_error(log_path, exc)
 
         raw_text, _ = claude_handlers._tail_text(log_path)
     else:
@@ -246,9 +267,11 @@ def wb_task_output(
     except TimeoutError:
         raise
     except (OSError, ValueError, RuntimeError) as exc:
-        result.setdefault("outcome", "success")
-        result.setdefault("status", "ok")
-        result.setdefault("summary", f"Task output for {job_id}.")
+        observed = payload.get("result")
+        if not isinstance(observed, dict) or "outcome" not in observed or "status" not in observed:
+            raise
+        if not isinstance(observed.get("summary"), str):
+            observed["summary"] = ""
         return recording_failure(payload, exc, stage="wb_cursor_commit", operation_completed=True)
 
     return payload
