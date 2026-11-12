@@ -79,3 +79,41 @@ def test_failed_notification_remains_retryable_and_never_replays_work():
     assert refresh.check()
     assert refresh.check()
     assert messages == ["failed", {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}]
+
+
+def test_local_selection_failure_is_not_an_uncertain_external_write(tmp_path):
+    pointer = tmp_path / "current.json"
+    pointer.write_text('{"generation":"old"}')
+    process = subprocess.Popen(
+        [sys.executable, str(FIXTURE), str(tmp_path), "facade"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    replies = queue.Queue()
+    reader = threading.Thread(
+        target=lambda: [replies.put(json.loads(line)) for line in process.stdout], daemon=True)
+    reader.start()
+
+    def send(identifier, method):
+        process.stdin.write((json.dumps({"id": identifier, "method": method}) + "\n").encode())
+        process.stdin.flush()
+
+    try:
+        send(1, "initialize")
+        assert replies.get(timeout=5)["result"]["capabilities"]["tools"]["listChanged"]
+        pointer.write_text("incomplete local binding")
+        send(2, "tools/call")
+        result = replies.get(timeout=5)["result"]
+        assert result["isError"]
+        assert result["structuredContent"]["stage"] == "select_runtime"
+        assert result["structuredContent"]["execution"] == "not_started"
+        assert not (tmp_path / "calls.jsonl").exists()
+        send(3, "ping")
+        assert replies.get(timeout=5) == {"jsonrpc": "2.0", "id": 3, "result": {}}
+        process.stdin.close()
+        assert process.wait(timeout=7) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        reader.join(timeout=1)
