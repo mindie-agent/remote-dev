@@ -96,7 +96,9 @@ class CatalogRefresh:
 
 def selected_rpc(argv, message, *, env=None, timeout=660.0, cancel=None, max_output=32 * 1024 * 1024):
     """One bounded stdio exchange with the selected complete helper generation."""
-    deadline = time.monotonic() + timeout
+    # The caller's envelope includes the owned-tree drain, rather than adding
+    # another five seconds after the native MCP deadline has already elapsed.
+    deadline = time.monotonic() + max(.001, timeout - 5.0)
     with tempfile.TemporaryFile() as source, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         source.write((json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8"))
         source.seek(0)
@@ -169,8 +171,10 @@ def serve_selected(select, *, reader=None, writer=None):
     refresh = CatalogRefresh(revision, send)
 
     def dispatch(message, cancel):
+        stage = "select_runtime"
         try:
             argv, env = select()
+            stage = "dispatch_helper"
             response = selected_rpc(
                 argv, message, env=env, cancel=cancel,
                 timeout=660 if message.get("method") == "tools/call" else 15,
@@ -180,8 +184,10 @@ def serve_selected(select, *, reader=None, writer=None):
                 "isError": True, "content": [{"type": "text", "text": str(exc)}],
                 "structuredContent": {
                     "error_type": type(exc).__name__, "automatic_retry": False,
+                    "stage": stage,
                     "status": "cancelled" if isinstance(exc, InterruptedError) else "helper_failed",
-                    "execution": "outcome_unconfirmed" if message.get("method") == "tools/call" else "not_started",
+                    "execution": ("outcome_unconfirmed" if stage == "dispatch_helper"
+                                  and message.get("method") == "tools/call" else "not_started"),
                 },
             }}
         refresh.check()
