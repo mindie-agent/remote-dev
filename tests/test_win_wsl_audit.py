@@ -169,3 +169,60 @@ def test_symlink_plus_dotdot_does_not_bypass_drvfs_guard(tmp_path, monkeypatch):
     assert _host_exec.is_wsl_drvfs(f"{tricky_entry}/ssh") is True
     assert _host_exec.which_native("ssh", path=f"{tricky_entry}:{native_dir}") == str(native_ssh)
 
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX PATH/PE/cwd semantics")
+def test_round2_empty_path_unset_path_large_pe_offset_and_volume_guid(tmp_path, monkeypatch):
+    # 1. Empty PATH returns None and never searches working directory
+    cwd_bin = tmp_path / "cwd"
+    cwd_bin.mkdir()
+    rogue = cwd_bin / "ffmpeg"
+    rogue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    rogue.chmod(0o755)
+    monkeypatch.chdir(cwd_bin)
+    assert _host_exec.which_native("ffmpeg", path="") is None
+    monkeypatch.setenv("PATH", "")
+    assert _host_exec.which_native("ffmpeg") is None
+
+    # Unset PATH uses os.defpath rather than working directory
+    defdir = tmp_path / "defbin"
+    defdir.mkdir()
+    def_tool = defdir / "def_only_tool"
+    def_tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    def_tool.chmod(0o755)
+    (cwd_bin / "def_only_tool").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (cwd_bin / "def_only_tool").chmod(0o755)
+    monkeypatch.delenv("PATH", raising=False)
+    monkeypatch.setattr(_host_exec.os, "defpath", str(defdir))
+    assert _host_exec.which_native("def_only_tool") == str(def_tool)
+
+    # 2. Empty PATH entry (PATH=:/native) with PE ./ssh returns explicit /native/ssh rather than bare "ssh"
+    pe_cwd_ssh = cwd_bin / "ssh"
+    large_pe = bytearray(0x2008)
+    large_pe[0:2] = b"MZ"
+    large_pe[0x3C:0x40] = (0x2000).to_bytes(4, "little")
+    large_pe[0x2000:0x2004] = b"PE\x00\x00"
+    pe_cwd_ssh.write_bytes(bytes(large_pe))
+    pe_cwd_ssh.chmod(0o755)
+    # 3. PE signature at 0x2000 (> 4 KiB) is detected
+    assert _host_exec.is_pe_executable(pe_cwd_ssh) is True
+
+    native_dir = tmp_path / "native2"
+    native_dir.mkdir()
+    native_ssh = native_dir / "ssh"
+    native_ssh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    native_ssh.chmod(0o755)
+    assert _host_exec.posix_unshadowed_command("ssh", path=f":{native_dir}") == str(native_ssh)
+    with pytest.raises(RemoteExecutionError, match="Windows PE / WSL DrvFS"):
+        _host_exec.posix_unshadowed_command("ssh", path=":")
+
+    # 4. Volume-GUID extended paths preserve \\?\ prefix on Windows
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_host_exec.os, "name", "nt")
+        mp.setattr(probe.os, "name", "nt")
+        vol_guid = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\keys\id_ed25519"
+        assert _host_exec.strip_windows_extended_prefix(vol_guid) == vol_guid
+        assert probe._normalize_git_path(vol_guid) == vol_guid
+        assert _host_exec.strip_windows_extended_prefix(r"\\?\C:\Users\alice\.ssh\id_ed25519") == r"C:\Users\alice\.ssh\id_ed25519"
+        assert probe._normalize_git_path(r"\\?\UNC\srv\share\repo") == r"\\srv\share\repo"
+
+

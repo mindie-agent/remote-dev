@@ -25,11 +25,19 @@ _MOUNTINFO_PATH = "/proc/self/mountinfo"
 def strip_windows_extended_prefix(value: str | os.PathLike[str]) -> str:
     raw = os.fspath(value)
     if os.name == "nt":
-        if raw.startswith("\\\\?\\UNC\\"):
+        if raw[:8].casefold() == "\\\\?\\unc\\" and len(raw) > 8 and raw[8] not in ("\\", "/"):
             unc = "\\" + raw[7:]
             if len(unc) < 260:
                 return unc
-        elif raw.startswith("\\\\?\\") and len(raw) - 4 < 260:
+        elif (
+            raw.startswith("\\\\?\\")
+            and len(raw) >= 7
+            and raw[4].isascii()
+            and raw[4].isalpha()
+            and raw[5] == ":"
+            and raw[6] in ("\\", "/")
+            and len(raw) - 4 < 260
+        ):
             return raw[4:]
     return raw
 
@@ -102,15 +110,16 @@ def is_wsl_drvfs(value: str | os.PathLike[str]) -> bool:
 def is_pe_executable(value: str | os.PathLike[str]) -> bool:
     try:
         with Path(value).open("rb") as handle:
-            head = handle.read(4096)
+            dos = handle.read(64)
+            if len(dos) < 64 or dos[:2] != b"MZ":
+                return False
+            pe_offset = int.from_bytes(dos[0x3C:0x40], "little", signed=False)
+            handle.seek(pe_offset)
+            return handle.read(4) == b"PE\x00\x00"
     except TimeoutError:
         raise
     except OSError:
         return False
-    if len(head) < 64 or head[:2] != b"MZ":
-        return False
-    pe_offset = int.from_bytes(head[0x3C:0x40], "little", signed=False)
-    return 0 <= pe_offset <= len(head) - 4 and head[pe_offset : pe_offset + 4] == b"PE\x00\x00"
 
 
 def _is_exec_regular_file(path_str: str) -> bool:
@@ -134,9 +143,15 @@ def which_native(command: str, *, path: str | None = None) -> str | None:
         return None
     if command.lower().endswith(_WIN_SUFFIXES):
         return None
-    raw_path = os.environ.get("PATH", "") if path is None else path
+    raw_path = os.environ.get("PATH", None) if path is None else path
+    if raw_path is None:
+        raw_path = os.defpath
+    if not raw_path:
+        return None
     for entry in raw_path.split(os.pathsep):
-        candidate = os.path.join(entry or ".", command)
+        if not entry:
+            continue
+        candidate = os.path.join(entry, command)
         if _is_exec_regular_file(candidate):
             if is_pe_executable(candidate) or is_wsl_drvfs(candidate):
                 continue
@@ -145,20 +160,30 @@ def which_native(command: str, *, path: str | None = None) -> str | None:
 
 
 def posix_unshadowed_command(command: str, *, path: str | None = None) -> str:
-    """Return bare `command` when unshadowed, or the native POSIX path past any DrvFS/PE shadow."""
-    raw_path = os.environ.get("PATH", "") if path is None else path
-    saw_shadow = False
+    """Return bare `command` when unshadowed, or the native POSIX path past any DrvFS/PE/empty-PATH shadow."""
+    raw_path = os.environ.get("PATH", None) if path is None else path
+    if raw_path is None:
+        raw_path = os.defpath
+    if not raw_path:
+        return command
+    must_pin = False
+    saw_pe_or_drvfs = False
     for entry in raw_path.split(os.pathsep):
         if not entry:
+            must_pin = True
+            dot_cand = os.path.join(".", command)
+            if _is_exec_regular_file(dot_cand) and (is_pe_executable(dot_cand) or is_wsl_drvfs(dot_cand)):
+                saw_pe_or_drvfs = True
             continue
         candidate = os.path.join(entry, command)
         if not _is_exec_regular_file(candidate):
             continue
         if is_pe_executable(candidate) or is_wsl_drvfs(candidate):
-            saw_shadow = True
+            must_pin = True
+            saw_pe_or_drvfs = True
             continue
-        return candidate if saw_shadow else command
-    if saw_shadow:
+        return candidate if must_pin else command
+    if saw_pe_or_drvfs:
         raise RemoteExecutionError(
             f"POSIX {command!r} resolved only to a Windows PE / WSL DrvFS shim on PATH; "
             f"install native Linux {command!r} (for example openssh-client)",

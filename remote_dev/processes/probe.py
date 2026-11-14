@@ -24,9 +24,17 @@ from urllib.request import url2pathname
 
 def _normalize_git_path(path: str) -> str:
     if os.name == "nt":
-        if path.startswith("\\\\?\\UNC\\") and len(path) - 6 < 260:
+        if path[:8].casefold() == "\\\\?\\unc\\" and len(path) > 8 and path[8] not in ("\\", "/") and len(path) - 6 < 260:
             return "\\" + path[7:]
-        if path.startswith("\\\\?\\") and len(path) - 4 < 260:
+        if (
+            path.startswith("\\\\?\\")
+            and len(path) >= 7
+            and path[4].isascii()
+            and path[4].isalpha()
+            and path[5] == ":"
+            and path[6] in ("\\", "/")
+            and len(path) - 4 < 260
+        ):
             return path[4:]
     return path
 
