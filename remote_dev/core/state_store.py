@@ -181,8 +181,28 @@ def load_read_ledger(endpoint: Endpoint, file_path: str, client_context_id: str 
     path = read_ledger_path(endpoint, file_path, client_context_id)
     if not path.exists():
         return None
-    data = read_json(path)
-    return data if isinstance(data, dict) else None
+    try:
+        data = read_json(path)
+    except json.JSONDecodeError as exc:
+        from remote_dev.observability import record_contract_violation
+        record_contract_violation(
+            "remote.read",
+            stage="state_contract",
+            contract_name="read_ledger_json",
+            reason_code="corrupt_state_json",
+            exception=exc,
+        )
+        raise
+    if not isinstance(data, dict):
+        from remote_dev.observability import record_contract_violation
+        record_contract_violation(
+            "remote.read",
+            stage="state_contract",
+            contract_name="read_ledger_json",
+            reason_code="non_object_state_record",
+        )
+        return None
+    return data
 
 
 class WriteLedgerGuard(NamedTuple):
@@ -224,15 +244,42 @@ def _endpoint_directories():
     return [Path(entry.path) for entry in _state_entries(state_root() / "endpoints") if entry.is_dir()]
 
 
+def _read_owned_record(path: Path, *, operation: str, contract_name: str, label: str) -> dict[str, Any]:
+    try:
+        data = read_json(path)
+    except json.JSONDecodeError as exc:
+        from remote_dev.observability import record_contract_violation
+        record_contract_violation(
+            operation,
+            stage="state_contract",
+            contract_name=contract_name,
+            reason_code="corrupt_state_json",
+            exception=exc,
+        )
+        raise
+    if not isinstance(data, dict):
+        exc = ValueError(f"invalid {label} record: {path}")
+        from remote_dev.observability import record_contract_violation
+        record_contract_violation(
+            operation,
+            stage="state_contract",
+            contract_name=contract_name,
+            reason_code="non_object_state_record",
+            exception=exc,
+        )
+        raise exc
+    return data
+
+
 def find_job_record(job_id: str) -> tuple[Path, dict[str, Any]] | None:
     for directory in _endpoint_directories():
         path = directory / "jobs" / f"{job_id}.json"
         try:
-            data = read_json(path)
+            data = _read_owned_record(
+                path, operation="remote.job_status", contract_name="job_record_json", label="job",
+            )
         except FileNotFoundError:
             continue
-        if not isinstance(data, dict):
-            raise ValueError(f"invalid job record: {path}")
         return path, data
     return None
 
@@ -242,11 +289,11 @@ def list_endpoint_records() -> list[dict[str, Any]]:
     for directory in _endpoint_directories():
         path = directory / "endpoint.json"
         try:
-            data = read_json(path)
+            data = _read_owned_record(
+                path, operation="remote.probe", contract_name="endpoint_record_json", label="endpoint",
+            )
         except FileNotFoundError:
             continue
-        if not isinstance(data, dict):
-            raise ValueError(f"invalid endpoint record: {path}")
         records.append({**data, "state_dir": str(path.parent)})
     return records
 
@@ -270,9 +317,9 @@ def list_job_records(endpoint_id: str) -> list[dict[str, Any]]:
         if not entry.name.endswith(".json"):
             continue
         path = Path(entry.path)
-        data = read_json(path)
-        if not isinstance(data, dict):
-            raise ValueError(f"invalid job record: {path}")
+        data = _read_owned_record(
+            path, operation="remote.job_status", contract_name="job_record_json", label="job",
+        )
         records.append({**data, "local_record": str(path)})
     return records
 

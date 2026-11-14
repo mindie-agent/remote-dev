@@ -183,3 +183,31 @@ def test_actual_transport_uncertainty_is_not_reclassified_as_caller(reports, mon
     assert messages[0]['error']['data']['category'] == 'rpc_timeout'
     assert messages[0]['error']['data']['submission_state'] == 'uncertain'
     assert reports == []
+
+
+def test_corrupt_owned_endpoint_record_emits_contract_violation(reports, tmp_path, monkeypatch):
+    from remote_dev.core import state_store
+    monkeypatch.setenv('REMOTE_DEV_STATE_DIR', str(tmp_path / 'state'))
+    ep_dir = tmp_path / 'state' / 'endpoints' / ('ab' * 8)
+    ep_dir.mkdir(parents=True)
+    (ep_dir / 'endpoint.json').write_text('{corrupt json', encoding='utf-8')
+    with pytest.raises(json.JSONDecodeError):
+        state_store.list_endpoint_records()
+    assert len(reports) == 1
+    assert reports[0]['component'] == 'remote-dev'
+    assert reports[0]['category'] == 'contract_violation'
+    assert reports[0]['stage'] == 'state_contract'
+    assert reports[0]['contract_name'] == 'endpoint_record_json'
+    assert reports[0]['reason_code'] == 'corrupt_state_json'
+
+
+def test_coordinator_observed_tool_forwards_internal_exception(reports):
+    @observed_tool('mindie.session', component='mindie-coordinator')
+    def broken():
+        raise KeyError('missing_internal_slot')
+    with pytest.raises(KeyError):
+        broken()
+    assert len(reports) == 1
+    assert reports[0]['component'] == 'mindie-coordinator'
+    assert reports[0]['operation'] == 'mindie.session'
+    assert reports[0]['category'] == 'internal_exception'
