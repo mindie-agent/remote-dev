@@ -19,10 +19,12 @@ import time
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from mindie_diagnostics import get_recorder, current_context, bind_context, wrap_context
 from remote_dev.core.errors import RemoteDevError, error_details
 
+_SOURCE_ROOT = Path(__file__).resolve().parent
 _tool = contextvars.ContextVar("remote_dev_tool_operation", default=None)
 _authentication_event = contextvars.ContextVar("remote_dev_auth_maintenance", default=None)
 
@@ -33,8 +35,12 @@ _REPORT_OPERATIONS = frozenset({
     "remote.artifact_pull", "remote.artifact_push", "remote.context_snapshot",
     "remote.probe", "remote.python",
 })
-_REPORT_STAGES = frozenset({"tool_call", "protocol_decode"})
-_REPORT_CATEGORIES = frozenset({"internal_exception", "command_protocol"})
+_COORDINATOR_OPERATIONS = frozenset({
+    "mindie.session", "mindie.run", "mindie.execution", "mindie.finish",
+    "mindie.message", "mindie.hosts", "mindie.probe", "mindie.container", "mindie.lease",
+})
+_REPORT_STAGES = frozenset({"tool_call", "protocol_decode", "state_contract", "receipt_contract"})
+_REPORT_CATEGORIES = frozenset({"internal_exception", "command_protocol", "contract_violation"})
 _EXACT_INTERNAL = (RuntimeError, AssertionError, KeyError, AttributeError, IndexError, ZeroDivisionError)
 _NOT_INTERNAL = (RemoteDevError, ValueError, TypeError, OSError, KeyboardInterrupt, SystemExit, GeneratorExit)
 _HEX = frozenset("0123456789abcdef")
@@ -64,12 +70,20 @@ def _internal_exception(exc):
             return False
         seen.add(marker)
         seen_count += 1
-        if seen_count > 8:
+        if seen_count > 32:
             return False
-        if getattr(current, "category", None) is not None:
+        if getattr(current, "category", None) is not None or getattr(current, "_mindie_caller_error", False):
             return False
         if isinstance(current, _NOT_INTERNAL):
             return False
+        for cls in type(current).__mro__:
+            if cls.__name__ in {
+                "CoordinationError",
+                "ManagedTaskContextRequired",
+                "MachineDirectoryUnavailable",
+                "HostQueueUnavailable",
+            }:
+                return False
         cause = getattr(current, "__cause__", None)
         context = getattr(current, "__context__", None)
         if cause is not None:
@@ -117,26 +131,93 @@ def _remember_diagnostic(reference):
     active["_failure_anchor"] = _FailureAnchor(reference)
 
 
-def confirmed_failure(operation, *, stage, category, exception=None):
+def confirmed_failure(
+    operation,
+    *,
+    stage,
+    category,
+    exception=None,
+    reason_code=None,
+    contract_name=None,
+    component="remote-dev",
+    source_root=None,
+):
     """Report one confirmed internal failure. Unknown stage/category is not sent."""
-    if not isinstance(operation, str) or operation not in _REPORT_OPERATIONS:
+    if component == "mindie-coordinator":
+        if not isinstance(operation, str) or operation not in _COORDINATOR_OPERATIONS:
+            operation = "mindie.tool"
+    elif not isinstance(operation, str) or operation not in _REPORT_OPERATIONS:
         operation = "remote.tool"
     if not isinstance(stage, str) or not isinstance(category, str) or stage not in _REPORT_STAGES or category not in _REPORT_CATEGORIES:
         return None
     if exception is not None:
-        anchor = getattr(exception, "_mindie_failure_anchor", None)
-        if type(anchor) is _FailureAnchor:
-            _remember_diagnostic(anchor.diagnostic)
-            return anchor.diagnostic
+        seen_chain: set[int] = set()
+        pending_chain = [exception]
+        while pending_chain and len(seen_chain) < 32:
+            cur_exc = pending_chain.pop(0)
+            if cur_exc is None or id(cur_exc) in seen_chain:
+                continue
+            seen_chain.add(id(cur_exc))
+            anchor = getattr(cur_exc, "_mindie_failure_anchor", None)
+            if type(anchor) is _FailureAnchor:
+                try:
+                    exception._mindie_failure_anchor = anchor
+                    exception.mindie_diagnostic = anchor.diagnostic
+                except Exception:
+                    pass
+                _remember_diagnostic(anchor.diagnostic)
+                return anchor.diagnostic
+            if component == "mindie-coordinator":
+                coord_marker = getattr(cur_exc, "_mindie_coordinator_diag", None)
+                if coord_marker is not None:
+                    try:
+                        from mindie_coordinator.diagnostics import _CoordinatorFailureMarker
+                        if type(coord_marker) is _CoordinatorFailureMarker and isinstance(coord_marker.result, dict):
+                            inc = coord_marker.result.get("incident_id")
+                            ref = (
+                                {"incident_id": inc, "logging_failed": bool(coord_marker.result.get("logging_failed", False))}
+                                if isinstance(inc, str) and len(inc) == 32 and all(c in _HEX for c in inc)
+                                else {"logging_failed": True}
+                            )
+                            exception._mindie_failure_anchor = _FailureAnchor(ref)
+                            exception.mindie_diagnostic = ref
+                            _remember_diagnostic(ref)
+                            return ref
+                    except Exception:
+                        pass
+            if getattr(cur_exc, "__cause__", None) is not None:
+                pending_chain.append(cur_exc.__cause__)
+            if getattr(cur_exc, "__context__", None) is not None and not getattr(cur_exc, "__suppress_context__", False):
+                pending_chain.append(cur_exc.__context__)
     reported = None
+    effective_root = source_root if source_root is not None else (_SOURCE_ROOT if component == "remote-dev" else None)
+    if effective_root is None and component == "mindie-coordinator":
+        try:
+            from mindie_coordinator.diagnostics import _SOURCE_ROOT as _coord_root
+            effective_root = _coord_root
+        except Exception:
+            pass
     try:
         from mindie_diagnostics.integration import record_failure
         active = current_tool()
         elapsed_ms = (time.monotonic() - active["started"]) * 1000 if active else None
-        reported = record_failure(
-            "remote-dev", operation, stage=stage, category=category, exception=exception,
-            elapsed_ms=elapsed_ms,
-        )
+        extra_kwargs = {}
+        if effective_root is not None:
+            extra_kwargs["source_root"] = effective_root
+        if reason_code is not None:
+            extra_kwargs["reason_code"] = reason_code
+        if contract_name is not None:
+            extra_kwargs["contract_name"] = contract_name
+        try:
+            reported = record_failure(
+                component, operation, stage=stage, category=category, exception=exception,
+                elapsed_ms=elapsed_ms, **extra_kwargs,
+            )
+        except TypeError:
+            reported = record_failure(
+                component, operation, stage=stage, category=category, exception=exception,
+                elapsed_ms=elapsed_ms,
+            )
         valid = _report_output_valid(reported)
     except Exception:
         valid = False
@@ -156,6 +237,29 @@ def confirmed_failure(operation, *, stage, category, exception=None):
             pass
     _remember_diagnostic(reference)
     return reference
+
+
+def record_contract_violation(
+    operation,
+    *,
+    stage="state_contract",
+    contract_name,
+    reason_code,
+    exception=None,
+    component="remote-dev",
+    source_root=None,
+):
+    """Record a deterministic local state or protocol contract violation."""
+    return confirmed_failure(
+        operation,
+        stage=stage,
+        category="contract_violation",
+        exception=exception,
+        reason_code=reason_code,
+        contract_name=contract_name,
+        component=component,
+        source_root=source_root,
+    )
 
 
 def current_tool():
@@ -213,9 +317,13 @@ def observed_tool(name, *, component="remote-dev"):
                     if isinstance(exc, SystemExit) and exc.code in (None, 0):
                         raise
                     try:
-                        if component == "remote-dev" and _internal_exception(exc):
+                        if component in {"remote-dev", "mindie-coordinator"} and _internal_exception(exc):
                             confirmed_failure(
-                                label, stage="tool_call", category="internal_exception", exception=exc,
+                                label,
+                                stage="tool_call",
+                                category="internal_exception",
+                                exception=exc,
+                                component=component,
                             )
                     except Exception:
                         _warn_report_unavailable()
