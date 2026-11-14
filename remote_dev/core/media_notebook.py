@@ -155,6 +155,8 @@ def read_notebook(data: bytes) -> dict:
             "count": len(cells),
             "text": _notebook_text(cells),
         }
+    except TimeoutError:
+        raise
     except (MediaOpError, OSError, ValueError, RecursionError) as exc:
         return _failed(exc)
 
@@ -293,6 +295,8 @@ def edit_notebook(
             "cells": normalized,
             "count": len(normalized),
         }
+    except TimeoutError:
+        raise
     except (MediaOpError, OSError, ValueError, TypeError, RecursionError) as exc:
         return _failed(exc)
 

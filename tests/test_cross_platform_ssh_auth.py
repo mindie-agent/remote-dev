@@ -27,7 +27,7 @@ pytestmark = [
 class Acceptance:
     def __init__(self, root):
         self.root = root
-        self.manifest = json.loads(Path(os.environ["REMOTE_DEV_CROSS_SSH_MANIFEST"]).read_text())
+        self.manifest = json.loads(Path(os.environ["REMOTE_DEV_CROSS_SSH_MANIFEST"]).read_text(encoding="utf-8-sig"))
         self.admin = json.loads(os.environ["REMOTE_DEV_CROSS_SSH_ADMIN"])
         self.pythons = json.loads(os.environ["REMOTE_DEV_CROSS_SSH_PYTHONS"])
         assert len(self.pythons) == 2 and len(set(self.pythons)) == 2
@@ -113,7 +113,7 @@ def platform_evidence():
                 "harness_profiles": ["codex", "claude", "kimi", "dsh"]}
     wheelhouse = Path(os.environ.get("REMOTE_DEV_CROSS_WHEELHOUSE", "wheelhouse"))
     evidence["component_commits"] = {
-        path.stem: path.read_text().strip() for path in sorted(wheelhouse.glob("*.commit"))
+        path.stem: path.read_text(encoding="utf-8").strip() for path in sorted(wheelhouse.glob("*.commit"))
     }
     evidence["consumer_interpreters"] = json.loads(os.environ["REMOTE_DEV_CROSS_SSH_PYTHONS"])
     kimi_commit = subprocess.run(
@@ -145,14 +145,14 @@ def test_auto_install_key_then_new_venv_without_password(acceptance):
     configured = acceptance.invoke("setup", endpoint, password=True)
     assert configured["auth_method"] == "publickey", configured
     assert configured["bootstrap"]["key_verified"], configured
-    installed = Path(configured["identity_file"] + ".pub").read_text().strip()
+    installed = Path(configured["identity_file"] + ".pub").read_text(encoding="utf-8").strip()
     assert acceptance.inspect()["authorized_keys"] == [installed]
     called = acceptance.invoke("call", endpoint, runtime=1, command="printf key-reused")
     acceptance.assert_success(called, "key-reused")
     assert (acceptance.auth_root / "credentials.json").is_file()
     profiles = list((acceptance.auth_root / "profiles").glob("*.json"))
     assert len(profiles) == 1
-    assert acceptance.manifest["password"] not in profiles[0].read_text()
+    assert acceptance.manifest["password"] not in profiles[0].read_text(encoding="utf-8")
 
 
 def test_password_only_server_across_processes_and_profiles(acceptance):

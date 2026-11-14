@@ -65,7 +65,8 @@ def _as_bytes(data: object, *, label: str) -> bytes:
 
 
 def _which(name: str) -> str | None:
-    return shutil.which(name)
+    from ._host_exec import which_native
+    return which_native(name)
 
 
 def _module_available(name: str) -> bool:

@@ -259,6 +259,8 @@ def claude_read(profile: str, spec: NativeToolSpec, native: dict[str, Any], norm
                     "content_verified": True,
                 },
             )
+        except TimeoutError:
+            raise
         except (OSError, ValueError, RuntimeError):
             pass
         result = make_result(

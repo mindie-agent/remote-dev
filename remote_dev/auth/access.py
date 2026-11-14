@@ -107,14 +107,19 @@ def _execute(argv, *, env=None, budget):
 
 def ensure_key(identity_file=None, *, timeout_ms=10000):
     """Return the selected private-key path and public line, generating only our default."""
+    from remote_dev.core._host_exec import posix_unshadowed_command, strip_windows_extended_prefix, which_native
     from remote_dev.core.ssh_transport import _ssh_executable
     ssh = Path(_ssh_executable())
-    keygen = str(ssh.with_name("ssh-keygen" + ssh.suffix)) if ssh.is_absolute() else "ssh-keygen"
+    if ssh.is_absolute():
+        sibling = ssh.with_name("ssh-keygen" + ssh.suffix)
+        keygen = str(sibling) if (os.name == "nt" or which_native(str(sibling))) else posix_unshadowed_command("ssh-keygen")
+    else:
+        keygen = posix_unshadowed_command("ssh-keygen") if os.name != "nt" else "ssh-keygen"
     budget = _Budget(timeout_ms)
     path = Path(identity_file).expanduser() if identity_file else auth_root() / "keys" / "id_ed25519"
     if path.suffix == ".pub":
         path = path.with_suffix("")
-    path = path.resolve()
+    path = Path(strip_windows_extended_prefix(str(path.resolve())))
     public_path = Path(str(path) + ".pub")
     prepare_auth_directory(path)
     with record_lock(path, timeout_seconds=budget.remaining()):

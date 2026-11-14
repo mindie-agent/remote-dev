@@ -1,20 +1,22 @@
 name: Real SSH authentication platforms
 
 on:
+  push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
       coordinator_ref:
         description: Coordinator candidate or release ref
-        default: ddddb992b71125f772ba150e29564f34df0c3e7c
+        default: d8977114e8cd0e5b7befa59a5ff5e53f40a74521
         type: string
       npu_top_ref:
         description: npu-top candidate or release ref
-        default: ad577570a5e02afadf9e4998524fcda408db5b74
+        default: 848d74da3cba383c07a0eb372a17baf35b6b944b
         type: string
       kimi_ref:
         description: Published Kimi adapter or candidate ref
-        default: 2b872a079f8496575614d2b49c4a5c2b3b38f674
+        default: 3cb9f306451630974d6a3a6669f9b9fc5390084c
         type: string
 
 permissions:
@@ -22,7 +24,7 @@ permissions:
 
 concurrency:
   group: ssh-auth-platforms-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   cohort:
@@ -36,19 +38,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: mindie-agent/coordinator
-          ref: ${{ inputs.coordinator_ref || 'ddddb992b71125f772ba150e29564f34df0c3e7c' }}
+          ref: ${{ inputs.coordinator_ref || 'd8977114e8cd0e5b7befa59a5ff5e53f40a74521' }}
           path: acceptance-sources/coordinator
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: mindie-agent/npu-top
-          ref: ${{ inputs.npu_top_ref || 'ad577570a5e02afadf9e4998524fcda408db5b74' }}
+          ref: ${{ inputs.npu_top_ref || '848d74da3cba383c07a0eb372a17baf35b6b944b' }}
           path: acceptance-sources/npu-top
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: mindie-agent/diagnostics
-          ref: 5ae643e19223f2181ecdbaa3edaf464137c4805e
+          ref: 3d82313bb4b826bf52d5ec1dd64ef6476a070b4b
           path: acceptance-sources/diagnostics
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -75,10 +77,10 @@ jobs:
           retention-days: 7
 
   windows-wsl:
-    name: Real OpenSSH (PowerShell and WSL2)
+    name: Real OpenSSH (PowerShell 5.1, pwsh 7 and WSL2)
     needs: cohort
     runs-on: windows-2025
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,7 +88,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: mindie-agent/mindie-agent-kimi
-          ref: ${{ inputs.kimi_ref || '2b872a079f8496575614d2b49c4a5c2b3b38f674' }}
+          ref: ${{ inputs.kimi_ref || '3cb9f306451630974d6a3a6669f9b9fc5390084c' }}
           path: acceptance-kimi
           persist-credentials: false
       - uses: actions/download-artifact@v4
@@ -119,7 +121,29 @@ jobs:
           wsl --distribution Ubuntu-24.04 --user root -- cat /tmp/remote-dev-ssh-auth-server/manifest.json |
             Set-Content -Encoding utf8 $manifest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Windows PowerShell actual SSH four-path acceptance
+      - name: Windows PowerShell 5.1 actual SSH four-path acceptance
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+          $pythons = Get-Content -Raw "$env:RUNNER_TEMP\SSH auth runtimes\pythons.json"
+          $env:REMOTE_DEV_CROSS_SSH_PYTHONS = $pythons
+          $env:REMOTE_DEV_CROSS_SSH_MANIFEST = Join-Path $env:RUNNER_TEMP 'ssh-auth-manifest.json'
+          $env:REMOTE_DEV_CROSS_SSH_ADMIN = ConvertTo-Json -Compress @(
+            'wsl.exe', '--distribution', 'Ubuntu-24.04', '--user', 'root', '--',
+            'python3', '/tmp/remote-dev-ssh-auth-suite/server.py')
+          $env:REMOTE_DEV_CROSS_SSH_HOST = ((wsl --distribution Ubuntu-24.04 -- hostname -I).Trim() -split '\s+')[0]
+          $env:REMOTE_DEV_CROSS_KIMI_ROOT = Join-Path $env:GITHUB_WORKSPACE 'acceptance-kimi'
+          $env:REMOTE_DEV_CROSS_PLATFORM = 'windows-powershell'
+          $env:REMOTE_DEV_CROSS_SHELL = "PowerShell $($PSVersionTable.PSVersion) (Windows PowerShell 5.1)"
+          $env:REMOTE_DEV_CROSS_EVIDENCE = 'windows-ps51-ssh-evidence.json'
+          $env:PYTHONUTF8 = '1'
+          $python = ($pythons | ConvertFrom-Json)[0]
+          & $python -m pytest -q -s tests/test_cross_platform_ssh_auth.py --junitxml=windows-ps51-ssh-auth.xml
+          exit $LASTEXITCODE
+      - name: PowerShell 7 actual SSH four-path acceptance
         shell: pwsh
         run: |
           $pythons = Get-Content -Raw "$env:RUNNER_TEMP\SSH auth runtimes\pythons.json"
@@ -150,25 +174,35 @@ jobs:
         shell: wsl-bash -u root {0}
         run: |
           python3 tests/prepare_cross_platform_auth.py --wheelhouse wheelhouse --root "/tmp/SSH auth runtimes"
-      - name: Actual WSL OpenSSH four-path acceptance
+      - name: Actual WSL OpenSSH four-path acceptance (with DrvFS PE PATH shadowing)
         if: ${{ !cancelled() }}
         shell: wsl-bash -u root {0}
         run: |
+          SHADOW_DIR="/mnt/c/Users/Public/remote-dev-wsl-shadow (x86)"
+          mkdir -p "$SHADOW_DIR"
+          if [ -f /mnt/c/Windows/System32/OpenSSH/ssh.exe ]; then
+            cp /mnt/c/Windows/System32/OpenSSH/ssh.exe "$SHADOW_DIR/ssh"
+            cp /mnt/c/Windows/System32/OpenSSH/ssh-keygen.exe "$SHADOW_DIR/ssh-keygen"
+          fi
+          chmod +x "$SHADOW_DIR/ssh" "$SHADOW_DIR/ssh-keygen" 2>/dev/null || true
+          export PATH="$SHADOW_DIR:/mnt/c/Windows/System32/OpenSSH:/mnt/c/Program Files/Git/usr/bin:$PATH"
           export REMOTE_DEV_CROSS_SSH_PYTHONS="$(cat '/tmp/SSH auth runtimes/pythons.json')"
           export REMOTE_DEV_CROSS_SSH_MANIFEST=/tmp/remote-dev-ssh-auth-server/manifest.json
           export REMOTE_DEV_CROSS_SSH_ADMIN='["python3","/tmp/remote-dev-ssh-auth-suite/server.py"]'
           export REMOTE_DEV_CROSS_SSH_HOST=127.0.0.1
           export REMOTE_DEV_CROSS_KIMI_ROOT="$PWD/acceptance-kimi"
           export REMOTE_DEV_CROSS_PLATFORM=wsl
-          export REMOTE_DEV_CROSS_SHELL="WSL bash"
+          export REMOTE_DEV_CROSS_SHELL="WSL bash (with DrvFS PE shadow PATH)"
           export REMOTE_DEV_CROSS_EVIDENCE="$PWD/wsl-ssh-evidence.json"
           "/tmp/SSH auth runtimes/coordinator plugin/bin/python" -m pytest -q -s tests/test_cross_platform_ssh_auth.py --junitxml=wsl-ssh-auth.xml
+          python3 -c 'import json; from pathlib import Path; d = json.loads(Path("wsl-ssh-evidence.json").read_text(encoding="utf-8")); assert d["ssh"].startswith("/usr/") and not d["ssh"].startswith("/mnt/"), d'
       - name: Remove disposable SSH account, processes and secrets
         if: always()
         shell: pwsh
         run: |
           wsl --distribution Ubuntu-24.04 --user root -- python3 /tmp/remote-dev-ssh-auth-suite/server.py stop --state /tmp/remote-dev-ssh-auth-server
           $cleanupExit = $LASTEXITCODE
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue 'C:\Users\Public\remote-dev-wsl-shadow (x86)'
           Remove-Item -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'ssh-auth-manifest.json')
           exit $cleanupExit
       - uses: actions/upload-artifact@v4
@@ -176,6 +210,8 @@ jobs:
         with:
           name: windows-wsl-real-ssh-evidence
           path: |
+            windows-ps51-ssh-auth.xml
+            windows-ps51-ssh-evidence.json
             windows-ssh-auth.xml
             wsl-ssh-auth.xml
             windows-ssh-evidence.json

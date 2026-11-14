@@ -248,20 +248,31 @@ def _native_windows_ssh_client() -> bool:
 
 def _windows_ssh_executable() -> str:
     """Resolve Git for Windows SSH without probing or retrying a connection."""
+    import stat as _stat
+    from ._host_exec import strip_windows_extended_prefix
     git = shutil.which("git")
     if git:
         try:
             executable = Path(git).resolve(strict=True)
             parent = executable.parent
-            if parent.name.casefold() in {"cmd", "bin"}:
+            root: Path | None = None
+            if parent.name.casefold() == "git-core" and parent.parent.name.casefold() == "libexec":
+                subroot = parent.parent.parent
+                root = subroot.parent if subroot.name.casefold() in {"mingw64", "mingw32", "ucrt64", "usr"} else subroot
+            elif parent.name.casefold() in {"cmd", "bin"}:
                 root = parent.parent
                 if parent.name.casefold() == "bin" and root.name.casefold() in {
                     "mingw64", "mingw32", "ucrt64", "usr",
                 }:
                     root = root.parent
+            if root is not None:
                 ssh = root / "usr" / "bin" / "ssh.exe"
-                if ssh.is_file():
-                    return str(ssh)
+                try:
+                    is_reg = _stat.S_ISREG(ssh.stat().st_mode)
+                except (FileNotFoundError, NotADirectoryError):
+                    is_reg = False
+                if is_reg:
+                    return strip_windows_extended_prefix(str(ssh))
         except TimeoutError:
             raise
         except (OSError, RuntimeError) as exc:
@@ -276,7 +287,10 @@ def _windows_ssh_executable() -> str:
     )
 
 def _ssh_executable() -> str:
-    return _windows_ssh_executable() if _native_windows_ssh_client() else "ssh"
+    if _native_windows_ssh_client():
+        return _windows_ssh_executable()
+    from ._host_exec import posix_unshadowed_command
+    return posix_unshadowed_command("ssh")
 
 def _uses_shared_mux(endpoint: Endpoint) -> bool:
     """Choose ControlMaster reuse per endpoint before argv is built.
