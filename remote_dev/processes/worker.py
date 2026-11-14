@@ -58,7 +58,7 @@ def _utf8_incomplete_tail(chunk):
 
 def atomic_json(path, value):
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex)
-    with temporary.open("x") as stream:
+    with temporary.open("x", encoding="utf-8") as stream:
         os.chmod(temporary, 0o600)
         json.dump(value, stream, sort_keys=True)
         stream.flush()
@@ -66,14 +66,14 @@ def atomic_json(path, value):
     os.replace(temporary, path)
 
 def read_json(path):
-    return json.loads(path.read_text()) if path.exists() else None
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 def boot_id():
-    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
 
 def process_identity(pid):
     try:
-        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace").rsplit(") ", 1)[1].split()
         return {"pid": int(pid), "ppid": int(fields[1]), "pgid": int(fields[2]),
                 "start_ticks": fields[19], "state": fields[0]}
     except (FileNotFoundError, ProcessLookupError):
@@ -91,7 +91,7 @@ def supervised_family(receipt):
             tasks = Path(f"/proc/{pid}/task")
             for task in tasks.iterdir():
                 try:
-                    children = (task / "children").read_text().split()
+                    children = (task / "children").read_text(encoding="utf-8").split()
                 except (FileNotFoundError, ProcessLookupError):
                     continue
                 for child_pid in children:
@@ -355,7 +355,7 @@ def worker(directory):
             # This kernel list includes zombies and adopted clean-env children.
             # A process cannot fork again after it has been reaped; only this
             # empty-child boundary allows the supervisor to publish completion.
-            children = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children").read_text().strip()
+            children = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children").read_text(encoding="utf-8", errors="replace").strip()
             if code is not None and not children:
                 break
             time.sleep(0.01)
@@ -492,7 +492,7 @@ def control_job(request, source, cancel_event=None):
     if not directory.exists() and action != "prepare":
         return {"state": "absent", "quiet": True}
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (directory / "lock").open("a") as lock:
+    with (directory / "lock").open("a", encoding="utf-8") as lock:
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("process control cancelled before lock acquisition")
@@ -536,7 +536,7 @@ def control_job(request, source, cancel_event=None):
                 except FileExistsError:
                     pass
             script = directory / "runner.py"
-            script.write_text(source)
+            script.write_text(source, encoding="utf-8")
             os.chmod(script, 0o600)
             marker = uuid.uuid4().hex
             with (directory / "supervisor.log").open("ab") as supervisor_log:

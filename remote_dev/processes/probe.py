@@ -22,13 +22,31 @@ from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
 
+def _normalize_git_path(path: str) -> str:
+    if os.name == "nt":
+        if path[:8].casefold() == "\\\\?\\unc\\" and len(path) > 8 and path[8] not in ("\\", "/") and len(path) - 6 < 260:
+            return "\\" + path[7:]
+        if (
+            path.startswith("\\\\?\\")
+            and len(path) >= 7
+            and path[4].isascii()
+            and path[4].isalpha()
+            and path[5] == ":"
+            and path[6] in ("\\", "/")
+            and len(path) - 4 < 260
+        ):
+            return path[4:]
+    return path
+
+
 def git_fact(path: str, *args: str, deadline: float) -> dict:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("probe Git budget exhausted")
     try:
         proc = subprocess.run(
-            ["git", "-C", path, *args], capture_output=True, text=True,
+            ["git", "-C", _normalize_git_path(path), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=min(3.0, remaining), check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )

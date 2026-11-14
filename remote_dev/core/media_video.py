@@ -194,12 +194,16 @@ def render_video_thumbnail(data: bytes, *, max_edge: int = 1280) -> dict:
                     "height": int(normalized["height"]),
                     "renderer": renderer_name,
                 }
+            except TimeoutError:
+                raise
             except (MediaOpError, OSError) as exc:
                 failures.append(f"{renderer_name}: {exc}")
         raise MediaOpError(
             "local video thumbnail failed; "
             + ("; ".join(failures) if failures else "no usable renderer")
         )
+    except TimeoutError:
+        raise
     except (MediaOpError, OSError, ValueError) as exc:
         return _failed(exc)
     finally:

@@ -1,0 +1,7 @@
+# remote-dev 0.11.11: Windows PowerShell 5.1 / CP936 Support, WSL2 DrvFS/PE Unshadowing & Cross-Platform OpenSSH Acceptance
+
+[中文](remote-dev-0.11.11.md)
+
+- **WSL2 DrvFS / PE `$PATH` Unshadowing & Windows Extended-Path Normalization (`core/_host_exec.py`, `core/ssh_transport.py`, `auth/access.py`, `core/media_core.py`)**: Skips WSL2 DrvFS (`drvfs`/`9p`) mounts and `MZ..PE\0\0` Windows executables when resolving `ssh`, `ssh-keygen`, and local media utilities on POSIX (failing closed if only Windows shims exist on `$PATH`) while propagating `os.stat`/`os.lstat` `TimeoutError` via `realpath(..., strict=True)`; supports user-scoped `%LOCALAPPDATA%\Programs\Git` and `libexec\git-core` layouts on Windows and strips `\\?\` extended prefixes on `< 260`-char paths for MSYS2/Git for Windows `ssh.exe`, `ssh-keygen.exe`, and `git -C`.
+- **UTF-8 / CP936 Hygiene & `TimeoutError` Propagation (`processes/probe.py`, `processes/worker.py`, `core/media_notebook.py`, `core/media_video.py`, `mcp/native_handlers_claude.py`)**: Enforces explicit UTF-8 text/subprocess I/O across all probes and worker artifacts, guards `except OSError:` boundaries with `except TimeoutError: raise`, and upgrades `mindie-diagnostics` to `v0.5.12`.
+- **Real Cross-Platform OpenSSH CI Matrix (`.github/workflows/ssh-auth-platforms.yml`)**: Enables `push: branches: [main]`, pins current formal component releases, and adds **Windows PowerShell 5.1 (`powershell.exe`)** four-path SSH acceptance alongside `pwsh` 7 and WSL2 Ubuntu-24.04 DrvFS `$PATH`-shadowing verification.
