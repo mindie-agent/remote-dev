@@ -98,6 +98,9 @@ def test_record_lock_reopens_live_inode_after_stale_prune(tmp_path):
         "PYTHONPATH": str(_REPO_ROOT),
         "REMOTE_DEV_STATE_DIR": str(tmp_path / "state"),
     }
+    # Pin the old inode open (without flock) so Linux ext4's LIFO allocator
+    # cannot recycle `old_inode` immediately after Actor B closes its stale fd.
+    pinned_old_inode = lock_path.open("rb")
     process = subprocess.Popen(
         [sys.executable, "-c", _LOCKER_SCRIPT, str(record), str(ready),
          str(proceed), str(acquired), str(release)],
@@ -116,6 +119,7 @@ def test_record_lock_reopens_live_inode_after_stale_prune(tmp_path):
             with record_lock(record, timeout_seconds=0.1):
                 raise AssertionError("entered while the re-opened lock was held")
     finally:
+        pinned_old_inode.close()
         proceed.write_text("go", encoding="utf-8")
         release.write_text("go", encoding="utf-8")
         stdout, stderr = process.communicate(timeout=10)
