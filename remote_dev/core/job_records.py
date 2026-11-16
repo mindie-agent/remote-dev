@@ -4,6 +4,8 @@ confirmed-terminal state projection (`job_records.py`).
 [Invariants]
 - A job record is resolved from either the explicit endpoint or the unique endpoint-scoped
   record for the job id; a fixed full container ID is required before any container resolution.
+- `load_record` validates the job id before path resolution, so traversal strings such as
+  `../outside` are rejected as caller errors before any directory is created or read.
 - Output commits retain the acknowledged remote observation when the local log/cursor write
   fails (`_recording_failure` in `job_results.py` owns the response projection).
 - `CappedLog` head-truncation metadata (`truncated_head_bytes` / `logical_bytes_written`) is
@@ -29,6 +31,7 @@ from typing import Any
 from remote_dev.core.container_endpoint import FULL_CONTAINER_ID
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core.errors import RemoteExecutionError, caller_error
+from remote_dev.core.job_ids import require_job_id
 from remote_dev.core.job_output import merge_output_logs, observed_accounting_warning
 from remote_dev.core.locking import record_lock
 from remote_dev.core.state_store import (
@@ -55,6 +58,10 @@ def endpoint_from_record(record: dict[str, Any]) -> Endpoint:
 def load_record(
     endpoint: Endpoint | None, job_id: str
 ) -> tuple[Endpoint, dict[str, Any], Path]:
+    try:
+        require_job_id(job_id)
+    except ValueError as exc:
+        raise caller_error(str(exc), ValueError, field="job_id") from None
     if endpoint is not None:
         path = job_record_path(endpoint, job_id)
         try:
@@ -131,6 +138,11 @@ def persist_terminal_state(
                 accounting_row[name + "_logical_bytes"] = entry["logical_bytes_written"]
             if entry.get("truncated_head_bytes") is not None:
                 accounting_row[name + "_truncated_head_bytes"] = entry["truncated_head_bytes"]
+            for key in ("previous_bytes", "current_bytes"):
+                if entry.get(key) is not None:
+                    accounting_row[name + "_" + key] = entry[key]
+            if entry.get("rotated") is not None:
+                accounting_row[name + "_rotated"] = bool(entry["rotated"])
     lock = record_lock(record_path, timeout_seconds=TERMINAL_LOCK_TIMEOUT_SECONDS)
     try:
         lock.__enter__()

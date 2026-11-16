@@ -8,6 +8,8 @@
   bounded preview of the retained window; they are distinct ranges and are added, never merged.
 - Stored record metadata is superseded by a newer remote observation, but a missing observation
   never erases a known non-zero truncation offset.
+- `previous_bytes`/`current_bytes`/`rotated` preserve a retained `.log.prev` segment even when
+  the first rotation has dropped zero head bytes (`truncated_head_bytes == 0`).
 [Timeouts & Locks]
 - Pure in-memory arithmetic over caller-supplied mappings; no I/O, locks, or waiting.
 [Side-Effect Policy]
@@ -54,9 +56,14 @@ def output_log_accounting(
         logical = _non_negative_int(entry.get("logical_bytes_written"))
         truncated = _non_negative_int(entry.get("truncated_head_bytes"))
         offset = _non_negative_int(entry.get("last_offset"))
+        previous = _non_negative_int(entry.get("previous_bytes"))
+        current = _non_negative_int(entry.get("current_bytes"))
+        rotated = entry.get("rotated") is True
         observed_logical = _non_negative_int(row.get(name + "_logical_bytes"))
         observed_truncated = _non_negative_int(row.get(name + "_truncated_head_bytes"))
         observed_offset = _non_negative_int(row.get(name + "_offset"))
+        observed_previous = _non_negative_int(row.get(name + "_previous_bytes"))
+        observed_current = _non_negative_int(row.get(name + "_current_bytes"))
         if observed_logical is not None:
             logical = observed_logical
         if observed_truncated is not None:
@@ -65,15 +72,30 @@ def output_log_accounting(
             offset = observed_offset
         elif offset is None:
             offset = cursor_offsets.get(name)
+        if observed_previous is not None:
+            previous = observed_previous
+        if observed_current is not None:
+            current = observed_current
+        rotated = rotated or bool(row.get(name + "_rotated"))
         logical = 0 if logical is None else logical
         truncated = min(0 if truncated is None else truncated, logical)
+        retained = max(0, logical - truncated)
+        previous = 0 if previous is None else previous
+        if previous or truncated:
+            rotated = True
+        elif current is not None and retained > current:
+            # More retained bytes than the current segment proves a `.prev`.
+            rotated = True
         accounting[name] = {
             "logical_bytes_written": logical,
             "truncated_head_bytes": truncated,
             "retained_start": truncated,
             "retained_end": logical,
-            "retained_bytes": max(0, logical - truncated),
+            "retained_bytes": retained,
             "last_offset": offset,
+            "previous_bytes": previous,
+            "current_bytes": current,
+            "rotated": rotated,
         }
     return accounting
 

@@ -33,6 +33,7 @@ from remote_dev.core.endpoint import DEFAULT_CWD, DEFAULT_ROOT, Endpoint
 from remote_dev.core.container_endpoint import pinned_endpoint
 from remote_dev.core import container_endpoint as _container_endpoint
 from remote_dev.core.errors import RemoteExecutionError, caller_error
+from remote_dev.core.job_ids import JOB_ID_RE, require_job_id
 from remote_dev.core.job_logs import format_job_log_output, job_log_refs, render_job_refs_text
 from remote_dev.core.job_output import head_truncation, merge_output_logs, output_truncation
 from remote_dev.core.job_records import (
@@ -56,7 +57,6 @@ from remote_dev.processes import control
 from remote_dev.result import make_result, tool_text, utc_now_iso
 from remote_dev.core.errors import error_details
 
-JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,95}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RESERVED_ENV_PREFIX = "REMOTE_DEV_JOB_"
 
@@ -91,12 +91,6 @@ def _duration_ms(start: float) -> int:
 def new_job_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"job-{stamp}-{uuid.uuid4().hex[:8]}"
-
-
-def require_job_id(value: str) -> str:
-    if not JOB_ID_RE.fullmatch(value):
-        raise ValueError("job id must be 3-96 chars from A-Z a-z 0-9 _ . -")
-    return value
 
 
 def require_env_name(value: str) -> str:

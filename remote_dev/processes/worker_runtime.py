@@ -217,6 +217,9 @@ def _log_snapshot(directory, stream):
         "truncated_head_bytes": truncated,
         "prev_size": prev_size,
         "current_size": current_size,
+        "previous_bytes": prev_size,
+        "current_bytes": current_size,
+        "rotated": bool(prev_size),
         "retained_bytes": retained_size,
         "logical_bytes": logical_size,
         "generation": _positive_int(stored.get("generation")),
@@ -444,6 +447,9 @@ def read_log_window(directory, stream, start_logical, max_bytes, *, tail_bytes=N
             "end": start + len(data),
             "logical_bytes": logical_size,
             "truncated_head_bytes": truncated,
+            "previous_bytes": prev_size,
+            "current_bytes": snapshot["current_bytes"],
+            "rotated": bool(prev_size),
             "skipped_bytes": skipped,
         }
     finally:

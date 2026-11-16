@@ -2,6 +2,9 @@
 [Role] Cross-thread and cross-process file locks for local records and endpoint mutations (`locking.py`).
 [Invariants]
 - Combines an in-process `threading.RLock` with an OS file lock (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows) so threads and processes share one serialization boundary.
+- On POSIX, after `flock` the handle must still name the live `.lock` directory entry (`st_dev`/`st_ino`
+  match and `st_nlink > 0`); a lock pruned between `open()` and `flock()` is re-opened instead of
+  granting the critical section under an orphaned inode.
 [Timeouts & Locks]
 - Polls OS locks every 20ms, bounds thread acquisition by the remaining caller deadline, and checks cancellation before admission. Timeout/cancellation never enters the protected mutation.
 [Side-Effect Policy]
@@ -23,6 +26,36 @@ from pathlib import Path
 
 _guard = threading.Lock()
 _locks = weakref.WeakValueDictionary()
+
+
+def _lock_handle_is_current(handle, lock_path: Path) -> bool:
+    """True only while `handle` still names the live `lock_path` directory entry.
+
+    A retention reaper may unlink a stale lock inode between `open()` and
+    `flock()`; the following `flock()` would then succeed on an unreachable
+    inode. Comparing device/inode (and `st_nlink`) after `flock` closes that
+    window: the reaper takes the same `flock` before unlinking.
+    """
+    try:
+        current = os.lstat(lock_path)
+    except FileNotFoundError:
+        return False
+    own = os.fstat(handle.fileno())
+    return own.st_nlink > 0 and (own.st_dev, own.st_ino) == (current.st_dev, current.st_ino)
+
+
+def try_record_thread_lock(path: Path):
+    """Acquire only the in-process half of `record_lock`, never blocking.
+
+    Local retention uses this to prove no same-process `record_lock` owner
+    exists before it takes the OS lock. A `None` return means "busy, skip".
+    """
+    key = os.path.normcase(str(Path(path).resolve()))
+    with _guard:
+        lock = _locks.setdefault(key, threading.RLock())
+    if not lock.acquire(blocking=False):
+        return None
+    return lock
 
 
 @contextlib.contextmanager
@@ -47,7 +80,8 @@ def record_lock(path: Path, *, timeout_seconds: float | None = None):
         waiting()
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_name(path.name + ".lock")
-        with lock_path.open("a+b") as handle:
+        handle = lock_path.open("a+b")
+        try:
             if os.name == "nt":
                 import msvcrt
                 if handle.tell() == 0:
@@ -77,16 +111,26 @@ def record_lock(path: Path, *, timeout_seconds: float | None = None):
                 while True:
                     waiting()
                     try:
-                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
                         waiting()
                         time.sleep(0.02)
+                        continue
+                    if _lock_handle_is_current(handle, lock_path):
+                        break
+                    # A stale-lock reaper unlinked this inode while we waited.
+                    # Re-open the live directory entry; never enter the critical
+                    # section holding only an orphaned lock.
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    handle.close()
+                    handle = lock_path.open("a+b")
                 try:
                     get_recorder("remote-dev").event("DEBUG", "lock.acquired", elapsed_ms=round((time.monotonic() - started) * 1000, 3))
                     yield
                 finally:
-                    fcntl.flock(handle, fcntl.LOCK_UN)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
     finally:
         lock.release()

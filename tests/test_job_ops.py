@@ -8,7 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 import remote_dev.core.job_ops as job_ops
+import remote_dev.core.job_records as job_records
 import remote_dev.core.state_store as state_store
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core.errors import RemoteExecutionError, error_details
@@ -714,6 +717,24 @@ class WorkerExchangeAndSubreaperStatusTests(unittest.TestCase):
         self.assertEqual(row["result"]["exit_code"], 0)
         self.assertEqual(row["stdout"], "first line\nsecond line\n")
         self.assertEqual(row["stdout_bytes_remaining"], 0)
+
+
+def test_load_record_rejects_path_traversal_before_path_resolution(tmp_path, monkeypatch):
+    monkeypatch.setenv("REMOTE_DEV_STATE_DIR", str(tmp_path / "state"))
+    endpoint = Endpoint(host="192.0.2.12", port=22, root="/srv/app", cwd="/srv/app")
+    (tmp_path / "outside.json").write_text('{"job_id": "outside"}', encoding="utf-8")
+
+    for candidate in (endpoint, None):
+        with pytest.raises(ValueError) as caught:
+            job_records.load_record(candidate, "../outside")
+        details = error_details(caught.value)
+        assert details["category"] == "caller"
+        assert details["field"] == "job_id"
+        assert details["submission_state"] == "not_sent"
+        assert "must be 3-96 chars" in str(caught.value)
+
+    # Validation happens before `job_record_path` creates the endpoint state tree.
+    assert not (tmp_path / "state").exists()
 
 
 if __name__ == "__main__":

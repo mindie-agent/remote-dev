@@ -7,8 +7,8 @@
   ranges) is persisted in local job records and combined with preview tail-slice omissions, so public
   receipts never report `truncated=False` after the remote ring rotated bytes away.
 - Structured refs distinguish the authoritative remote raw logs from the local cached output. A partial or
-  failed local cache is never described as the full raw log, and a rotated `.log.prev` segment is not
-  silently presented as the complete retained range.
+  failed local cache is never described as the full raw log; a retained `.log.prev` segment (including the
+  first rotation that dropped zero head bytes) is always exposed through `remote_raw_*_segments`.
 - Formatting is presentation only: it never advances a cursor, consumes remote bytes, or rewrites a local record.
 [Timeouts & Locks]
 - Pure string formatting plus local `stat()`/bounded reads of cache paths; no SSH, subprocesses, locks, or long local I/O.
@@ -664,6 +664,15 @@ def job_log_refs(
         for name, entry in accounting.items()
     }
     log_truncated = any(entry["truncated_head_bytes"] for entry in accounting.values())
+    previous_segments = {
+        name: bool(
+            accounting[name].get("previous_bytes")
+            or accounting[name].get("rotated")
+            or accounting[name].get("truncated_head_bytes")
+        )
+        for name in _STREAM_NAMES
+    }
+    has_previous_segments = bool(remote_dir) and any(previous_segments.values())
     if log_truncated and not local_recording_error:
         note += (
             " The local cache can only cover the remote retained range; bytes before"
@@ -695,8 +704,13 @@ def job_log_refs(
             "Use remote.read on remote_raw_stdout/remote_raw_stderr with offset/limit for "
             "paginated access; local cached output is not the raw remote log."
             + (
-                " The retained range spans remote_raw_*_segments read in order (`.log.prev` "
-                "first when present); earlier bytes were rotated away."
+                " The retained range spans remote_raw_*_segments: read `.log.prev` first, "
+                "then `.log`, in order."
+                if has_previous_segments
+                else ""
+            )
+            + (
+                " In two-segment streams, earlier bytes were rotated away and are not retrievable."
                 if log_truncated
                 else ""
             )
@@ -708,7 +722,7 @@ def job_log_refs(
         current = f"{remote_dir}/{name}.log"
         previous = current + ".prev"
         refs[f"remote_raw_{name}_segments"] = (
-            [previous, current] if retained_range[name]["truncated_head_bytes"] else [current]
+            [previous, current] if previous_segments[name] else [current]
         )
     if endpoint_id and job_id:
         refs["stdout_resource"] = f"remote://endpoint/{endpoint_id}/job/{job_id}/stdout"

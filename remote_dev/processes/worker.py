@@ -318,11 +318,16 @@ def worker(directory):
     shell_exit_observed = shell_exit_observed if shell_exit_observed is not None else command_finished
     log_accounting = {"max_log_bytes": max_log_bytes}
     for _name, _log in (("stdout", stdout_log), ("stderr", stderr_log)):
+        _previous = _file_size(_log.prev_path)
+        _current = _file_size(_log.path)
         log_accounting[_name] = {
             "logical_bytes_written": _log.logical_bytes_written,
             "truncated_head_bytes": _log.truncated_head_bytes,
             "generation": _log.generation,
-            "retained_bytes": _file_size(_log.prev_path) + _file_size(_log.path),
+            "retained_bytes": _previous + _current,
+            "previous_bytes": _previous,
+            "current_bytes": _current,
+            "rotated": bool(_previous),
         }
         if _log.accounting_warning:
             log_accounting[_name]["accounting_warning"] = _log.accounting_warning
@@ -637,6 +642,9 @@ def control_job(request, source, cancel_event=None):
                         0, window["logical_bytes"] - result[offset_key])
                     result[name + "_logical_bytes"] = window["logical_bytes"]
                     result[name + "_truncated_head_bytes"] = window["truncated_head_bytes"]
+                    result[name + "_previous_bytes"] = window["previous_bytes"]
+                    result[name + "_current_bytes"] = window["current_bytes"]
+                    result[name + "_rotated"] = window["rotated"]
                     if window["skipped_bytes"]:
                         # The retained ring rotated away bytes before the cursor;
                         # report the jump instead of presenting it as clean EOF.
@@ -647,6 +655,9 @@ def control_job(request, source, cancel_event=None):
                     result[name] = "\n".join(window["data"].decode(errors="replace").splitlines()[-lines:])
                     result[name + "_logical_bytes"] = window["logical_bytes"]
                     result[name + "_truncated_head_bytes"] = window["truncated_head_bytes"]
+                    result[name + "_previous_bytes"] = window["previous_bytes"]
+                    result[name + "_current_bytes"] = window["current_bytes"]
+                    result[name + "_rotated"] = window["rotated"]
             return result
         elif action == "stdin":
             status = job_status(directory)

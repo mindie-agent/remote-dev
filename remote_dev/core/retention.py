@@ -16,12 +16,16 @@
 - Windows PID liveness never calls `os.kill`; it uses `OpenProcess` + `GetExitCodeProcess`
   and treats `ERROR_INVALID_PARAMETER` as exited while `ERROR_ACCESS_DENIED` or any
   unconfirmed result keeps the directory.
+- A stale `.json.lock` is only removed while the in-process record `RLock` and the OS lock are both held,
+  after re-proving the record and every companion are absent; `record_lock` re-checks its handle against
+  the live directory entry after `flock`, so an already-opened old inode can never grant mutual exclusion.
 [Timeouts & Locks]
 - Pruning is opportunistic on writes and skipped for `300s` by the endpoint `.prune.json`
   marker; each pass is capped by `2s` and `4096` directory observations.
 - Job deletion holds the exclusive `record_lock` across re-verification and unlinking; a
   concurrent holder or an unverifiable Windows/MSVCRT lock means "keep". Stale `.json.lock`
-  inodes are only removed in a separate pass when >24h old, unlocked, and the record is absent.
+  inodes are only removed in a separate pass when >24h old, unlocked, and the record and all
+  companion segments are absent; `unlink` happens before the OS lock is released.
 [Side-Effect Policy]
 - Mutates only paths below the explicit endpoint-state directory or session runtime root
   passed by the caller. No network, subprocess, or remote job side effects.
@@ -38,8 +42,8 @@ import time
 from pathlib import Path
 
 from remote_dev.core.errors import RemoteExecutionError
-from remote_dev.core.locking import record_lock
-from remote_dev.core.windows_probe import windows_lock_free, windows_pid_alive
+from remote_dev.core.locking import record_lock, try_record_thread_lock
+from remote_dev.core.windows_probe import windows_pid_alive
 
 try:  # POSIX lock probing; Windows uses msvcrt.locking for the same byte lock.
     import fcntl
@@ -267,36 +271,95 @@ def _job_parts(directory, job_id):
     return parts
 
 
-def _record_lock_free(record_path):
-    """Probe `<job>.json.lock`; an unverifiable fence always means "keep"."""
-    lock_path = record_path.with_name(record_path.name + ".lock")
+def _job_has_companions(directory, job_id, *, record_path, lock_path, deadline):
+    """True when the record, a log segment, or an atomic-write temp file exists."""
+    if os.path.lexists(record_path):
+        return True
+    for suffix in JOB_COMPANION_SUFFIXES:
+        path = Path(directory) / (job_id + suffix)
+        if path == lock_path:
+            continue
+        if os.path.lexists(path):
+            return True
+    temp_prefixes = (f".{job_id}.json.", f"{job_id}.json.tmp")
+    for entry in _scandir(directory, deadline):
+        if entry.name.startswith(temp_prefixes):
+            return True
+    return False
+
+
+def _unlink_stale_lock(directory, job_id, record_path, lock_path, *, now, deadline):
+    """Unlink one stale lock while holding the strongest fence available.
+
+    POSIX keeps `flock` until after `unlink`. Windows relies on `DeleteFileW`'s kernel
+    sharing check: an open `.lock` yields `ERROR_SHARING_VIOLATION` (`PermissionError`).
+    """
     if os.name == "nt":
-        return windows_lock_free(lock_path)
-    if fcntl is None:
-        return False
+        try:
+            current = os.lstat(lock_path)
+        except FileNotFoundError:
+            return 0
+        except TimeoutError:
+            raise
+        except OSError:
+            return 0
+        if now - current.st_mtime <= STALE_JOB_LOCK_SECONDS:
+            return 0
+        if _job_has_companions(directory, job_id, record_path=record_path,
+                               lock_path=lock_path, deadline=deadline):
+            return 0
+        try:
+            os.unlink(lock_path)
+        except TimeoutError:
+            raise
+        except OSError:
+            return 0
+        return 1
     try:
         handle = lock_path.open("rb")
     except FileNotFoundError:
-        return True
+        return 0
     except TimeoutError:
         raise
     except OSError:
-        return False
+        return 0
     try:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return False
+            return 0  # a live record_lock owns this inode: keep
         except TimeoutError:
             raise
         except OSError:
-            return False
-    finally:
+            return 0
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            try:
+                own = os.fstat(handle.fileno())
+                current = os.lstat(lock_path)
+            except FileNotFoundError:
+                return 0
+            except TimeoutError:
+                raise
+            except OSError:
+                return 0
+            if (own.st_dev, own.st_ino) != (current.st_dev, current.st_ino):
+                return 0  # the entry was replaced after open: keep the live lock
+            if now - current.st_mtime <= STALE_JOB_LOCK_SECONDS:
+                return 0
+            if _job_has_companions(directory, job_id, record_path=record_path,
+                                   lock_path=lock_path, deadline=deadline):
+                return 0
+            try:
+                os.unlink(lock_path)
+            except TimeoutError:
+                raise
+            except OSError:
+                return 0
+            return 1
         finally:
-            handle.close()
-    return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def _acquire_record_lock(path, timeout_seconds):
@@ -316,7 +379,12 @@ def _acquire_record_lock(path, timeout_seconds):
 
 
 def _prune_stale_job_locks(directory, *, now, deadline):
-    """Remove only stale, unlocked `.json.lock` inodes whose record is absent."""
+    """Remove only stale, unlocked `.json.lock` inodes whose record is absent.
+
+    The in-process `RLock` is held across the OS lock, companion re-check, and `unlink`, so a
+    same-process writer cannot race the old inode. On POSIX `unlink` precedes `flock` release;
+    a `record_lock` that already opened the old inode then re-opens the live directory entry.
+    """
     removed = 0
     for entry in _scandir(directory, deadline):
         if time.monotonic() >= deadline:
@@ -337,15 +405,17 @@ def _prune_stale_job_locks(directory, *, now, deadline):
             continue
         if now - info.st_mtime <= STALE_JOB_LOCK_SECONDS:
             continue
-        if not _record_lock_free(record_path):
-            continue
+        lock_path = Path(entry.path)
+        thread_lock = try_record_thread_lock(record_path)
+        if thread_lock is None:
+            continue  # a same-process record_lock owner exists: keep
         try:
-            Path(entry.path).unlink()
-        except TimeoutError:
-            raise
-        except OSError:
-            continue
-        removed += 1
+            if os.name == "nt" or fcntl is not None:
+                removed += _unlink_stale_lock(
+                    directory, job_id, record_path, lock_path, now=now, deadline=deadline
+                )
+        finally:
+            thread_lock.release()
     return removed
 
 
