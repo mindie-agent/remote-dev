@@ -5,7 +5,6 @@ target is Linux /proc + prctl child-subreaper.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import shlex
@@ -19,16 +18,15 @@ from pathlib import Path
 from unittest import mock
 
 from remote_dev.processes import worker_source
+try:  # pytest puts tests/ on PYTHONPATH; the live package runs from its root.
+    from _worker_source import load_worker_module
+except ImportError:  # pragma: no cover - live NPU package layout
+    from tests._worker_source import load_worker_module
 
 
 def load_worker():
     os.environ.setdefault("REMOTE_DEV_STOP_GRACE_SECONDS", "0.1")
-    path = Path(__file__).resolve().parents[1] / "remote_dev" / "processes" / "worker.py"
-    spec = importlib.util.spec_from_file_location("remote_dev_process_worker", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec is not None and spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return load_worker_module()
 
 
 @unittest.skipUnless(sys.platform == "linux", "requires Linux /proc identity and prctl subreaper")

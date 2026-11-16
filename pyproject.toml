@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remote-dev"
-version = "0.11.11"
+version = "0.11.12"
 description = "Remote development substrate: SSH-backed twins of local agent tools"
 readme = "README.md"
 license = { text = "MIT" }
@@ -60,6 +60,7 @@ allow-direct-references = true
 "remote_dev/schemas/read.schema.json" = "remote_dev/schemas/read.schema.json"
 "remote_dev/schemas/result.schema.json" = "remote_dev/schemas/result.schema.json"
 "remote_dev/processes/worker.py" = "remote_dev/processes/worker.py"
+"remote_dev/processes/worker_runtime.py" = "remote_dev/processes/worker_runtime.py"
 "remote_dev/processes/client.py" = "remote_dev/processes/client.py"
 
 [tool.pytest.ini_options]

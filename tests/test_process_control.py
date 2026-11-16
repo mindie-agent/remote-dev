@@ -19,6 +19,8 @@ class ProcessControlClientTests(unittest.TestCase):
         self.assertIn("PR_SET_CHILD_SUBREAPER", source)
         self.assertIn("REMOTE_DEV_JOB_TOKEN", source)
         self.assertIn("control_job", source)
+        self.assertIn("class CappedLog", source)
+        self.assertIn("collect_terminal_jobs", source)
         self.assertNotIn("MINDIE_REMOTE_JOB", source)
         self.assertNotIn(".vaws-runtime", source)
         self.assertNotIn("lease/fence", source)

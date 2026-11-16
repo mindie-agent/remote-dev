@@ -342,13 +342,19 @@ class _LiveSession:
         worker_init = (
             "from pathlib import Path\n"
             "def worker_source() -> str:\n"
-            "    return Path(__file__).with_name('worker.py').read_text(encoding='utf-8')\n"
+            "    base = Path(__file__).parent\n"
+            "    return '\\n\\n'.join(\n"
+            "        (base / name).read_text(encoding='utf-8')\n"
+            "        for name in ('worker_runtime.py', 'worker.py')\n"
+            "    )\n"
         )
         files = (
             ("remote_dev/processes/worker.py", (local_root / "remote_dev" / "processes" / "worker.py").read_text(encoding="utf-8")),
+            ("remote_dev/processes/worker_runtime.py", (local_root / "remote_dev" / "processes" / "worker_runtime.py").read_text(encoding="utf-8")),
             ("remote_dev/__init__.py", ""),
             ("remote_dev/processes/__init__.py", worker_init),
             ("tests/__init__.py", ""),
+            ("tests/_worker_source.py", (local_root / "tests" / "_worker_source.py").read_text(encoding="utf-8")),
             ("tests/test_process_worker.py", local_test),
             ("tests/run_process_worker_tests.py", helper),
         )

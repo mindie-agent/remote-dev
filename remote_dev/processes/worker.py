@@ -5,14 +5,21 @@
 - Runs on the remote target host under `python -I` isolated startup to prevent `cwd` stdlib shadowing.
 - `cancel_and_drain()` waits `max(5.0, STOP_GRACE_SECONDS + 3.0)` after `SIGTERM` before returning an uncertain observation.
 - Persists atomic `status.json` transitions via `.tmp.<pid>` + `os.replace()`.
+- Streams child output through `worker_runtime.CappedLog`, which keeps `<stream>.log.prev`
+  plus `<stream>.log` at or below `spec.max_log_bytes` (default 256 MiB per stream) and
+  publishes `logical_bytes_written` / `truncated_head_bytes` in `logs.json`/`result.json`.
+- A terminal job directory is only removed by `worker_runtime.collect_terminal_jobs`
+  after verified UID ownership, a free `worker.lock`/`lock`, and a terminal result with
+  drained descendants; `running`, `unknown`, and `retain_until_release` jobs are kept.
 [Timeouts & Locks]
 - Uses non-blocking `fcntl.flock` on `worker.lock` to guarantee a single active supervisor per job directory.
+- Tail reads take `logs.lock` in shared mode against the supervisor's exclusive append/rotate lock.
 - `STOP_GRACE_SECONDS` defaults to `2.0` (`REMOTE_DEV_STOP_GRACE_SECONDS` may override it); the process group is escalated to `SIGKILL` after that window.
 [Side-Effect Policy]
-- Writes `status.json`, `stdout.log`, `stderr.log`, and `worker.lock` exclusively inside the assigned remote job directory; signals only the target child process group.
+- Writes `status.json`, `logs.json`, `stdout.log`, `stderr.log`, `worker.lock`, and
+  `worker.lock`-scoped housekeeping records exclusively inside the assigned remote job
+  directory or its owned `.remote-dev/jobs` parent; signals only the target child process group.
 """
-from __future__ import annotations
-
 import contextlib, ctypes, errno, fcntl, hashlib, json, math, os, pty, re
 import select, signal, subprocess, struct, sys, termios, time, uuid
 from pathlib import Path
@@ -36,26 +43,6 @@ def _stop_grace_seconds() -> float:
         return float(STOP_GRACE_SECONDS)
     return float(os.environ.get("REMOTE_DEV_STOP_GRACE_SECONDS", str(STOP_GRACE_SECONDS)))
 
-def _utf8_incomplete_tail(chunk):
-    """Trailing bytes (0-3) of an unfinished UTF-8 sequence; invalid tails return 0."""
-    size = len(chunk)
-    for back in range(1, min(4, size) + 1):
-        byte = chunk[size - back]
-        if byte & 0xC0 == 0x80:
-            continue  # continuation byte, keep scanning for the lead byte
-        if byte < 0x80:
-            return 0  # ASCII: the chunk ends on a complete character
-        if 0xC2 <= byte <= 0xDF:
-            needed = 2
-        elif 0xE0 <= byte <= 0xEF:
-            needed = 3
-        elif 0xF0 <= byte <= 0xF4:
-            needed = 4
-        else:
-            return 0  # invalid lead byte: not an incomplete sequence
-        return back if back < needed else 0
-    return 0
-
 def atomic_json(path, value):
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex)
     with temporary.open("x", encoding="utf-8") as stream:
@@ -71,83 +58,11 @@ def read_json(path):
 def boot_id():
     return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
 
-def process_identity(pid):
-    try:
-        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace").rsplit(") ", 1)[1].split()
-        return {"pid": int(pid), "ppid": int(fields[1]), "pgid": int(fields[2]),
-                "start_ticks": fields[19], "state": fields[0]}
-    except (FileNotFoundError, ProcessLookupError):
-        return None
-
-def supervised_family(receipt):
-    """Walk the verified subreaper's kernel child lists, including all threads."""
-    anchor = process_identity(receipt["pid"])
-    if not anchor or anchor["state"] == "Z" or anchor["start_ticks"] != receipt["start_ticks"]:
-        return None
-    found, pending, unknown = {anchor["pid"]: anchor}, [anchor["pid"]], []
-    while pending:
-        pid = pending.pop()
-        try:
-            tasks = Path(f"/proc/{pid}/task")
-            for task in tasks.iterdir():
-                try:
-                    children = (task / "children").read_text(encoding="utf-8").split()
-                except (FileNotFoundError, ProcessLookupError):
-                    continue
-                for child_pid in children:
-                    row = process_identity(child_pid)
-                    if row and row["state"] != "Z" and row["ppid"] == pid and row["pid"] not in found:
-                        found[row["pid"]] = row
-                        pending.append(row["pid"])
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        except PermissionError:
-            unknown.append(f"cannot observe children of {pid}")
-    return list(found.values()), unknown
-
-def owned_processes(receipt):
-    """Observe marker ownership and ancestry below the verified subreaper.
-
-    Ancestry covers setsid/clean-environment daemons; unowned process-group
-    members are ambiguous, not free. The marker identifies, never authorizes.
-    """
-    if receipt["boot_id"] != boot_id():
-        return [], ["boot identity changed"]
-    if receipt.get("supervision") == "subreaper":
-        family = supervised_family(receipt)
-        if family is not None:
-            return family
-    identities, tagged, unknown = {}, set(), []
-    marker = (JOB_TOKEN_ENV + "=" + receipt["marker"]).encode()
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        identity = None
-        try:
-            identity = process_identity(entry.name)
-            if not identity or identity["state"] == "Z":
-                continue
-            identities[identity["pid"]] = identity
-            environ = (entry / "environ").read_bytes().split(b"\0")
-            if marker in environ:
-                tagged.add(identity["pid"])
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        except PermissionError:
-            # Other users' processes are not family; readable ancestry still helps.
-            if identity is None:
-                unknown.append(int(entry.name))
-    anchor = identities.get(receipt["pid"])
-    if receipt.get("supervision") == "subreaper" and anchor and anchor["start_ticks"] == receipt["start_ticks"]:
-        family = {anchor["pid"]}
-        while True:
-            descendants = {pid for pid, row in identities.items() if row["ppid"] in family}
-            if descendants.issubset(family):
-                break
-            family.update(descendants)
-        tagged.update(family)
-    unknown.extend(pid for pid, row in identities.items() if row["pgid"] == receipt["pgid"] and pid not in tagged)
-    return [identities[pid] for pid in sorted(tagged)], unknown
+def _log_cap_bytes(spec):
+    value = spec.get("max_log_bytes", DEFAULT_MAX_LOG_BYTES)
+    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+        raise ValueError("jobs require max_log_bytes to be a finite positive number")
+    return int(value)
 
 def job_status(directory):
     receipt = read_json(directory / "receipt.json")
@@ -207,6 +122,10 @@ def worker(directory):
     if libc.prctl(36, 1, 0, 0, 0) != 0:  # Linux PR_SET_CHILD_SUBREAPER
         raise OSError(ctypes.get_errno(), "cannot supervise orphan descendants")
     spec = read_json(directory / "spec.json")
+    # Hold the supervisor fence for this process lifetime so housekeeping never
+    # mistakes a live supervisor for a terminal one.
+    worker_lock = (directory / "worker.lock").open("a+b")
+    fcntl.flock(worker_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     # Interactive jobs proxy the on-disk FIFO into the child pipe, attaching the
     # reader before supervisor-ready.json so a post-prepare write always finds it.
     tty = bool(spec.get("tty"))
@@ -242,7 +161,12 @@ def worker(directory):
         os.set_blocking(pipe_w, False)
     command_started = time.monotonic()
     command_started_at = time.time()
-    with (directory / "stdout.log").open("ab") as stdout, (directory / "stderr.log").open("ab") as stderr:
+    max_log_bytes = _log_cap_bytes(spec)
+    with contextlib.ExitStack() as log_stack:
+        stdout_log = log_stack.enter_context(CappedLog(directory, "stdout", max_log_bytes))
+        stderr_log = log_stack.enter_context(CappedLog(directory, "stderr", max_log_bytes))
+        output_pipes = {}
+        pipe_eof = set()
         environment = {**os.environ, **spec["env"]}
         if tty:
             environment.setdefault("TERM", "xterm-256color")
@@ -258,7 +182,11 @@ def worker(directory):
             os.close(slave_fd)
         else:
             child = subprocess.Popen(["bash", "-c", spec["command"]], cwd=spec["cwd"], env=environment,
-                                     stdin=pipe_r if interactive else subprocess.DEVNULL, stdout=stdout, stderr=stderr)
+                                     stdin=pipe_r if interactive else subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for stream_name, output in (("stdout", child.stdout), ("stderr", child.stderr)):
+                os.set_blocking(output.fileno(), False)
+                output_pipes[stream_name] = output
         if interactive and not tty:
             os.close(pipe_r)
         receipt = read_json(directory / "receipt.json")
@@ -291,8 +219,26 @@ def worker(directory):
                         break  # last slave closed
                     if not chunk:
                         break
-                    stdout.write(chunk)
-                    stdout.flush()
+                    stdout_log.write(chunk)
+            for stream_name, output in output_pipes.items():
+                if stream_name in pipe_eof:
+                    continue
+                for _ in range(16):
+                    try:
+                        chunk = os.read(output.fileno(), 65536)
+                    except BlockingIOError:
+                        break
+                    except TimeoutError:
+                        raise
+                    except OSError as exc:
+                        if exc.errno != errno.EIO:
+                            raise
+                        pipe_eof.add(stream_name)
+                        break
+                    if not chunk:
+                        pipe_eof.add(stream_name)
+                        break
+                    (stdout_log if stream_name == "stdout" else stderr_log).write(chunk)
             if code is not None:
                 # poll() reaps the direct Popen child first. Then reap adopted
                 # orphans without stealing the shell's exit status.
@@ -356,9 +302,12 @@ def worker(directory):
             # A process cannot fork again after it has been reaped; only this
             # empty-child boundary allows the supervisor to publish completion.
             children = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children").read_text(encoding="utf-8", errors="replace").strip()
-            if code is not None and not children:
+            if code is not None and not children and len(pipe_eof) >= len(output_pipes):
                 break
             time.sleep(0.01)
+        for output in output_pipes.values():
+            with contextlib.suppress(OSError):
+                output.close()
         if pipe_w is not None:
             os.close(pipe_w)
         if fifo_fd is not None:
@@ -368,20 +317,16 @@ def worker(directory):
     result = {"state": terminal or ("succeeded" if code == 0 else "failed"),
               "exit_code": code, "descendants_drained": True,
               "started_at": command_started_at, "finished_at": time.time(),
+              "logs": {"max_log_bytes": max_log_bytes,
+                       "stdout": {"logical_bytes_written": stdout_log.logical_bytes_written,
+                                  "truncated_head_bytes": stdout_log.truncated_head_bytes},
+                       "stderr": {"logical_bytes_written": stderr_log.logical_bytes_written,
+                                  "truncated_head_bytes": stderr_log.truncated_head_bytes}},
               "timings": {"clock_domain": "remote-supervisor:" + boot_id() + ":" + str(os.getpid()),
                           "spawn_ms": round((spawned_at - command_started) * 1000, 3),
                           "shell_ms": round((shell_exit_observed - spawned_at) * 1000, 3),
                           "descendant_drain_ms": round((command_finished - shell_exit_observed) * 1000, 3)}}
     atomic_json(directory / "result.json", result)
-
-def signal_processes(processes, sig, *, exclude=None):
-    for process in processes:
-        if process["pid"] == exclude:
-            continue
-        current = process_identity(process["pid"])
-        if current and current["start_ticks"] == process["start_ticks"]:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(process["pid"], sig)
 
 def resolve_runtime_root(request, *, absent_is_result):
     """Resolve the runtime root without creating it; absent is a result only for observation."""
@@ -451,8 +396,7 @@ def control_job(request, source, cancel_event=None):
             sizes = []
             available = False
             for stream in ("stdout", "stderr"):
-                path = directory / (stream + ".log")
-                size = path.stat().st_size if path.exists() else 0
+                size = log_stream_size(directory, stream)
                 sizes.append(size)
                 if size > int(request.get(stream + "_offset") or 0):
                     available = True
@@ -514,6 +458,7 @@ def control_job(request, source, cancel_event=None):
             prepared_timeout = spec.get("prepared_timeout_seconds")
             if prepared_timeout is not None and (type(prepared_timeout) not in (int, float) or not math.isfinite(prepared_timeout) or prepared_timeout <= 0):
                 raise ValueError("jobs require prepared_timeout_seconds None or a finite positive number")
+            _log_cap_bytes(spec)
             if any(not ENV_NAME_RE.fullmatch(key) or key.startswith(JOB_ENV_PREFIX) for key in spec["env"]):
                 raise ValueError("invalid or reserved environment variable")
             for flag in ("interactive", "tty"):
@@ -581,6 +526,7 @@ def control_job(request, source, cancel_event=None):
                     error.cleanup_error = f"{type(cleanup_error).__name__}: {cleanup_error}"
                     error.add_note("Supervisor cleanup also failed: " + error.cleanup_error)
                 raise
+            maybe_run_job_housekeeping(root, exclude=(identifier,))
         elif action == "go":
             status = job_status(directory)
             existing = read_json(directory / "go.json")
@@ -597,6 +543,7 @@ def control_job(request, source, cancel_event=None):
             atomic_json(directory / "go.json", {"authorization": request["authorization"], "opened_at": opened,
                                                "valid_until": None if activation_timeout is None else opened + activation_timeout})
         elif action == "stop":
+            maybe_run_job_housekeeping(root, exclude=(identifier,))
             receipt = read_json(directory / "receipt.json")
             if receipt is None:
                 return job_status(directory)
@@ -618,47 +565,57 @@ def control_job(request, source, cancel_event=None):
             live = result.get("state") in LIVE_JOB_STATES
             for name in ("stdout", "stderr"):
                 path = directory / (name + ".log")
-                if path.exists():
-                    offset_key = name + "_offset"
-                    if request.get(offset_key) is not None:
-                        # Incremental read: bytes after the caller cursor only.
-                        start_offset = max(0, int(request[offset_key]))
-                        size = path.stat().st_size
-                        with path.open("rb") as stream:
-                            stream.seek(start_offset)
-                            chunk = stream.read(remaining_budget if shared_budget else max_bytes)
-                        hold = _utf8_incomplete_tail(chunk)
-                        if hold == len(chunk) and not shared_budget:
-                            # Progress guarantee: a page must always advance the
-                            # cursor, even for budgets smaller than one UTF-8
-                            # character; the partial bytes flush as U+FFFD.
-                            hold = 0
-                        elif not live and start_offset + len(chunk) >= size:
-                            # Terminal job at end of file: no later write can
-                            # complete the sequence, so flush the tail now.
-                            hold = 0
-                        if hold:
-                            # Hold back a split UTF-8 character; the next poll
-                            # re-reads it and bytes_remaining stays accurate.
-                            chunk = chunk[:-hold]
-                        if shared_budget:
-                            # Invalid source bytes expand to three-byte U+FFFD.
-                            # Budget the decoded response, retaining unread raw
-                            # bytes at the cursor instead of discarding output.
-                            while (decoded_size := len(chunk.decode("utf-8", "replace").encode("utf-8"))) > remaining_budget:
-                                chunk = chunk[:len(chunk) * remaining_budget // decoded_size]
-                                hold = _utf8_incomplete_tail(chunk)
-                                if hold:
-                                    chunk = chunk[:-hold]
-                        result[name] = chunk.decode("utf-8", errors="replace")
-                        if shared_budget:
-                            remaining_budget = max(0, remaining_budget - len(result[name].encode("utf-8")))
-                        result[offset_key] = start_offset + len(chunk)
-                        result[name + "_bytes_remaining"] = max(0, size - result[offset_key])
-                    else:
-                        with path.open("rb") as stream:
-                            stream.seek(max(0, path.stat().st_size - 32000))
-                            result[name] = "\n".join(stream.read().decode(errors="replace").splitlines()[-lines:])
+                if not path.exists() and not (directory / (name + ".log.prev")).exists():
+                    continue
+                offset_key = name + "_offset"
+                if request.get(offset_key) is not None:
+                    # Incremental read: logical bytes after the caller cursor only.
+                    start_offset = max(0, int(request[offset_key]))
+                    window = read_log_window(
+                        directory, name, start_offset,
+                        remaining_budget if shared_budget else max_bytes)
+                    chunk = window["data"]
+                    hold = _utf8_incomplete_tail(chunk)
+                    if hold == len(chunk) and not shared_budget:
+                        # Progress guarantee: a page must always advance the
+                        # cursor, even for budgets smaller than one UTF-8
+                        # character; the partial bytes flush as U+FFFD.
+                        hold = 0
+                    elif not live and window["end"] >= window["logical_bytes"]:
+                        # Terminal job at the retained end: no later write can
+                        # complete the sequence, so flush the tail now.
+                        hold = 0
+                    if hold:
+                        # Hold back a split UTF-8 character; the next poll
+                        # re-reads it and bytes_remaining stays accurate.
+                        chunk = chunk[:-hold]
+                    if shared_budget:
+                        # Invalid source bytes expand to three-byte U+FFFD.
+                        # Budget the decoded response, retaining unread raw
+                        # bytes at the cursor instead of discarding output.
+                        while (decoded_size := len(chunk.decode("utf-8", "replace").encode("utf-8"))) > remaining_budget:
+                            chunk = chunk[:len(chunk) * remaining_budget // decoded_size]
+                            hold = _utf8_incomplete_tail(chunk)
+                            if hold:
+                                chunk = chunk[:-hold]
+                    result[name] = chunk.decode("utf-8", errors="replace")
+                    if shared_budget:
+                        remaining_budget = max(0, remaining_budget - len(result[name].encode("utf-8")))
+                    result[offset_key] = window["start"] + len(chunk)
+                    result[name + "_bytes_remaining"] = max(
+                        0, window["logical_bytes"] - result[offset_key])
+                    result[name + "_logical_bytes"] = window["logical_bytes"]
+                    result[name + "_truncated_head_bytes"] = window["truncated_head_bytes"]
+                    if window["skipped_bytes"]:
+                        # The retained ring rotated away bytes before the cursor;
+                        # report the jump instead of presenting it as clean EOF.
+                        result[name + "_truncated"] = True
+                        result[name + "_skipped_bytes"] = window["skipped_bytes"]
+                else:
+                    window = read_log_window(directory, name, None, 32000, tail_bytes=32000)
+                    result[name] = "\n".join(window["data"].decode(errors="replace").splitlines()[-lines:])
+                    result[name + "_logical_bytes"] = window["logical_bytes"]
+                    result[name + "_truncated_head_bytes"] = window["truncated_head_bytes"]
             return result
         elif action == "stdin":
             status = job_status(directory)
@@ -725,6 +682,8 @@ def control_job(request, source, cancel_event=None):
                     "stdin_buffer_full": buffer_full}
         elif action != "status":
             raise ValueError("unsupported job action")
+        if action == "status" and request.get("housekeeping"):
+            maybe_run_job_housekeeping(root, exclude=(identifier,))
         return job_status(directory)
 
 def run_supervisor(directory):
@@ -757,14 +716,24 @@ def run_supervisor(directory):
                         break
                     time.sleep(.02)
             if drained:
-                atomic_json(directory / "result.json", {"state": "failed", "reason": "supervisor failed",
-                                                       "descendants_drained": True, "supervisor_error": detail})
+                failure = {"state": "failed", "reason": "supervisor failed",
+                           "descendants_drained": True, "supervisor_error": detail}
+                log_accounting = read_json(directory / "logs.json")
+                if log_accounting:
+                    failure["logs"] = log_accounting
+                atomic_json(directory / "result.json", failure)
         except BaseException:
             # The original exception is already durable in supervisor.log.
             # Append cleanup/record failure without replacing the primary.
             sys.stderr.write("Supervisor cleanup/recording also failed:\n" + traceback.format_exc()[-8000:])
             sys.stderr.flush()
         raise SystemExit(1)
+
+if __name__ == "__main__" and "CappedLog" not in globals():
+    # Direct `python worker.py --worker <dir>` debugging: load the companion
+    # that worker_source() normally concatenates ahead of this module.
+    _runtime = Path(__file__).with_name("worker_runtime.py")
+    exec(compile(_runtime.read_text(encoding="utf-8"), str(_runtime), "exec"), globals())
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("--worker", "supervise"):

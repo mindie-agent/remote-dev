@@ -25,6 +25,7 @@ import remote_dev.core.job_ops as job_ops  # noqa: E402
 import remote_dev.core.search_ops as search_ops  # noqa: E402
 import remote_dev.core.state_store as state_store  # noqa: E402
 import remote_dev.mcp.tools as mcp_tools  # noqa: E402
+from _worker_source import load_worker_module  # noqa: E402
 
 
 def run_file_op(payload: dict) -> dict:
@@ -350,12 +351,12 @@ class WorkerStdinActionTests(unittest.TestCase):
         self.job_dir = self.tree / ".remote-dev" / "jobs" / "job-stdin-local"
 
     def _control(self, request):
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         return worker_mod.control_job(request, worker_mod.__file__ and "")
 
     def test_stdin_write_reaches_fifo_and_eof_marks_file(self) -> None:
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         root = self.tree
         (self.job_dir).mkdir(parents=True)
@@ -380,7 +381,7 @@ class WorkerStdinActionTests(unittest.TestCase):
             self.assertTrue((self.job_dir / "stdin-eof.json").exists())
 
     def test_stdin_rejected_when_not_running(self) -> None:
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         os.mkfifo(self.job_dir / "stdin.pipe", 0o600)
@@ -390,7 +391,7 @@ class WorkerStdinActionTests(unittest.TestCase):
         self.assertIn("not running", reply["reason"])
 
     def test_stdin_empty_poll_on_terminal_job_is_accepted(self) -> None:
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         with mock.patch.object(worker_mod, "job_status", return_value={"state": "succeeded", "quiet": True}):
@@ -399,7 +400,7 @@ class WorkerStdinActionTests(unittest.TestCase):
         self.assertTrue(reply["polled_terminal"])
 
     def test_stdin_write_after_eof_is_rejected(self) -> None:
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         os.mkfifo(self.job_dir / "stdin.pipe", 0o600)
@@ -410,7 +411,7 @@ class WorkerStdinActionTests(unittest.TestCase):
         self.assertIn("already closed", reply["reason"])
 
     def test_stdin_large_write_reports_partial_without_loss_claim(self) -> None:
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         os.mkfifo(self.job_dir / "stdin.pipe", 0o600)
@@ -430,7 +431,7 @@ class WorkerStdinActionTests(unittest.TestCase):
     def test_stdin_partial_write_defers_eof_and_accepts_retry(self) -> None:
         """Backpressure and EOF together: a partially accepted write with
         eof=true must not close stdin; the exact remainder stays retryable."""
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         os.mkfifo(self.job_dir / "stdin.pipe", 0o600)
@@ -472,7 +473,7 @@ class WorkerStdinActionTests(unittest.TestCase):
     def test_stdin_unicode_write_reports_character_accounting(self) -> None:
         """written_chars is the exact character count of the accepted byte
         prefix; slicing the original string there never splits a character."""
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         os.mkfifo(self.job_dir / "stdin.pipe", 0o600)
@@ -505,7 +506,7 @@ class WorkerStdinActionTests(unittest.TestCase):
         yet must return a truthful retryable refusal — no crash, no accepted
         or dropped bytes, and eof is not armed. Attaching the reader makes the
         identical retry succeed."""
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         os.mkfifo(self.job_dir / "stdin.pipe", 0o600)
@@ -529,7 +530,7 @@ class WorkerStdinActionTests(unittest.TestCase):
             self.assertTrue((self.job_dir / "stdin-eof.json").exists())
 
     def test_tail_offset_mode_is_incremental(self) -> None:
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         log = self.job_dir / "stdout.log"
@@ -548,7 +549,7 @@ class WorkerStdinActionTests(unittest.TestCase):
     def test_tail_incremental_preserves_split_utf8_characters(self) -> None:
         """A character split by the byte budget is held back for the next page
         instead of corrupting into U+FFFD; paged reads reassemble exactly."""
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         original = "中文日志" * 100
@@ -572,7 +573,7 @@ class WorkerStdinActionTests(unittest.TestCase):
     def test_tail_incremental_flushes_invalid_bytes_without_stalling(self) -> None:
         """Genuinely invalid bytes are not an incomplete sequence: they surface
         as U+FFFD and the cursor still advances past them."""
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         log = self.job_dir / "stdout.log"
@@ -589,7 +590,7 @@ class WorkerStdinActionTests(unittest.TestCase):
     def test_tail_incremental_flushes_unfinished_tail_on_terminal_job(self) -> None:
         """A terminal job at end of file can never complete a trailing partial
         sequence, so it flushes as U+FFFD instead of staying held back."""
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         (self.job_dir / "stdout.log").write_bytes("tail\n".encode() + "中".encode("utf-8")[:2])
@@ -603,7 +604,7 @@ class WorkerStdinActionTests(unittest.TestCase):
     def test_tail_incremental_tiny_budget_still_advances(self) -> None:
         """A budget smaller than one UTF-8 character must still move the cursor
         (progress guarantee); the partial bytes flush as U+FFFD."""
-        import remote_dev.processes.worker as worker_mod
+        worker_mod = load_worker_module()
 
         (self.job_dir).mkdir(parents=True)
         (self.job_dir / "stdout.log").write_bytes("中".encode("utf-8"))  # 3 bytes

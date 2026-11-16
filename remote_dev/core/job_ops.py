@@ -39,7 +39,10 @@ from remote_dev.core.job_results import (
 from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS, compact_text_span, fold_repeated_lines
 from remote_dev.core.locking import record_lock
 from remote_dev.core.runtime_env import runtime_env_lines
-from remote_dev.core.state_store import atomic_write_json, find_job_record, job_record_path, resolve_ledger_scope
+from remote_dev.core.state_store import (
+    atomic_write_json, find_job_record, job_record_path, maybe_prune_endpoint_state_dir,
+    resolve_ledger_scope,
+)
 from remote_dev.processes import control
 from remote_dev.result import make_result, tool_text, utc_now_iso
 from remote_dev.core.errors import error_details
@@ -234,6 +237,9 @@ def _save_output(record, path, row, *, cursor_key="stdin_cursors"):
     atomic_write_json(path, updated)
     record.clear()
     record.update(updated)
+    # Bounded local retention for terminal records/logs; the current record is
+    # newest and stays inside the count/byte/age window.
+    maybe_prune_endpoint_state_dir(path.parent.parent)
 
 
 @pinned_endpoint
@@ -275,6 +281,7 @@ def start_remote_job(
         # Save before submission: a lost reply retains the exact recovery id.
         # A submitted launch is never automatically replayed.
         atomic_write_json(path, record)
+        maybe_prune_endpoint_state_dir(path.parent.parent)
         try:
             row = control(endpoint, job_id, "launch", spec=spec, authorization=record["authorization"],
                           stdout_offset=0, stderr_offset=0, max_bytes=budget, shared_budget=True,
@@ -354,7 +361,7 @@ def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, An
     started = utc_now_iso()
     start = time.monotonic()
     try:
-        supervisor = control(endpoint, job_id, "status")
+        supervisor = control(endpoint, job_id, "status", housekeeping=True)
     except TimeoutError:
         raise
     except (RemoteExecutionError, ValueError, RuntimeError, OSError) as exc:

@@ -575,9 +575,9 @@ class StartRemoteJobTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == "linux", "exercises the Linux remote process worker")
 class WorkerExchangeAndSubreaperStatusTests(unittest.TestCase):
     def setUp(self) -> None:
-        from remote_dev.processes import worker as worker_module
+        from _worker_source import load_worker_module
 
-        self.worker = worker_module
+        self.worker = load_worker_module()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
