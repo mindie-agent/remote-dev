@@ -345,12 +345,13 @@ class _LiveSession:
             "    base = Path(__file__).parent\n"
             "    return '\\n\\n'.join(\n"
             "        (base / name).read_text(encoding='utf-8')\n"
-            "        for name in ('worker_runtime.py', 'worker.py')\n"
+            "        for name in ('worker_runtime.py', 'worker_gc.py', 'worker.py')\n"
             "    )\n"
         )
         files = (
             ("remote_dev/processes/worker.py", (local_root / "remote_dev" / "processes" / "worker.py").read_text(encoding="utf-8")),
             ("remote_dev/processes/worker_runtime.py", (local_root / "remote_dev" / "processes" / "worker_runtime.py").read_text(encoding="utf-8")),
+            ("remote_dev/processes/worker_gc.py", (local_root / "remote_dev" / "processes" / "worker_gc.py").read_text(encoding="utf-8")),
             ("remote_dev/__init__.py", ""),
             ("remote_dev/processes/__init__.py", worker_init),
             ("tests/__init__.py", ""),

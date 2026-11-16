@@ -126,17 +126,24 @@ def new_log_dir(endpoint: Endpoint, tool_kind: str, invocation_id: str | None = 
     return path
 
 
-def maybe_prune_endpoint_state(endpoint: Endpoint, *, force: bool = False) -> dict[str, Any]:
+def maybe_prune_endpoint_state(
+    endpoint: Endpoint, *, force: bool = False, protect_job_ids=()
+) -> dict[str, Any]:
     """Apply bounded local retention after a write; never fails the committed write."""
     return maybe_prune_endpoint_state_dir(
-        state_root() / "endpoints" / endpoint.endpoint_id, force=force
+        state_root() / "endpoints" / endpoint.endpoint_id, force=force,
+        protect_job_ids=protect_job_ids,
     )
 
 
-def maybe_prune_endpoint_state_dir(base: Path, *, force: bool = False) -> dict[str, Any]:
+def maybe_prune_endpoint_state_dir(
+    base: Path, *, force: bool = False, protect_job_ids=()
+) -> dict[str, Any]:
     """Run best-effort maintenance without turning it into a caller-visible failure."""
     try:
-        return prune_endpoint_state(base, force=force)
+        return prune_endpoint_state(
+            base, force=force, protect_job_ids=protect_job_ids
+        )
     except TimeoutError as exc:
         # The committed record/log write is already durable. A maintenance
         # timeout is reported, never re-raised into the tool operation.

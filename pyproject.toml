@@ -61,6 +61,7 @@ allow-direct-references = true
 "remote_dev/schemas/result.schema.json" = "remote_dev/schemas/result.schema.json"
 "remote_dev/processes/worker.py" = "remote_dev/processes/worker.py"
 "remote_dev/processes/worker_runtime.py" = "remote_dev/processes/worker_runtime.py"
+"remote_dev/processes/worker_gc.py" = "remote_dev/processes/worker_gc.py"
 "remote_dev/processes/client.py" = "remote_dev/processes/client.py"
 
 [tool.pytest.ini_options]

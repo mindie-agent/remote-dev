@@ -3,18 +3,25 @@
 (`core/retention.py`).
 [Invariants]
 - Deletes local job records only when their persisted state is definitively terminal
-  (`succeeded`/`failed`/`timeout`/`cancelled`/`completed`/`timed_out`); `running`,
-  `prepared`, `starting`, `stopping`, `uncertain`, and `unknown` records are untouched.
+  (`succeeded`/`failed`/`timeout`/`cancelled`/`completed`/`timed_out`) and not `unknown`;
+  `running`, `prepared`, `starting`, `stopping`, `uncertain`, and `unknown` records are untouched.
+- A job's local artifacts are exactly `<job_id>.json`, `<job_id>.stdout.log`,
+  `<job_id>.stderr.log`, and their `.prev` segments; arbitrary `job_id.*` siblings (for example
+  `job-a.retry.json`) are never matched or removed.
 - Read ledgers and tool logs expire after 7 days, 256 entries, or 128 MiB per endpoint;
   terminal local job artifacts expire after 14 days, 128 records, or 256 MiB.
 - `prune_stale_session_runtime_dirs()` never deletes a directory containing a SQLite
   receipt store, so persistent RemoteReceipts deduplication rows for unknown/executed
   external mutations survive every cleanup.
+- Windows PID liveness never calls `os.kill`; it uses `OpenProcess` + `GetExitCodeProcess`
+  and treats `ERROR_INVALID_PARAMETER` as exited while `ERROR_ACCESS_DENIED` or any
+  unconfirmed result keeps the directory.
 [Timeouts & Locks]
 - Pruning is opportunistic on writes and skipped for `300s` by the endpoint `.prune.json`
   marker; each pass is capped by `2s` and `4096` directory observations.
-- Deletion races are benign (`FileNotFoundError` is success); lock fences are only probed
-  non-blockingly and an unverifiable fence means "keep".
+- Job deletion holds the exclusive `record_lock` across re-verification and unlinking; a
+  concurrent holder or an unverifiable Windows/MSVCRT lock means "keep". Stale `.json.lock`
+  inodes are only removed in a separate pass when >24h old, unlocked, and the record is absent.
 [Side-Effect Policy]
 - Mutates only paths below the explicit endpoint-state directory or session runtime root
   passed by the caller. No network, subprocess, or remote job side effects.
@@ -30,7 +37,11 @@ import tempfile
 import time
 from pathlib import Path
 
-try:  # POSIX lock probing; Windows keeps session runtime directories.
+from remote_dev.core.errors import RemoteExecutionError
+from remote_dev.core.locking import record_lock
+from remote_dev.core.windows_probe import windows_lock_free, windows_pid_alive
+
+try:  # POSIX lock probing; Windows uses msvcrt.locking for the same byte lock.
     import fcntl
 except ImportError:  # pragma: no cover - Windows only
     fcntl = None
@@ -50,6 +61,13 @@ JOBS_MAX_BYTES = 256 * 1024 * 1024
 PRUNE_COOLDOWN_SECONDS = 300
 PRUNE_TIME_BUDGET_SECONDS = 2.0
 PRUNE_MAX_ENTRIES = 4096
+JOB_LOCK_WAIT_SECONDS = 0.25
+STALE_JOB_LOCK_SECONDS = 24 * 60 * 60
+# Data/log segments first so a crashed delete leaves the record (and therefore
+# a later retry) rather than an unreachable orphan log.
+JOB_COMPANION_SUFFIXES = (
+    ".stdout.log", ".stderr.log", ".stdout.log.prev", ".stderr.log.prev", ".json",
+)
 SESSION_RUNTIME_PREFIXES = ("gate-v1", "runtime", "session")
 SESSION_LOCK_NAMES = ("session.lock", "runtime.lock", "worker.lock", "lock")
 RECEIPT_STORE_SUFFIXES = (
@@ -234,20 +252,28 @@ def _prune_logs(directory, *, now, deadline, ttl_seconds, max_entries, max_bytes
     return stats
 
 
-def _job_parts(directory, job_id, deadline):
+def _job_parts(directory, job_id):
+    """Exact known companion paths for one job; never a `job_id.*` prefix scan.
+
+    Matching a prefix would let pruning terminal `job-a` delete a live
+    `job-a.retry.json`, so only the suffixes written by `job_ops`/`job_logs`
+    (plus their rotation-compatible `.prev` segments) are enumerated.
+    """
     parts = []
-    for entry in _scandir(directory, deadline):
-        name = entry.name
-        if name == job_id or name.startswith(job_id + "."):
-            parts.append(Path(entry.path))
+    for suffix in JOB_COMPANION_SUFFIXES:
+        path = Path(directory) / (job_id + suffix)
+        if os.path.lexists(path):
+            parts.append(path)
     return parts
 
 
 def _record_lock_free(record_path):
-    """Probe the local `<job>.json.lock` fence; unverifiable means keep."""
-    if fcntl is None:
-        return True  # Windows msvcrt locking has no portable non-destructive probe
+    """Probe `<job>.json.lock`; an unverifiable fence always means "keep"."""
     lock_path = record_path.with_name(record_path.name + ".lock")
+    if os.name == "nt":
+        return windows_lock_free(lock_path)
+    if fcntl is None:
+        return False
     try:
         handle = lock_path.open("rb")
     except FileNotFoundError:
@@ -273,13 +299,69 @@ def _record_lock_free(record_path):
     return True
 
 
-def _prune_jobs(directory, *, now, deadline, ttl_seconds, max_entries, max_bytes):
+def _acquire_record_lock(path, timeout_seconds):
+    """Enter `record_lock` or return None on contention/cancellation.
+
+    Only acquisition errors are converted; file operations performed inside the
+    returned lock keep their own TimeoutError/OSError semantics.
+    """
+    lock = record_lock(path, timeout_seconds=max(0.01, float(timeout_seconds)))
+    try:
+        lock.__enter__()
+    except (TimeoutError, RemoteExecutionError):
+        return None
+    except OSError:
+        return None  # opportunistic maintenance: an unusable fence means keep
+    return lock
+
+
+def _prune_stale_job_locks(directory, *, now, deadline):
+    """Remove only stale, unlocked `.json.lock` inodes whose record is absent."""
+    removed = 0
+    for entry in _scandir(directory, deadline):
+        if time.monotonic() >= deadline:
+            break
+        if not entry.name.endswith(".json.lock"):
+            continue
+        job_id = entry.name[:-len(".json.lock")]
+        if not _JOB_ID_RE.fullmatch(job_id):
+            continue
+        record_path = Path(directory) / (job_id + ".json")
+        if os.path.lexists(record_path):
+            continue
+        try:
+            info = entry.stat(follow_symlinks=False)
+        except TimeoutError:
+            raise
+        except OSError:
+            continue
+        if now - info.st_mtime <= STALE_JOB_LOCK_SECONDS:
+            continue
+        if not _record_lock_free(record_path):
+            continue
+        try:
+            Path(entry.path).unlink()
+        except TimeoutError:
+            raise
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
+def _prune_jobs(directory, *, now, deadline, ttl_seconds, max_entries, max_bytes,
+                protect_job_ids=()):
+    protected = {str(value) for value in protect_job_ids}
     terminated, errors = [], []
     for entry in _scandir(directory, deadline):
+        if time.monotonic() >= deadline:
+            break
         name = entry.name
         if not name.endswith(".json") or not entry.is_file(follow_symlinks=False):
             continue
         job_id = name[:-5]
+        if job_id in protected:
+            continue  # an active transaction owns this record
         if not _JOB_ID_RE.fullmatch(job_id):
             continue
         path = Path(entry.path)
@@ -287,17 +369,16 @@ def _prune_jobs(directory, *, now, deadline, ttl_seconds, max_entries, max_bytes
         if record is None:
             errors.append(f"unreadable job record: {path.name}")
             continue
-        if str(record.get("state") or "") not in TERMINAL_LOCAL_JOB_STATES:
+        if (str(record.get("state") or "") not in TERMINAL_LOCAL_JOB_STATES
+                or record.get("unknown")):
             continue  # running/unknown/prepared records are never candidates
-        if not _record_lock_free(path):
-            continue  # a concurrent reader/writer still owns this record
         try:
             info = entry.stat(follow_symlinks=False)
         except TimeoutError:
             raise
         except OSError:
             continue
-        parts = _job_parts(directory, job_id, deadline)
+        parts = _job_parts(directory, job_id)
         size = 0
         for part in parts:
             try:
@@ -310,7 +391,8 @@ def _prune_jobs(directory, *, now, deadline, ttl_seconds, max_entries, max_bytes
                 size += part_info.st_size
         terminated.append({"path": path, "job_id": job_id, "parts": parts,
                            "mtime": info.st_mtime, "size": size})
-    stats = {"removed": 0, "freed_bytes": 0, "errors": errors}
+    stats = {"removed": 0, "freed_bytes": 0, "errors": errors,
+             "skipped_locked": 0, "deferred": 0, "stale_locks_removed": 0}
     expired = {row["job_id"] for row in terminated if now - row["mtime"] > ttl_seconds}
     kept = [row for row in terminated if row["job_id"] not in expired]
     removed = set(expired)
@@ -328,17 +410,48 @@ def _prune_jobs(directory, *, now, deadline, ttl_seconds, max_entries, max_bytes
     for row in terminated:
         if row["job_id"] not in removed:
             continue
-        freed = 0
-        for part in row["parts"]:
-            try:
-                part_info = part.stat(follow_symlinks=False)
-            except TimeoutError:
-                raise
-            except OSError:
+        if time.monotonic() >= deadline:
+            stats["deferred"] += 1
+            continue
+        remaining = max(0.01, min(JOB_LOCK_WAIT_SECONDS, deadline - time.monotonic()))
+        lock = _acquire_record_lock(row["path"], remaining)
+        if lock is None:
+            stats["skipped_locked"] += 1
+            continue
+        try:
+            # Re-verify inside the exclusive lock: a concurrent writer may have
+            # resumed the record between candidate collection and deletion.
+            live = _json_record(row["path"])
+            if live is None or (str(live.get("state") or "")
+                                not in TERMINAL_LOCAL_JOB_STATES or live.get("unknown")):
+                stats["skipped_locked"] += 1
                 continue
-            freed += _remove(part)
-        stats["removed"] += 1
-        stats["freed_bytes"] += freed
+            freed = 0
+            failed = False
+            for part in _job_parts(directory, row["job_id"]):
+                if part == row["path"]:
+                    continue  # remove the record last
+                freed += _remove(part)
+                if os.path.lexists(part):
+                    stats["errors"].append(
+                        f"remove {row['job_id']}: {part.name} still present"
+                    )
+                    failed = True
+            if failed:
+                continue
+            freed += _remove(row["path"])
+            if os.path.lexists(row["path"]):
+                stats["errors"].append(f"remove {row['job_id']}: record still present")
+                continue
+            stats["removed"] += 1
+            stats["freed_bytes"] += freed
+        finally:
+            lock.__exit__(None, None, None)
+    # Never unlink an active shared lock inode during deletion; only reap old,
+    # unlocked lock files whose record is already gone.
+    stats["stale_locks_removed"] = _prune_stale_job_locks(
+        directory, now=now, deadline=deadline
+    )
     return stats
 
 
@@ -386,8 +499,13 @@ def prune_endpoint_state(
     jobs_ttl_seconds=JOBS_TTL_SECONDS,
     jobs_max_entries=JOBS_MAX_ENTRIES,
     jobs_max_bytes=JOBS_MAX_BYTES,
+    protect_job_ids=(),
 ):
-    """Prune one endpoint state directory under a cooldown and bounded budget."""
+    """Prune one endpoint state directory under a cooldown and bounded budget.
+
+    `protect_job_ids` names records owned by the caller's current transaction;
+    they are never candidates even if their persisted state looks terminal.
+    """
     base = Path(base)
     now = time.time() if now is None else float(now)
     if not base.is_dir():
@@ -408,6 +526,7 @@ def prune_endpoint_state(
     stats["jobs"] = _prune_jobs(
         base / "jobs", now=now, deadline=deadline, ttl_seconds=jobs_ttl_seconds,
         max_entries=jobs_max_entries, max_bytes=jobs_max_bytes,
+        protect_job_ids=protect_job_ids,
     )
     try:
         _write_marker(marker, {
@@ -447,17 +566,35 @@ def _session_pid(directory):
     return None
 
 
-def _pid_is_dead(pid):
+def _pid_is_dead(pid, *, platform=None, winapi=None):
+    """Provably-gone check; `os.kill` is strictly POSIX-only.
+
+    On Windows `os.kill(pid, 0)` means CTRL_C_EVENT and falls back to
+    TerminateProcess, so it must never be used as a liveness probe.
+    `windows_probe.WindowsProcessApi` owns the explicit-argtypes
+    `ctypes.WinDLL("kernel32", use_last_error=True)` OpenProcess/GetExitCodeProcess
+    path; `winapi` is injectable for focused unit tests.
+    """
     if not isinstance(pid, int) or pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except TimeoutError:
-        raise
-    except OSError:
+    platform = os.name if platform is None else platform
+    if platform == "posix":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except TimeoutError:
+            raise
+        except OSError:
+            return False
         return False
+    if platform == "nt":
+        try:
+            return not windows_pid_alive(pid, winapi)
+        except TimeoutError:
+            raise
+        except (OSError, AttributeError):
+            return False  # cannot verify liveness: retain the directory
     return False
 
 
@@ -534,10 +671,10 @@ def prune_stale_session_runtime_dirs(
 ):
     """Remove dead-PID, unlocked `gate-v1*`/`runtime*`/`session*` dirs older than 24h.
 
-    A directory is preserved unless it carries a readable `pid`/`session.json`
-    PID, the PID is provably gone, every lock probe succeeds non-blockingly, and
-    no SQLite receipt store exists anywhere below it. Unknown ownership is never
-    treated as deletable.
+    Age, receipt-store, and lock guards run before any PID probe. A directory is
+    preserved unless it is older than `max_age_seconds`, has no SQLite receipt
+    store, every lock probe succeeds non-blockingly, and its recorded PID is
+    provably gone. Unknown ownership is never treated as deletable.
     """
     root = Path(root)
     now = time.time() if now is None else float(now)
@@ -555,17 +692,20 @@ def prune_stale_session_runtime_dirs(
         reason = None
         try:
             info = entry.stat(follow_symlinks=False)
-            pid = _session_pid(directory)
-            if pid is None:
-                reason = "no_pid"
-            elif not _pid_is_dead(pid):
-                reason = "pid_alive_or_unknown"
-            elif now - info.st_mtime <= max_age_seconds:
+            # Cheap/irreversible guards run before any PID probe: a young,
+            # receipt-bearing, or locked directory is never a deletion candidate.
+            if now - info.st_mtime <= max_age_seconds:
                 reason = "not_stale"
             elif _contains_receipt_store(directory, deadline):
                 reason = "receipt_store"
             elif not _session_lock_free(directory):
                 reason = "locked_or_unverifiable"
+            else:
+                pid = _session_pid(directory)
+                if pid is None:
+                    reason = "no_pid"
+                elif not _pid_is_dead(pid):
+                    reason = "pid_alive_or_unknown"
         except TimeoutError:
             raise
         except OSError as exc:

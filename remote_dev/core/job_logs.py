@@ -1,12 +1,17 @@
 """
-[Role] One bounded head+tail formatter and truthful full-log reference builder for background job output (`job_logs.py`).
+[Role] One bounded head+tail formatter, truthful truncation accounting, and full-log reference builder for background job output (`job_logs.py`).
 [Invariants]
 - Command/Bash/TaskOutput previews show a bounded UTF-8-safe head+tail with explicit omitted char/byte counts and a clear note.
 - Repeated consecutive-line folding is reused from `preview.py` and only appears when it genuinely shrinks text.
-- Structured refs distinguish the authoritative remote raw logs from the local cached output. A partial or failed local cache is never described as the full raw log.
+- `CappedLog` head-truncation metadata (`truncated_head_bytes`, `logical_bytes_written`, retained byte
+  ranges) is persisted in local job records and combined with preview tail-slice omissions, so public
+  receipts never report `truncated=False` after the remote ring rotated bytes away.
+- Structured refs distinguish the authoritative remote raw logs from the local cached output. A partial or
+  failed local cache is never described as the full raw log, and a rotated `.log.prev` segment is not
+  silently presented as the complete retained range.
 - Formatting is presentation only: it never advances a cursor, consumes remote bytes, or rewrites a local record.
 [Timeouts & Locks]
-- Pure string formatting plus local `stat()` of cache paths; no SSH, subprocesses, locks, or long local I/O.
+- Pure string formatting plus local `stat()`/bounded reads of cache paths; no SSH, subprocesses, locks, or long local I/O.
 [Side-Effect Policy]
 - Read-only local inspection. Never writes logs, records, cursors, or remote state.
 """
@@ -16,6 +21,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from remote_dev.core.job_output import (
+    JOB_OUTPUT_SCHEMA_VERSION,
+    head_truncation,
+    merge_output_logs,
+    output_log_accounting,
+    output_truncation,
+)
 from remote_dev.core.preview import DEFAULT_HEAD_CHARS, DEFAULT_TAIL_CHARS, _tail_slice, fold_repeated_lines
 
 DEFAULT_JOB_HEAD_CHARS = DEFAULT_HEAD_CHARS
@@ -26,9 +38,14 @@ _STREAM_NAMES = ("stdout", "stderr")
 __all__ = [
     "DEFAULT_JOB_HEAD_CHARS",
     "DEFAULT_JOB_TAIL_CHARS",
+    "JOB_OUTPUT_SCHEMA_VERSION",
     "format_job_log_output",
+    "head_truncation",
     "job_log_refs",
     "local_stream_preview",
+    "merge_output_logs",
+    "output_log_accounting",
+    "output_truncation",
     "preview_stream_edges",
     "preview_stream_exact",
     "preview_stream_text",
@@ -247,44 +264,82 @@ def preview_stream_edges(
     )
 
 
+def local_cache_segments(path: str | Path) -> list[Path]:
+    """Return the rotated `.prev` segment followed by the current cache file."""
+    path = Path(path)
+    previous = path.with_name(path.name + ".prev")
+    return ([previous] if previous.is_file() else []) + [path]
+
+
+def _segment_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except TimeoutError:
+        raise
+    except OSError:
+        return 0
+
+
 def local_stream_preview(
     path: str | Path,
     *,
     head_chars: int = DEFAULT_JOB_HEAD_CHARS,
     tail_chars: int = DEFAULT_JOB_TAIL_CHARS,
 ) -> dict[str, Any]:
-    """Bounded head+tail view of a local cached stream file.
+    """Bounded head+tail view of a local cached stream, including `.prev`.
 
-    Small files are read once so omitted character counts stay exact. Large
-    files use bounded first/last reads; the omitted character count is a
-    truthful lower bound and the omitted byte count is exact from ``stat``.
-    Never reads a >4 MiB cache or a >50 MB log in full.
+    A rotated cache is read as `<name>.log.prev` followed by `<name>.log`, so
+    the retained range is never presented as if the current segment alone were
+    the complete log. Small files are read once so omitted character counts
+    stay exact. Large files use bounded first/last reads; the omitted character
+    count is a truthful lower bound and the omitted byte count is exact from
+    ``stat``. Never reads a >4 MiB cache or a >50 MB log in full.
     """
     import codecs
 
     path = Path(path)
-    size = path.stat().st_size
-    if size == 0:
+    segments = local_cache_segments(path)
+    sizes = [_segment_size(segment) for segment in segments]
+    total = sum(sizes)
+    if total == 0:
         return preview_stream_text("", head_chars=head_chars, tail_chars=tail_chars)
-    if size <= 4 * 1024 * 1024:
-        data = path.read_bytes()
+    if total <= 4 * 1024 * 1024:
+        data = b"".join(segment.read_bytes() for segment in segments)
         return preview_stream_text(data.decode("utf-8", errors="replace"),
                                    head_chars=head_chars, tail_chars=tail_chars)
-    head_limit = max(0, min(16384, size))
-    with path.open("rb") as stream:
-        head_data = stream.read(head_limit)
+    head_limit = max(0, min(16384, total))
+    head_parts: list[bytes] = []
+    remaining = head_limit
+    for index, segment in enumerate(segments):
+        if remaining <= 0:
+            break
+        with segment.open("rb") as stream:
+            piece = stream.read(remaining)
+        head_parts.append(piece)
+        remaining -= len(piece)
+        if len(piece) < sizes[index]:
+            break
     head_decoder = codecs.getincrementaldecoder("utf-8")("replace")
-    head = head_decoder.decode(head_data, final=False)
-    tail_limit = max(0, min(32768, size))
-    with path.open("rb") as stream:
-        stream.seek(size - tail_limit)
-        tail_data = stream.read(tail_limit)
+    head = head_decoder.decode(b"".join(head_parts), final=False)
+    tail_limit = max(0, min(32768, total))
+    tail_parts: list[bytes] = []
+    remaining = tail_limit
+    for index in range(len(segments) - 1, -1, -1):
+        if remaining <= 0:
+            break
+        segment, size = segments[index], sizes[index]
+        take = min(size, remaining)
+        with segment.open("rb") as stream:
+            stream.seek(size - take)
+            tail_parts.append(stream.read(take))
+        remaining -= take
+    tail_data = b"".join(reversed(tail_parts))
     offset = 0
     while offset < len(tail_data) and (tail_data[offset] & 0xC0) == 0x80:
         offset += 1
     tail = tail_data[offset:].decode("utf-8", errors="replace")
     return preview_stream_edges(
-        head, tail, total_bytes=size,
+        head, tail, total_bytes=total,
         head_chars=head_chars, tail_chars=tail_chars,
     )
 
@@ -324,6 +379,12 @@ def _cache_phrase(stream: Mapping[str, Any]) -> str:
     expected = stream.get("expected_bytes")
     missing = int(stream.get("missing_bytes") or 0)
     if status == "complete":
+        truncated = int(stream.get("truncated_head_bytes") or 0)
+        if truncated:
+            return (
+                f"complete within the retained range: {cached} bytes cached; "
+                f"{truncated} earlier bytes were rotated away"
+            )
         return f"complete: {cached} bytes cached"
     if status == "partial":
         detail = f"cached {cached} of {expected} observed remote bytes; {missing} not yet cached"
@@ -341,12 +402,34 @@ def render_job_refs_text(refs: Mapping[str, Any]) -> str:
     lines: list[str] = []
     remote_stdout = refs.get("remote_raw_stdout")
     remote_stderr = refs.get("remote_raw_stderr")
+    retained = refs.get("remote_retained_range") or {}
+    truncated = bool(refs.get("remote_log_truncated"))
     if remote_stdout or remote_stderr:
-        lines.append("Full raw logs (authoritative; use remote.read with offset/limit for pagination):")
+        if truncated:
+            lines.append(
+                "Retained remote raw-log segments (authoritative within the retained byte "
+                "range; the head was rotated away):"
+            )
+        else:
+            lines.append("Full raw logs (authoritative; use remote.read with offset/limit for pagination):")
         if remote_stdout:
             lines.append(f"  remote raw stdout: {remote_stdout}")
         if remote_stderr:
             lines.append(f"  remote raw stderr: {remote_stderr}")
+    for name in _STREAM_NAMES:
+        row = retained.get(name) if isinstance(retained, Mapping) else None
+        if not isinstance(row, Mapping):
+            continue
+        start = int(row.get("start") or 0)
+        end = int(row.get("end") or 0)
+        segments = refs.get(f"remote_raw_{name}_segments")
+        if start > 0:
+            lines.append(
+                f"  remote {name} retained byte range: [{start:,}, {end:,}) of {end:,}; "
+                f"bytes [0, {start:,}) were rotated away"
+            )
+        if segments:
+            lines.append(f"  remote {name} segments in order: " + " + ".join(str(item) for item in segments))
     local_record = refs.get("job_record")
     local_stdout = refs.get("local_cached_stdout")
     local_stderr = refs.get("local_cached_stderr")
@@ -377,6 +460,9 @@ def render_job_refs_text(refs: Mapping[str, Any]) -> str:
     ]
     if any(controls):
         lines.append("Continue: " + " | ".join(str(item) for item in controls if item))
+    accounting_warning = refs.get("remote_log_accounting_warning")
+    if accounting_warning:
+        lines.append(f"Remote log accounting warning: {accounting_warning}")
     hint = refs.get("remote_read_hint")
     if hint:
         lines.append(str(hint))
@@ -496,21 +582,34 @@ def job_log_refs(
         name: max(0, int((unread_bytes or {}).get(name) or 0))
         for name in _STREAM_NAMES
     }
+    accounting = output_log_accounting(record)
     streams: dict[str, dict[str, Any]] = {}
+    local_segments: dict[str, list[Path]] = {}
     for name in _STREAM_NAMES:
-        size = _cache_size(local_paths[name])
+        previous = local_paths[name].with_name(local_paths[name].name + ".prev")
+        previous_size = _cache_size(previous) or 0
+        current_size = _cache_size(local_paths[name])
+        size = None if current_size is None else previous_size + current_size
+        local_segments[name] = (
+            [previous, local_paths[name]] if previous_size else [local_paths[name]]
+        )
         cursor = max(0, int(observed.get(name) or 0))
         remaining = unread[name]
+        entry = accounting[name]
+        truncated = entry["truncated_head_bytes"]
+        logical = entry["logical_bytes_written"]
         expected = cursor + remaining
+        # Bytes a local cache can possibly hold: the remote retained range only.
+        retained_expected = max(0, expected - truncated)
         if local_recording_error:
             status = "unreliable"
-            missing = expected if size is None else max(0, expected - size)
+            missing = expected if size is None else max(0, retained_expected - size)
         elif size is None:
             status = "missing"
             missing = expected
-        elif size < expected:
+        elif size < retained_expected:
             status = "partial"
-            missing = expected - size
+            missing = retained_expected - size
         elif remaining:
             status = "partial"
             missing = remaining
@@ -520,10 +619,17 @@ def job_log_refs(
         streams[name] = {
             "status": status,
             "path": str(local_paths[name]),
+            "segments": [str(segment) for segment in local_segments[name]],
             "cached_bytes": size,
+            "cached_previous_bytes": previous_size,
+            "cached_current_bytes": current_size,
             "remote_observed_bytes": cursor,
             "unread_bytes": remaining,
             "expected_bytes": expected,
+            "retained_expected_bytes": retained_expected,
+            "truncated_head_bytes": truncated,
+            "retained_start": truncated,
+            "retained_end": logical,
             "missing_bytes": max(0, missing),
         }
     statuses = {stream["status"] for stream in streams.values()}
@@ -549,6 +655,20 @@ def job_log_refs(
             "Local cache is partial (it may only contain the first polled pages). "
             "The remote raw logs remain authoritative; poll the job or read the raw log to continue."
         )
+    retained_range = {
+        name: {
+            "start": entry["retained_start"],
+            "end": entry["retained_end"],
+            "truncated_head_bytes": entry["truncated_head_bytes"],
+        }
+        for name, entry in accounting.items()
+    }
+    log_truncated = any(entry["truncated_head_bytes"] for entry in accounting.values())
+    if log_truncated and not local_recording_error:
+        note += (
+            " The local cache can only cover the remote retained range; bytes before"
+            " truncated_head_bytes were rotated away and are not retrievable."
+        )
     refs: dict[str, Any] = {
         "job_record": str(record_path),
         "remote_dir": remote_dir or None,
@@ -562,11 +682,34 @@ def job_log_refs(
         "local_cache_status": overall_status,
         "local_cache_streams": streams,
         "local_cache_note": note,
+        "remote_retained_range": retained_range,
+        "remote_log_truncated": log_truncated,
+        "remote_log_head_truncated_bytes": sum(
+            entry["truncated_head_bytes"] for entry in accounting.values()
+        ),
+        "remote_log_accounting_warning": (
+            (record.get("output_logs") or {}).get("accounting_warning")
+            if isinstance(record.get("output_logs"), Mapping) else None
+        ),
         "remote_read_hint": (
             "Use remote.read on remote_raw_stdout/remote_raw_stderr with offset/limit for "
             "paginated access; local cached output is not the raw remote log."
+            + (
+                " The retained range spans remote_raw_*_segments read in order (`.log.prev` "
+                "first when present); earlier bytes were rotated away."
+                if log_truncated
+                else ""
+            )
         ),
     }
+    for name in _STREAM_NAMES:
+        if not remote_dir:
+            continue
+        current = f"{remote_dir}/{name}.log"
+        previous = current + ".prev"
+        refs[f"remote_raw_{name}_segments"] = (
+            [previous, current] if retained_range[name]["truncated_head_bytes"] else [current]
+        )
     if endpoint_id and job_id:
         refs["stdout_resource"] = f"remote://endpoint/{endpoint_id}/job/{job_id}/stdout"
         refs["stderr_resource"] = f"remote://endpoint/{endpoint_id}/job/{job_id}/stderr"

@@ -1,6 +1,6 @@
 """Load the production composed worker source as an importable module.
 
-`remote_dev.processes.worker_source()` ships `worker_runtime.py` + `worker.py` as one
+`remote_dev.processes.worker_source()` ships `worker_runtime.py` + `worker_gc.py` + `worker.py` as one
 self-contained script to the remote host. Local tests must exercise that exact
 composition, not a bare `worker.py` import that lacks the runtime companion.
 """

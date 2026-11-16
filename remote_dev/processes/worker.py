@@ -8,9 +8,11 @@
 - Streams child output through `worker_runtime.CappedLog`, which keeps `<stream>.log.prev`
   plus `<stream>.log` at or below `spec.max_log_bytes` (default 256 MiB per stream) and
   publishes `logical_bytes_written` / `truncated_head_bytes` in `logs.json`/`result.json`.
-- A terminal job directory is only removed by `worker_runtime.collect_terminal_jobs`
-  after verified UID ownership, a free `worker.lock`/`lock`, and a terminal result with
-  drained descendants; `running`, `unknown`, and `retain_until_release` jobs are kept.
+- A terminal job directory is only removed by `worker_gc.collect_terminal_jobs`
+  while holding the exclusive `worker.lock`/`lock` fences across re-verification and
+  `os.replace`; `running`, `unknown`, and `retain_until_release` jobs are kept.
+- `stop` records `stop.json` and signals before optional maintenance. The entire bounded
+  maintenance check attaches `maintenance_warning` on failure and never aborts prepare/status/stop.
 [Timeouts & Locks]
 - Uses non-blocking `fcntl.flock` on `worker.lock` to guarantee a single active supervisor per job directory.
 - Tail reads take `logs.lock` in shared mode against the supervisor's exclusive append/rotate lock.
@@ -314,14 +316,26 @@ def worker(directory):
             os.close(fifo_fd)
     command_finished = time.monotonic()
     shell_exit_observed = shell_exit_observed if shell_exit_observed is not None else command_finished
+    log_accounting = {"max_log_bytes": max_log_bytes}
+    for _name, _log in (("stdout", stdout_log), ("stderr", stderr_log)):
+        log_accounting[_name] = {
+            "logical_bytes_written": _log.logical_bytes_written,
+            "truncated_head_bytes": _log.truncated_head_bytes,
+            "generation": _log.generation,
+            "retained_bytes": _file_size(_log.prev_path) + _file_size(_log.path),
+        }
+        if _log.accounting_warning:
+            log_accounting[_name]["accounting_warning"] = _log.accounting_warning
+    _warnings = [
+        _log.accounting_warning
+        for _log in (stdout_log, stderr_log) if _log.accounting_warning
+    ]
+    if _warnings:
+        log_accounting["accounting_warning"] = "; ".join(_warnings)
     result = {"state": terminal or ("succeeded" if code == 0 else "failed"),
               "exit_code": code, "descendants_drained": True,
               "started_at": command_started_at, "finished_at": time.time(),
-              "logs": {"max_log_bytes": max_log_bytes,
-                       "stdout": {"logical_bytes_written": stdout_log.logical_bytes_written,
-                                  "truncated_head_bytes": stdout_log.truncated_head_bytes},
-                       "stderr": {"logical_bytes_written": stderr_log.logical_bytes_written,
-                                  "truncated_head_bytes": stderr_log.truncated_head_bytes}},
+              "logs": log_accounting,
               "timings": {"clock_domain": "remote-supervisor:" + boot_id() + ":" + str(os.getpid()),
                           "spawn_ms": round((spawned_at - command_started) * 1000, 3),
                           "shell_ms": round((shell_exit_observed - spawned_at) * 1000, 3),
@@ -344,6 +358,18 @@ def cancel_and_drain(request, source):
         time.sleep(0.02)
         status = control_job({**request, "action": "status"}, source)
     return status
+
+def _bounded_housekeeping(root, identifier):
+    """Run opportunistic GC without ever failing prepare/status/stop."""
+    try:
+        return maybe_run_job_housekeeping(root, exclude=(identifier,))
+    except TimeoutError as exc:
+        return {"skipped": "timeout", "error": f"TimeoutError: {exc}"}
+    except OSError as exc:
+        return {"skipped": "error", "error": f"{type(exc).__name__}: {exc}"}
+    except (TypeError, ValueError) as exc:
+        return {"skipped": "error", "error": f"{type(exc).__name__}: {exc}"}
+
 
 def control_job(request, source, cancel_event=None):
     """One process authority for gated launches and native execute/poll calls."""
@@ -436,6 +462,7 @@ def control_job(request, source, cancel_event=None):
     if not directory.exists() and action != "prepare":
         return {"state": "absent", "quiet": True}
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    maintenance = None
     with (directory / "lock").open("a", encoding="utf-8") as lock:
         while True:
             if cancel_event is not None and cancel_event.is_set():
@@ -526,7 +553,7 @@ def control_job(request, source, cancel_event=None):
                     error.cleanup_error = f"{type(cleanup_error).__name__}: {cleanup_error}"
                     error.add_note("Supervisor cleanup also failed: " + error.cleanup_error)
                 raise
-            maybe_run_job_housekeeping(root, exclude=(identifier,))
+            maintenance = _bounded_housekeeping(root, identifier)
         elif action == "go":
             status = job_status(directory)
             existing = read_json(directory / "go.json")
@@ -543,19 +570,23 @@ def control_job(request, source, cancel_event=None):
             atomic_json(directory / "go.json", {"authorization": request["authorization"], "opened_at": opened,
                                                "valid_until": None if activation_timeout is None else opened + activation_timeout})
         elif action == "stop":
-            maybe_run_job_housekeeping(root, exclude=(identifier,))
             receipt = read_json(directory / "receipt.json")
             if receipt is None:
-                return job_status(directory)
+                maintenance = _bounded_housekeeping(root, identifier)
+                return attach_maintenance_warning(job_status(directory), maintenance)
             status = job_status(directory)
             if status["quiet"] or status["unknown"]:
-                return status
+                maintenance = _bounded_housekeeping(root, identifier)
+                return attach_maintenance_warning(status, maintenance)
+            # Record and signal the stop FIRST; housekeeping must never delay
+            # the cancellation side effect.
             processes = status["processes"]
             atomic_json(directory / "stop.json", {"at": time.time(), "force": bool(request.get("force"))})
             # Signal only PIDs whose marker/start ticks were just observed; keep
             # the subreaper alive so it drains and publishes completion.
             signal_processes(processes, signal.SIGKILL if request.get("force") else signal.SIGTERM,
                              exclude=receipt["pid"] if receipt.get("supervision") == "subreaper" else None)
+            maintenance = _bounded_housekeeping(root, identifier)
         elif action == "tail":
             lines = min(200, max(1, int(request.get("lines", 60))))
             result = job_status(directory)
@@ -683,8 +714,8 @@ def control_job(request, source, cancel_event=None):
         elif action != "status":
             raise ValueError("unsupported job action")
         if action == "status" and request.get("housekeeping"):
-            maybe_run_job_housekeeping(root, exclude=(identifier,))
-        return job_status(directory)
+            maintenance = _bounded_housekeeping(root, identifier)
+        return attach_maintenance_warning(job_status(directory), maintenance)
 
 def run_supervisor(directory):
     """Retain an internal failure and drain children before publishing it."""
@@ -730,10 +761,11 @@ def run_supervisor(directory):
         raise SystemExit(1)
 
 if __name__ == "__main__" and "CappedLog" not in globals():
-    # Direct `python worker.py --worker <dir>` debugging: load the companion
+    # Direct `python worker.py --worker <dir>` debugging: load the companions
     # that worker_source() normally concatenates ahead of this module.
-    _runtime = Path(__file__).with_name("worker_runtime.py")
-    exec(compile(_runtime.read_text(encoding="utf-8"), str(_runtime), "exec"), globals())
+    for _companion in ("worker_runtime.py", "worker_gc.py"):
+        _runtime = Path(__file__).with_name(_companion)
+        exec(compile(_runtime.read_text(encoding="utf-8"), str(_runtime), "exec"), globals())
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ("--worker", "supervise"):

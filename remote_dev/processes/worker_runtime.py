@@ -1,57 +1,39 @@
 # Prepended before processes/worker.py by remote_dev.processes.client.worker_source().
-"""Bounded remote job logs, process identity, and terminal-job garbage collection.
+"""Remote process identity/ownership and bounded capped-ring job logs.
 
 [Role] Runtime companion for the remote job supervisor (`worker_runtime.py`): Linux
-process identity/ownership, the capped ring log writer/reader, and bounded terminal-job
-garbage collection.
+process identity/ownership plus the capped ring log writer/reader. Terminal-job
+housekeeping lives in the concatenated `worker_gc.py` companion.
 [Invariants]
 - `process_identity()` matches PID start ticks so a recycled PID is never signaled; an
   unreadable `/proc` observation stays `unknown` instead of being treated as absent.
-- Terminal-job removal requires: same remote UID, no held `worker.lock`/`lock` fence, a
-  `result.json` terminal state (`succeeded`/`failed`/`timeout`/`timed_out`/`cancelled`/
-  `completed`), an empty `unknown` field, and either `descendants_drained is True` or a
-  freshly observed `quiet` status. `running`, `starting`, `stopping`, `unknown`, and
-  `retain_until_release` directories are never removed.
 - A capped stream retains at most `max_log_bytes` on disk (`<stream>.log.prev` plus
   `<stream>.log`); `logical_bytes_written`/`truncated_head_bytes` keep cursors honest when
   the head has been rotated away instead of silently losing offsets.
+- `truncated_head_bytes` is derived from `logical_bytes_written - retained_segment_bytes`,
+  so a crash between segment rotation and `logs.json` publication self-heals instead of
+  reporting a stale zero.
 [Timeouts & Locks]
 - `logs.lock` (`flock` SH for readers, EX for append/rotate/close) makes metadata, sizes,
   and bytes one consistent snapshot across the supervisor and the control RPC worker.
-- Housekeeping is bounded to `HOUSEKEEPING_MAX_ENTRIES` directory observations and runs
-  at most once per `HOUSEKEEPING_COOLDOWN_SECONDS` unless forced.
+- `CappedLog.close()` always attempts to flush/persist pending accounting after an earlier
+  rotation failure and surfaces a warning instead of silently zeroing the head offset.
 [Side-Effect Policy]
-- Writes only inside the assigned job directory and renames only owned terminal job
-  directories under the same `.remote-dev/jobs` parent; never signals a process from
-  housekeeping and never reads or rewrites job output beyond log windows.
+- Writes only inside the assigned job directory; reads or rewrites job output only through
+  bounded log windows and never signals a process outside explicit supervision.
 """
 import contextlib
 import fcntl
 import json
 import os
-import re
-import shutil
-import stat
-import time
 import uuid
 from pathlib import Path
 
 # worker.py defines these before any runtime call; the defaults keep this module
 # independently importable for focused unit tests.
 JOB_TOKEN_ENV = globals().get("JOB_TOKEN_ENV", "REMOTE_DEV_JOB_TOKEN")
-_JOB_DIR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,95}$")
-_JOBS_DIRNAME = ".remote-dev"
 DEFAULT_MAX_LOG_BYTES = 256 * 1024 * 1024
 LOGS_SCHEMA_VERSION = "remote-dev.job.logs.v1"
-TERMINAL_REMOTE_STATES = frozenset(
-    {"completed", "succeeded", "failed", "cancelled", "timeout", "timed_out"}
-)
-TERMINAL_TTL_SECONDS = 7 * 24 * 60 * 60
-MAX_TERMINAL_JOBS = 128
-MAX_TERMINAL_BYTES = 2 * 1024 * 1024 * 1024
-HOUSEKEEPING_COOLDOWN_SECONDS = 300
-HOUSEKEEPING_MAX_ENTRIES = 512
-HOUSEKEEPING_MAX_FILES = 10000
 
 
 def _utf8_incomplete_tail(chunk):
@@ -204,22 +186,41 @@ def _positive_int(value):
 
 
 def _log_snapshot(directory, stream):
-    """Metadata plus retained segment sizes for one stream (caller may hold the lock)."""
+    """Metadata plus retained segment sizes for one stream (caller may hold the lock).
+
+    `truncated_head_bytes` is derived from the logical size and the bytes still
+    on disk (`logical - retained`) rather than trusted blindly. A crash between
+    segment rotation and `logs.json` publication therefore self-heals on the
+    next snapshot instead of reporting a stale zero/old head offset.
+    """
     directory = Path(directory)
-    stored = _read_logs_meta(directory).get(stream)
+    meta = _read_logs_meta(directory)
+    stored = meta.get(stream)
     stored = stored if isinstance(stored, dict) else {}
-    truncated = _positive_int(stored.get("truncated_head_bytes"))
+    stored_truncated = _positive_int(stored.get("truncated_head_bytes"))
+    stored_logical = _positive_int(stored.get("logical_bytes_written"))
     prev_size = _file_size(directory / (stream + ".log.prev"))
     current_size = _file_size(directory / (stream + ".log"))
-    logical_size = max(
-        truncated + prev_size + current_size,
-        _positive_int(stored.get("logical_bytes_written")),
-    )
+    retained_size = prev_size + current_size
+    logical_size = max(stored_truncated + retained_size, stored_logical)
+    truncated = max(stored_truncated, logical_size - retained_size)
+    warning = str(stored.get("accounting_warning") or "") or None
+    if prev_size and not (stored_truncated or stored_logical):
+        # Rotated segments exist but the per-stream publication is absent or
+        # zeroed. The dropped head is unknowable from segment sizes alone, so
+        # never present this as a clean untruncated log.
+        warning = warning or (
+            "logs metadata is missing/inconsistent for a rotated stream; "
+            "truncated_head_bytes may be understated"
+        )
     return {
         "truncated_head_bytes": truncated,
         "prev_size": prev_size,
         "current_size": current_size,
+        "retained_bytes": retained_size,
         "logical_bytes": logical_size,
+        "generation": _positive_int(stored.get("generation")),
+        "accounting_warning": warning,
     }
 
 
@@ -251,14 +252,11 @@ class CappedLog:
         self.lock_path = self.directory / "logs.lock"
         self.max_bytes = max(2, int(max_bytes))
         self._handle = None
-        stored = _read_logs_meta(self.directory).get(stream)
-        stored = stored if isinstance(stored, dict) else {}
-        self.truncated_head_bytes = _positive_int(stored.get("truncated_head_bytes"))
-        on_disk = _file_size(self.prev_path) + _file_size(self.path)
-        self.logical_bytes_written = max(
-            _positive_int(stored.get("logical_bytes_written")),
-            self.truncated_head_bytes + on_disk,
-        )
+        snapshot = _log_snapshot(self.directory, stream)
+        self.truncated_head_bytes = snapshot["truncated_head_bytes"]
+        self.logical_bytes_written = snapshot["logical_bytes"]
+        self.generation = snapshot["generation"]
+        self.accounting_warning = snapshot["accounting_warning"]
 
     @contextlib.contextmanager
     def _locked(self, mode):
@@ -280,10 +278,15 @@ class CappedLog:
     def _write_meta_locked(self):
         meta = _read_logs_meta(self.directory)
         meta["schema_version"] = LOGS_SCHEMA_VERSION
-        meta[self.stream] = {
+        entry = {
             "logical_bytes_written": self.logical_bytes_written,
             "truncated_head_bytes": self.truncated_head_bytes,
+            "generation": self.generation,
+            "retained_bytes": _file_size(self.prev_path) + _file_size(self.path),
         }
+        if self.accounting_warning:
+            entry["accounting_warning"] = self.accounting_warning
+        meta[self.stream] = entry
         _write_json_atomic(self.meta_path, meta)
 
     def _rotate_locked(self):
@@ -291,14 +294,40 @@ class CappedLog:
             self._handle.flush()
             self._handle.close()
             self._handle = None
-        dropped = _file_size(self.prev_path)
-        if dropped:
-            self.truncated_head_bytes += dropped
-            with contextlib.suppress(FileNotFoundError):
-                self.prev_path.unlink()
-        os.replace(self.path, self.prev_path)
-        self._write_meta_locked()
-        self._handle = self.path.open("ab")
+        try:
+            dropped = _file_size(self.prev_path)
+            if dropped:
+                try:
+                    self.prev_path.unlink()
+                except FileNotFoundError:
+                    dropped = 0
+                self.truncated_head_bytes += dropped
+            os.replace(self.path, self.prev_path)
+            self.generation += 1
+            self._write_meta_locked()
+        except BaseException as exc:
+            self.accounting_warning = (
+                "log rotation failed: " + type(exc).__name__ + ": " + str(exc)[:200]
+            )
+            # Persist whatever is already known even when a rotation step
+            # raised; a later snapshot derives any remaining head loss from the
+            # actual segment sizes.
+            try:
+                self._write_meta_locked()
+            except (OSError, ValueError) as meta_exc:
+                self.accounting_warning += (
+                    "; logs.json update failed: " + type(meta_exc).__name__
+                )
+            raise
+        finally:
+            if self._handle is None:
+                try:
+                    self._handle = self.path.open("ab")
+                except (OSError, ValueError) as reopen_exc:
+                    self.accounting_warning = (
+                        "log reopen failed: " + type(reopen_exc).__name__ + ": "
+                        + str(reopen_exc)[:200]
+                    )
 
     def write(self, chunk):
         if not chunk:
@@ -320,13 +349,45 @@ class CappedLog:
                 view = view[len(piece):]
 
     def close(self):
-        if self._handle is None:
-            return
+        """Flush and publish pending accounting even after a rotation failure.
+
+        Accounting errors are surfaced through `accounting_warning`/`result.json`
+        instead of being silently replaced by `truncated_head_bytes=0`.
+        """
+        error = None
         with self._locked(fcntl.LOCK_EX):
-            self._handle.flush()
-            self._handle.close()
-            self._handle = None
-            self._write_meta_locked()
+            if self._handle is not None:
+                try:
+                    self._handle.flush()
+                except (OSError, ValueError) as exc:
+                    error = exc
+                    self.accounting_warning = (
+                        "log flush failed: " + type(exc).__name__ + ": " + str(exc)[:200]
+                    )
+                try:
+                    self._handle.close()
+                except (OSError, ValueError) as exc:
+                    error = error or exc
+                finally:
+                    self._handle = None
+            snapshot = _log_snapshot(self.directory, self.stream)
+            self.truncated_head_bytes = max(
+                self.truncated_head_bytes, snapshot["truncated_head_bytes"]
+            )
+            self.logical_bytes_written = max(
+                self.logical_bytes_written, snapshot["logical_bytes"]
+            )
+            if snapshot["accounting_warning"] and not self.accounting_warning:
+                self.accounting_warning = snapshot["accounting_warning"]
+            try:
+                self._write_meta_locked()
+            except (OSError, ValueError) as exc:
+                self.accounting_warning = (
+                    "logs.json update failed: " + type(exc).__name__ + ": " + str(exc)[:200]
+                )
+                error = error or exc
+        if error is not None and not self.accounting_warning:
+            self.accounting_warning = type(error).__name__ + ": " + str(error)[:200]
 
 
 def _read_span(prev_path, path, prev_size, truncated, start, budget):
@@ -389,276 +450,3 @@ def read_log_window(directory, stream, start_logical, max_bytes, *, tail_bytes=N
         if handle is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
-
-
-def _job_locks_free(directory):
-    """True only when no control/supervisor flock is currently held."""
-    for name in ("worker.lock", "lock"):
-        path = directory / name
-        try:
-            handle = path.open("rb")
-        except FileNotFoundError:
-            continue
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return False
-        except TimeoutError:
-            raise
-        except OSError:
-            return False  # unverifiable fence: never treat it as free
-        finally:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            finally:
-                handle.close()
-    return True
-
-
-def _retained(directory, result):
-    for key in ("retain_until_release", "retain"):
-        if result.get(key):
-            return True
-    for name in ("spec.json", "receipt.json"):
-        row = _read_json_dict(directory / name)
-        if row.get("retain_until_release") or row.get("retain"):
-            return True
-    return (directory / "retain.json").exists()
-
-
-def _job_quiet(directory):
-    checker = globals().get("job_status")
-    if checker is None:
-        return False  # cannot prove quiet: never delete
-    try:
-        status = checker(directory)
-    except TimeoutError:
-        raise
-    except (OSError, ValueError, RuntimeError):
-        return False
-    return bool(status.get("quiet")) and not status.get("unknown")
-
-
-def _tree_size(directory, *, max_files=HOUSEKEEPING_MAX_FILES):
-    total, files, pending = 0, 0, [str(directory)]
-    while pending:
-        current = pending.pop()
-        try:
-            entries = os.scandir(current)
-        except TimeoutError:
-            raise
-        except OSError:
-            continue
-        with entries:
-            for entry in entries:
-                if files >= max_files:
-                    return total, files, False
-                try:
-                    info = entry.stat(follow_symlinks=False)
-                except TimeoutError:
-                    raise
-                except OSError:
-                    continue
-                if stat.S_ISDIR(info.st_mode):
-                    pending.append(entry.path)
-                elif stat.S_ISREG(info.st_mode):
-                    total += info.st_size
-                    files += 1
-    return total, files, True
-
-
-def _remove_terminal(directory, stats, *, dry_run):
-    trash = directory.with_name(
-        ".trash-" + directory.name + "-" + uuid.uuid4().hex[:8]
-    )
-    if dry_run:
-        stats["would_remove"].append(directory.name)
-        return 0
-    os.replace(directory, trash)
-    shutil.rmtree(trash)
-    stats["removed"].append(directory.name)
-    return 1
-
-
-def collect_terminal_jobs(
-    root=None,
-    *,
-    jobs_root=None,
-    now=None,
-    ttl_seconds=TERMINAL_TTL_SECONDS,
-    max_terminal_jobs=MAX_TERMINAL_JOBS,
-    max_terminal_bytes=MAX_TERMINAL_BYTES,
-    exclude=(),
-    dry_run=False,
-    max_entries=HOUSEKEEPING_MAX_ENTRIES,
-):
-    """Bounded GC over owned, quiet, definitively terminal remote job directories."""
-    now = time.time() if now is None else float(now)
-    base = Path(jobs_root) if jobs_root is not None else Path(root) / _JOBS_DIRNAME / "jobs"
-    excluded = {str(name) for name in exclude}
-    stats = {
-        "jobs_root": str(base),
-        "scanned": 0,
-        "terminal": 0,
-        "removed": [],
-        "would_remove": [],
-        "removed_bytes": 0,
-        "trash_cleaned": 0,
-        "skipped_active": 0,
-        "skipped_unknown": 0,
-        "skipped_retained": 0,
-        "skipped_unquiet": 0,
-        "skipped_unowned": 0,
-        "truncated": False,
-        "errors": [],
-    }
-    try:
-        entries = list(os.scandir(base))
-    except FileNotFoundError:
-        return stats
-    except TimeoutError:
-        raise
-    except OSError as exc:
-        stats["errors"].append(f"scan {base}: {type(exc).__name__}: {exc}")
-        return stats
-    entries.sort(key=lambda entry: entry.name)
-    if len(entries) > max_entries:
-        entries = entries[:max_entries]
-        stats["truncated"] = True
-    uid = os.getuid() if hasattr(os, "getuid") else None
-    for entry in entries:
-        if not entry.name.startswith(".trash-"):
-            continue
-        try:
-            info = entry.stat(follow_symlinks=False)
-        except TimeoutError:
-            raise
-        except OSError:
-            continue
-        if not stat.S_ISDIR(info.st_mode) or entry.is_symlink():
-            continue
-        if uid is not None and info.st_uid != uid:
-            continue
-        if now - info.st_mtime < 60:
-            continue  # a concurrent remover may still be walking it
-        try:
-            shutil.rmtree(Path(entry.path))
-        except TimeoutError:
-            raise
-        except OSError as exc:
-            stats["errors"].append(
-                f"trash {entry.name}: {type(exc).__name__}: {exc}"
-            )
-            continue
-        stats["trash_cleaned"] += 1
-    candidates = []
-    for entry in entries:
-        if not _JOB_DIR_RE.fullmatch(entry.name):
-            continue
-        try:
-            info = entry.stat(follow_symlinks=False)
-        except TimeoutError:
-            raise
-        except OSError:
-            continue
-        if not stat.S_ISDIR(info.st_mode) or entry.is_symlink():
-            continue
-        if uid is not None and info.st_uid != uid:
-            stats["skipped_unowned"] += 1
-            continue
-        directory = Path(entry.path)
-        stats["scanned"] += 1
-        if entry.name in excluded:
-            stats["skipped_active"] += 1
-            continue
-        result = _read_json_dict(directory / "result.json")
-        if str(result.get("state") or "") not in TERMINAL_REMOTE_STATES:
-            stats["skipped_active"] += 1
-            continue
-        if result.get("unknown"):
-            stats["skipped_unknown"] += 1
-            continue
-        if _retained(directory, result):
-            stats["skipped_retained"] += 1
-            continue
-        if result.get("descendants_drained") is not True and not _job_quiet(directory):
-            stats["skipped_unquiet"] += 1
-            continue
-        if not _job_locks_free(directory):
-            stats["skipped_active"] += 1
-            continue
-        try:
-            finished_at = float(result.get("finished_at"))
-        except (TypeError, ValueError):
-            finished_at = info.st_mtime
-        size, _files, complete = _tree_size(directory)
-        if not complete:
-            stats["truncated"] = True
-        candidates.append({"name": entry.name, "path": directory,
-                           "terminal_at": finished_at, "bytes": size})
-        stats["terminal"] += 1
-    if not candidates:
-        return stats
-    expired = {
-        row["name"] for row in candidates
-        if now - row["terminal_at"] > ttl_seconds and row["name"] not in excluded
-    }
-    remove = set(expired)
-    kept = [row for row in candidates if row["name"] not in remove]
-    kept_bytes = sum(row["bytes"] for row in kept)
-    for row in sorted(candidates, key=lambda item: (item["terminal_at"], item["name"])):
-        if row["name"] in remove:
-            continue
-        if len(kept) <= max_terminal_jobs and kept_bytes <= max_terminal_bytes:
-            break
-        remove.add(row["name"])
-        kept = [item for item in kept if item["name"] != row["name"]]
-        kept_bytes -= row["bytes"]
-    for row in candidates:
-        if row["name"] not in remove:
-            continue
-        try:
-            _remove_terminal(row["path"], stats, dry_run=dry_run)
-            stats["removed_bytes"] += row["bytes"]
-        except TimeoutError:
-            raise
-        except OSError as exc:
-            stats["errors"].append(
-                f"remove {row['name']}: {type(exc).__name__}: {exc}"
-            )
-    return stats
-
-
-def maybe_run_job_housekeeping(root, *, exclude=(), force=False, now=None):
-    """Run terminal-job GC under a cooldown; failures stay in the marker, not job control."""
-    now = time.time() if now is None else float(now)
-    base = Path(root) / _JOBS_DIRNAME / "jobs"
-    marker = base / ".housekeeping.json"
-    if not force:
-        try:
-            previous = float(_read_json_dict(marker).get("at") or 0)
-        except (TypeError, ValueError):
-            previous = 0.0
-        if 0 <= now - previous < HOUSEKEEPING_COOLDOWN_SECONDS:
-            return {"skipped": "cooldown",
-                    "cooldown_seconds": HOUSEKEEPING_COOLDOWN_SECONDS}
-    try:
-        stats = collect_terminal_jobs(jobs_root=base, now=now, exclude=exclude)
-    except TimeoutError as exc:
-        # Housekeeping is opportunistic: report the timeout instead of failing
-        # the job preparation/stop/status control that triggered it.
-        return {"skipped": "timeout", "error": f"TimeoutError: {exc}"}
-    except OSError as exc:
-        return {"skipped": "error", "error": f"{type(exc).__name__}: {exc}"}
-    try:
-        _write_json_atomic(marker, {
-            "schema_version": "remote-dev.job.housekeeping.v1",
-            "at": now,
-            "removed": stats["removed"][:32],
-            "errors": stats["errors"][:8],
-        })
-    except TimeoutError as exc:
-        stats["errors"].append(f"housekeeping marker: TimeoutError: {exc}")
-    except OSError as exc:
-        stats["errors"].append(f"housekeeping marker: {type(exc).__name__}: {exc}")
-    return stats

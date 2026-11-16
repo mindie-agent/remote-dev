@@ -4,8 +4,11 @@
 - Enforces `STOP_DRAIN_SECONDS >= STOP_GRACE_SECONDS + 3.0` (`max(5.0, grace + 3.0)`) so `remote.job_stop` waits long enough for the remote supervisor's SIGTERM drain + SIGKILL escalation.
 - Persists the local job record before launching the remote job and never replays an uncertain launch or acknowledged `stdin` write.
 - Preserves acknowledged remote execution outcomes when local cursor/log commit fails (`_recording_failure`).
+- Persists capped-log head-truncation/retained-range metadata and confirmed terminal `status`/`stop`
+  observations back to the local record under lock; a failed auxiliary write attaches `receipt_warning`
+  without changing the primary response.
 [Timeouts & Locks]
-- Uses `record_lock(path)` around local cursor and log offset updates (`_save_output`), releasing the lock during long `yield_time_ms > 250` polls so concurrent `stdin` or `stop` calls do not block.
+- Uses `record_lock(path)` around local cursor and log offset updates (`_save_output`), releasing the lock during long `yield_time_ms > 250` polls so concurrent `stdin` or `stop` calls do not block. Retention protects the current job id (`protect_job_ids`).
 [Side-Effect Policy]
 - Writes local `<job_id>.json` and `.stdout.log`/`.stderr.log` under `state/endpoints/<id>/jobs/` and drives remote `processes/worker.py` via `processes.control`.
 """
@@ -16,22 +19,28 @@ from remote_dev.observability import current_tool, observed_tool
 import re
 import json
 import math
-import copy
 from dataclasses import asdict
 import os
 import shlex
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any
 
 from remote_dev.core.command_policy import blocked_command_payload, inspect_dangerous_command
 from remote_dev.core.endpoint import DEFAULT_CWD, DEFAULT_ROOT, Endpoint
-from remote_dev.core.container_endpoint import FULL_CONTAINER_ID, pinned_endpoint
+from remote_dev.core.container_endpoint import pinned_endpoint
 from remote_dev.core import container_endpoint as _container_endpoint
 from remote_dev.core.errors import RemoteExecutionError, caller_error
 from remote_dev.core.job_logs import format_job_log_output, job_log_refs, render_job_refs_text
+from remote_dev.core.job_output import head_truncation, merge_output_logs, output_truncation
+from remote_dev.core.job_records import (
+    endpoint_from_record as endpoint_from_job_record,
+    load_record as _load_record,
+    persist_terminal_state,
+    save_output,
+)
 from remote_dev.core.job_results import (
     UNKNOWN_JOB_STATES, TERMINAL_JOB_STATES, _public_job_record,
     _session_result, _recording_failure,
@@ -40,8 +49,8 @@ from remote_dev.core.preview import MAX_JOB_TAIL_LINES, MAX_TEXT_CHARS, compact_
 from remote_dev.core.locking import record_lock
 from remote_dev.core.runtime_env import runtime_env_lines
 from remote_dev.core.state_store import (
-    atomic_write_json, find_job_record, job_record_path, maybe_prune_endpoint_state_dir,
-    resolve_ledger_scope,
+    atomic_write_json, find_job_record, job_record_path,
+    maybe_prune_endpoint_state_dir, resolve_ledger_scope,
 )
 from remote_dev.processes import control
 from remote_dev.result import make_result, tool_text, utc_now_iso
@@ -150,37 +159,11 @@ def _record_cwd(target: dict[str, Any]) -> str:
     return str(target.get("cwd") or DEFAULT_CWD or target.get("root") or DEFAULT_ROOT)
 
 
-def _endpoint_from_record(record: dict[str, Any]) -> Endpoint:
-    target = record.get("connection") or record.get("target", {})
-    fields = Endpoint.__dataclass_fields__
-    endpoint = Endpoint(**{key: value for key, value in target.items() if key in fields})
-    if endpoint.container and not FULL_CONTAINER_ID.fullmatch(endpoint.container):
-        raise ValueError("job record lacks a fixed full container ID; refusing to resolve a replacement by name")
-    return endpoint
-
-
-def endpoint_from_job_record(record: dict[str, Any]) -> Endpoint:
-    return _endpoint_from_record(record)
-
-
-def _load_record(endpoint: Endpoint | None, job_id: str) -> tuple[Endpoint, dict[str, Any], Path]:
-    job_id = require_job_id(job_id)
-    if endpoint is not None:
-        path = job_record_path(endpoint, job_id)
-        try:
-            content = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            raise caller_error(
-                f"unknown remote job id for endpoint: {job_id}", FileNotFoundError,
-                error_code="unknown_job", field="job_id"
-            ) from None
-        return endpoint, json.loads(content), path
-    found = find_job_record(job_id)
-    if not found:
-        raise caller_error(f"unknown remote job id: {job_id}", FileNotFoundError,
-                            error_code="unknown_job", field="job_id")
-    path, data = found
-    return _endpoint_from_record(data), data, path
+def _save_output(record, path, row, *, cursor_key="stdin_cursors"):
+    # Keep the module-level writer seam so receipt-failure injection stays
+    # patchable at the public job_ops boundary.
+    return save_output(record, path, row, cursor_key=cursor_key,
+                       write_json=atomic_write_json)
 
 
 def _start_failure(
@@ -214,32 +197,6 @@ def _classify_start_error(exc: BaseException) -> tuple[str, str, str]:
 
 def _yield_ms(value: int | None, default: int) -> int:
     return max(0, min(MAX_YIELD_MS, default if value is None else int(value)))
-
-
-def _save_output(record, path, row, *, cursor_key="stdin_cursors"):
-    # Hold the record lock from read through exchange and cursor commit.
-    # Overwrite from the committed length after a crash before cursor commit.
-    # Do not expose a cursor that the local transaction did not commit. If a
-    # file write or the receipt fails, the remote observation still exists and
-    # the next read resumes the previous committed cursor without replaying input.
-    updated = copy.deepcopy(record)
-    cursors = updated.setdefault(cursor_key, {})
-    local_offsets = updated.setdefault("local_output_offsets", {})
-    for name in ("stdout", "stderr"):
-        log = path.with_name(path.stem + "." + name + ".log")
-        with log.open("r+b" if log.exists() else "w+b") as stream:
-            stream.seek(int(local_offsets.get(name, 0)))
-            stream.write(str(row.get(name) or "").encode("utf-8"))
-            stream.truncate()
-            local_offsets[name] = stream.tell()
-        cursors[name + "_offset"] = int(row.get(name + "_offset", cursors.get(name + "_offset", 0)))
-    updated["state"] = row.get("state", "unknown")
-    atomic_write_json(path, updated)
-    record.clear()
-    record.update(updated)
-    # Bounded local retention for terminal records/logs; the current record is
-    # newest and stays inside the count/byte/age window.
-    maybe_prune_endpoint_state_dir(path.parent.parent)
 
 
 @pinned_endpoint
@@ -281,7 +238,7 @@ def start_remote_job(
         # Save before submission: a lost reply retains the exact recovery id.
         # A submitted launch is never automatically replayed.
         atomic_write_json(path, record)
-        maybe_prune_endpoint_state_dir(path.parent.parent)
+        maybe_prune_endpoint_state_dir(path.parent.parent, protect_job_ids={job_id})
         try:
             row = control(endpoint, job_id, "launch", spec=spec, authorization=record["authorization"],
                           stdout_offset=0, stderr_offset=0, max_bytes=budget, shared_budget=True,
@@ -357,7 +314,7 @@ def start_remote_job(
 @observed_tool("remote.job_status")
 @pinned_endpoint
 def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, Any]:
-    endpoint, record, _record_path = _load_record(endpoint, job_id)
+    endpoint, record, record_path = _load_record(endpoint, job_id)
     started = utc_now_iso()
     start = time.monotonic()
     try:
@@ -377,6 +334,7 @@ def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, An
         )
         return _failure_payload(result)
     status = str(supervisor.get("state") or "unknown")
+    receipt_warning = persist_terminal_state(record_path, record, supervisor, write_json=atomic_write_json)
     result = make_result(
         tool="remote.job_status",
         target=endpoint.to_result_target(),
@@ -389,7 +347,13 @@ def remote_job_status(endpoint: Endpoint | None, *, job_id: str) -> dict[str, An
             record, state=status, remote_status=supervisor, quiet=supervisor.get("quiet")
         )},
     )
-    return {"text": f"Remote job {job_id}: {status}\n", "result": result}
+    text = f"Remote job {job_id}: {status}\n"
+    if receipt_warning:
+        result["receipt_warning"] = receipt_warning
+        message = "The remote state above is authoritative, but updating the local job record failed; terminal local retention may be delayed."
+        result["warnings"].append(message)
+        text += message + "\n"
+    return {"text": text, "result": result}
 
 
 def _job_tail_impl(
@@ -484,10 +448,12 @@ def _job_tail_impl(
     for name in missing:
         warnings.append(f"{name}.log does not exist in the remote job dir")
     all_missing = bool(requested) and len(missing) == len(requested)
+    accounting_record = {**record, "output_logs": merge_output_logs(record, supervisor)}
+    head = head_truncation(accounting_record, supervisor)
     refs = job_log_refs(
         job_id=job_id,
         record_path=record_path,
-        record=record,
+        record=accounting_record,
         endpoint_id=endpoint.endpoint_id,
     )
     refs_text = render_job_refs_text(refs)
@@ -540,6 +506,23 @@ def _job_tail_impl(
             warnings.append(f"output truncated to the text size limit; {omitted_bytes} raw log bytes omitted from this preview (full logs are available via refs)")
         body = compacted.rstrip("\n")
         text_body = body
+    # Head bytes rotated away by the capped ring were never part of this
+    # preview's retained window; count only the requested streams as omitted.
+    requested_head_bytes = sum(
+        head["streams"][name]["truncated_head_bytes"] for name in requested
+    )
+    omitted_bytes += requested_head_bytes
+    for name in requested:
+        detail = head["streams"][name]
+        if detail["truncated_head_bytes"]:
+            warnings.append(
+                f"Remote {name} log is head-truncated: bytes [0, {detail['truncated_head_bytes']:,}) "
+                f"of {detail['logical_bytes_written']:,} were rotated away; retained range "
+                f"[{detail['retained_range'][0]:,}, {detail['retained_range'][1]:,}) only."
+            )
+    log_warning = accounting_record["output_logs"].get("accounting_warning")
+    if log_warning:
+        warnings.append(f"Remote log accounting warning: {log_warning}")
     text = text_body
     if refs_text:
         text = (text + "\n\n" + refs_text) if text else refs_text
@@ -558,6 +541,10 @@ def _job_tail_impl(
         warnings=warnings,
         extra={"job_id": job_id, "lines": lines, "missing_logs": missing, "state": supervisor.get("state"),
                "truncated": omitted_bytes > 0, "omitted_bytes": omitted_bytes,
+               "head_truncated_bytes": requested_head_bytes,
+               "retained_ranges": {
+                   name: detail["retained_range"] for name, detail in head["streams"].items()
+               },
                "repeated_lines_folded": folded_bytes > 0},
     )
     return {"text": text, "result": result}
@@ -637,15 +624,17 @@ def remote_job_output_incremental(
     exit_code = (row.get("result") or {}).get("exit_code") if state in TERMINAL_JOB_STATES else None
     record = json.loads(path.read_text(encoding="utf-8"))
     pending = {name: int(row.get(name + "_bytes_remaining") or 0) for name in ("stdout", "stderr")}
+    accounting_record = {**record, "output_logs": merge_output_logs(record, row)}
     refs = job_log_refs(
         job_id=job_id,
         record_path=path,
-        record=record,
+        record=accounting_record,
         endpoint_id=endpoint.endpoint_id,
         observed_offsets={name: int(row.get(name + "_offset") or 0) for name in ("stdout", "stderr")},
         unread_bytes=pending,
     )
     formatted = format_job_log_output(stdout, stderr, refs=refs, preserve_full_page=True)
+    truncation = output_truncation(accounting_record, row, formatted)
     result = make_result(
         tool="remote.job_output",
         target=endpoint.to_result_target(),
@@ -662,9 +651,14 @@ def remote_job_output_incremental(
             "wait": bool(wait),
             "exit_code": exit_code,
             "output_preview": {
-                "truncated": formatted["truncated"],
+                "truncated": truncation["truncated"],
                 "omitted_chars": formatted["omitted_chars"],
-                "omitted_bytes": formatted["omitted_bytes"],
+                "omitted_bytes": truncation["omitted_bytes"],
+                "head_truncated_bytes": truncation["head_truncated_bytes"],
+                "retained_ranges": {
+                    name: detail["retained_range"]
+                    for name, detail in truncation["streams"].items()
+                },
                 "omitted_chars_exact": formatted["omitted_chars_exact"],
                 "repeated_lines_folded": formatted["repeated_lines_folded"],
                 "local_cache_status": refs.get("local_cache_status"),
@@ -743,7 +737,7 @@ def remote_job_stdin(endpoint: Endpoint | None, *, job_id: str, chars: str | Non
 @observed_tool("remote.job_stop")
 @pinned_endpoint
 def remote_job_stop(endpoint: Endpoint | None, *, job_id: str, force: bool = False) -> dict[str, Any]:
-    endpoint, record, _record_path = _load_record(endpoint, job_id)
+    endpoint, record, record_path = _load_record(endpoint, job_id)
     started = utc_now_iso()
     start = time.monotonic()
     try:
@@ -777,6 +771,7 @@ def remote_job_stop(endpoint: Endpoint | None, *, job_id: str, force: bool = Fal
     else:
         outcome, status = "failed", state
     descendants_drained = bool((supervisor.get("result") or {}).get("descendants_drained"))
+    receipt_warning = persist_terminal_state(record_path, record, supervisor, write_json=atomic_write_json) if quiet else None
     result = make_result(
         tool="remote.job_stop",
         target=endpoint.to_result_target(),
@@ -792,4 +787,10 @@ def remote_job_stop(endpoint: Endpoint | None, *, job_id: str, force: bool = Fal
             "remote_status": supervisor,
         },
     )
-    return {"text": f"Remote job {job_id}: {status}\n", "result": result}
+    text = f"Remote job {job_id}: {status}\n"
+    if receipt_warning:
+        result["receipt_warning"] = receipt_warning
+        message = "The stop result above is authoritative, but updating the local job record failed; terminal local retention may be delayed."
+        result["warnings"].append(message)
+        text += message + "\n"
+    return {"text": text, "result": result}

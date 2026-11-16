@@ -1,7 +1,7 @@
 """
 [Role] Client boundary for remote background process supervision (`processes/client.py`).
 [Invariants]
-- Ships the composed `worker_runtime.py` + `worker.py` source over the pooled SSH JSON-RPC channel (`rpc_transport.request`) keyed by SHA-256 code digest (`lru_cache` loaded).
+- Ships the composed `worker_runtime.py` + `worker_gc.py` + `worker.py` source over the pooled SSH JSON-RPC channel (`rpc_transport.request`) keyed by SHA-256 code digest (`lru_cache` loaded).
 - Validates that every supervisor reply is a JSON object containing an explicit `state` field.
 [Timeouts & Locks]
 - Control RPCs have a 30s connection/control budget plus any requested output
@@ -23,16 +23,17 @@ from remote_dev.core.rpc_transport import request as rpc_request
 
 ACTIONS = frozenset({"prepare", "go", "status", "tail", "stop", "stdin", "launch", "exchange"})
 WORKER_RELATIVE = Path(__file__).with_name("worker.py")
-WORKER_SOURCE_PARTS = ("worker_runtime.py", "worker.py")
+WORKER_SOURCE_PARTS = ("worker_runtime.py", "worker_gc.py", "worker.py")
 CONTROL_TIMEOUT_MS = 30000
 
 @lru_cache(maxsize=1)
 def worker_source() -> str:
     """Return the self-contained Linux supervisor source shipped into the remote root.
 
-    `worker_runtime.py` must precede `worker.py`: it carries the capped-log and
-    housekeeping primitives used through this concatenated namespace because the
-    remote host has no importable `remote_dev` package.
+    `worker_runtime.py` and `worker_gc.py` must precede `worker.py`: they carry the
+    capped-log, process-identity, and housekeeping primitives used through this
+    concatenated namespace because the remote host has no importable `remote_dev`
+    package.
     """
     parts = []
     for name in WORKER_SOURCE_PARTS:

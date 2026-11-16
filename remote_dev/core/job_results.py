@@ -1,7 +1,9 @@
 """Job response projections and acknowledged-result preservation.
 
-[Role] Render bounded job output and public receipts for lifecycle operations.
+[Role] Render bounded job output, truthful truncation accounting, and public receipts for lifecycle operations.
 [Invariants] Private authorization never enters responses; local recording failures retain the remote result.
+  A capped remote-log head loss is always surfaced as `truncated=True` with the retained byte range,
+  never silently reported as an untruncated preview.
 [Timeouts & Locks] No transport or waiting; local log previews run within the caller's operation budget.
 [Side-Effect Policy] Read local preview files only; never launch, replay or modify remote jobs.
 """
@@ -13,6 +15,7 @@ from typing import Any
 
 from remote_dev.core.errors import error_details
 from remote_dev.core.job_logs import format_job_log_output, job_log_refs, local_stream_preview
+from remote_dev.core.job_output import head_truncation, merge_output_logs, output_truncation
 from remote_dev.result import make_result
 
 UNKNOWN_JOB_STATES = frozenset({"unknown", "uncertain", "lost", "lost_outcome"})
@@ -40,6 +43,7 @@ _PUBLIC_JOB_KEYS = (
     "state",
     "stdin_cursors",
     "local_output_offsets",
+    "output_logs",
     "diagnostics",
 )
 
@@ -65,15 +69,17 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
                else "timeout" if state == "timeout" else "cancelled" if state == "cancelled" or row.get("cancellation_requested") else "success")
     job_id = record["job_id"]
     summary = f"Remote command {state}." + (f" Exit code: {exit_code}." if exit_code is not None else "")
+    accounting_record = {**record, "output_logs": merge_output_logs(record, row)}
     refs = job_log_refs(
         job_id=job_id,
         record_path=path,
-        record=record,
+        record=accounting_record,
         endpoint_id=endpoint.endpoint_id,
         observed_offsets={name: int(row.get(name + "_offset") or 0) for name in ("stdout", "stderr")},
         unread_bytes=pending,
         local_recording_error=local_cache_error,
     )
+    head = head_truncation(accounting_record)
     if prefer_cache_edges:
         try:
             edge_chars = max(1, int(budget) // 2)
@@ -100,13 +106,20 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
         tails = tail_sources.get("tail") if isinstance(tail_sources, dict) else {}
         edge_sources = {}
         for name in ("stdout", "stderr"):
-            total_bytes = int(row.get(name + "_offset") or 0) + int(row.get(name + "_bytes_remaining") or 0)
+            logical_total = int(row.get(name + "_offset") or 0) + int(row.get(name + "_bytes_remaining") or 0)
+            # The edge source starts at the retained range, not logical byte 0.
+            retained_total = max(
+                0, logical_total - head["streams"][name]["truncated_head_bytes"]
+            )
             head_text = str((heads or {}).get(name) or row.get(name) or "")
             tail_text = str((tails or {}).get(name) or "")
             edge_chars = max(1, int(budget) // 2)
             edge_sources[name] = preview_stream_edges(
                 head_text, tail_text,
-                total_bytes=max(total_bytes, len(head_text.encode("utf-8"))),
+                total_bytes=max(
+                    retained_total, len(head_text.encode("utf-8")),
+                    len(tail_text.encode("utf-8")),
+                ),
                 head_chars=edge_chars, tail_chars=edge_chars,
             )
         formatted = format_job_log_output(
@@ -118,9 +131,22 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
             refs=refs, preserve_full_page=preserve_full_page,
         )
     preview = formatted["preview"]
+    truncation = output_truncation(accounting_record, row, formatted)
     warnings = []
     if preview_error:
         warnings.append(f"Preview degraded: {preview_error}. The command result and full raw log refs are preserved.")
+    for name in ("stdout", "stderr"):
+        detail = truncation["streams"][name]
+        if not detail["truncated_head_bytes"]:
+            continue
+        warnings.append(
+            f"Remote {name} log is head-truncated: bytes [0, {detail['truncated_head_bytes']:,}) "
+            f"of {detail['logical_bytes_written']:,} were rotated away; only the retained range "
+            f"[{detail['retained_range'][0]:,}, {detail['retained_range'][1]:,}) is available."
+        )
+    log_warning = (accounting_record.get("output_logs") or {}).get("accounting_warning")
+    if log_warning:
+        warnings.append(f"Remote log accounting warning: {log_warning}")
     if row.get("stdin_buffer_full"):
         warnings.append("Input partially accepted; resend chars[stdin.written_chars:] after the program consumes input.")
     if row.get("eof_deferred"):
@@ -142,12 +168,24 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
                "cursors": record.get("stdin_cursors", {}), "bytes_remaining": pending,
                "output_budget_bytes": budget,
                "preview_degraded": bool(preview_error),
-               "output_preview": {"truncated": formatted["truncated"], "omitted_chars": formatted["omitted_chars"],
-                                  "omitted_bytes": formatted["omitted_bytes"], "omitted_chars_exact": formatted["omitted_chars_exact"],
-                                  "repeated_lines_folded": formatted["repeated_lines_folded"],
-                                  "head_chars": formatted["head_chars"], "tail_chars": formatted["tail_chars"],
-                                  "full_page": preserve_full_page,
-                                  "local_cache_status": refs.get("local_cache_status")},
+               "output_preview": {
+                   "truncated": truncation["truncated"],
+                   "omitted_chars": formatted["omitted_chars"],
+                   "omitted_bytes": truncation["omitted_bytes"],
+                   "head_truncated_bytes": truncation["head_truncated_bytes"],
+                   "omitted_chars_exact": bool(
+                       formatted["omitted_chars_exact"]
+                       and not truncation["head_truncated_bytes"]
+                   ),
+                   "repeated_lines_folded": formatted["repeated_lines_folded"],
+                   "head_chars": formatted["head_chars"], "tail_chars": formatted["tail_chars"],
+                   "retained_ranges": {
+                       name: detail["retained_range"]
+                       for name, detail in truncation["streams"].items()
+                   },
+                   "streams": truncation["streams"],
+                   "full_page": preserve_full_page,
+                   "local_cache_status": refs.get("local_cache_status")},
                "stdin": {key: row[key] for key in ("accepted", "written", "written_chars", "eof", "eof_deferred", "stdin_buffer_full", "retryable") if key in row},
                "environment": {key: record.get(key) for key in ("runtime_env", "runtime_env_file", "env_keys", "timeout_ms")}},
     )

@@ -403,3 +403,310 @@ def test_prune_stale_session_runtime_dirs_keeps_receipts_alive_and_locked(tmp_pa
     assert stats["skipped"]["pid_alive_or_unknown"] == 1
     assert stats["skipped"]["receipt_store"] == 1
     assert stats["skipped"]["locked_or_unverifiable"] == 1
+
+
+def test_windows_pid_probe_never_calls_os_kill_and_distinguishes_codes():
+    from remote_dev.core import windows_probe
+
+    class FakeApi:
+        def __init__(self, *, handle=None, error=0, code=None):
+            self.handle = handle
+            self.error = error
+            self.code = code
+            self.closed = 0
+
+        def open_process(self, pid):
+            assert pid == 4242
+            return self.handle
+
+        def last_error(self):
+            return self.error
+
+        def exit_code(self, handle):
+            assert handle is self.handle
+            return self.code
+
+        def close(self, handle):
+            self.closed += 1
+
+    assert windows_probe.ERROR_INVALID_PARAMETER == 87
+    assert windows_probe.ERROR_ACCESS_DENIED == 5
+    assert windows_probe.STILL_ACTIVE == 259
+
+    with mock.patch.object(retention.os, "kill") as kill:
+        invalid = FakeApi(error=87)
+        assert retention._pid_is_dead(4242, platform="nt", winapi=invalid) is True
+        denied = FakeApi(error=5)
+        assert retention._pid_is_dead(4242, platform="nt", winapi=denied) is False
+        unknown = FakeApi(error=0)
+        assert retention._pid_is_dead(4242, platform="nt", winapi=unknown) is False
+        active = FakeApi(handle=object(), code=259)
+        assert retention._pid_is_dead(4242, platform="nt", winapi=active) is False
+        exited = FakeApi(handle=object(), code=0)
+        assert retention._pid_is_dead(4242, platform="nt", winapi=exited) is True
+        failed = FakeApi(handle=object(), code=1)
+        assert retention._pid_is_dead(4242, platform="nt", winapi=failed) is True
+        kill.assert_not_called()
+    assert invalid.closed == 0  # no handle was opened for error 87
+    assert active.closed == 1
+    assert exited.closed == 1
+
+
+def test_windows_lock_probe_is_conservative_and_matches_byte_lock(tmp_path):
+    from remote_dev.core import windows_probe
+
+    class FakeMsvcrt:
+        LK_NBLCK = 1
+        LK_UNLCK = 2
+
+        def __init__(self, *, locked):
+            self.locked = locked
+
+        def locking(self, fileno, mode, length):
+            assert length == 1
+            if self.locked and mode == self.LK_NBLCK:
+                raise OSError("already locked")
+
+    lock_path = tmp_path / "job.json.lock"
+    lock_path.write_bytes(b"\0")
+    assert windows_probe.windows_lock_free(
+        lock_path, msvcrt_module=FakeMsvcrt(locked=False)
+    ) is True
+    assert windows_probe.windows_lock_free(
+        lock_path, msvcrt_module=FakeMsvcrt(locked=True)
+    ) is False
+    assert windows_probe.windows_lock_free(
+        tmp_path / "missing.json.lock", msvcrt_module=FakeMsvcrt(locked=False)
+    ) is True
+
+
+def _local_record(jobs: Path, job_id: str, state: str) -> dict[str, Path]:
+    record = jobs / f"{job_id}.json"
+    record.write_text(json.dumps({"job_id": job_id, "state": state}), encoding="utf-8")
+    stdout = jobs / f"{job_id}.stdout.log"
+    stdout.write_text("x" * 10, encoding="utf-8")
+    return {"record": record, "stdout": stdout}
+
+
+@pytest.mark.parametrize("sibling_state", ["unknown", "running"])
+def test_local_prune_never_matches_dotted_job_id_siblings(tmp_path, sibling_state):
+    base = tmp_path / "endpoints" / "ep1"
+    jobs = base / "jobs"
+    jobs.mkdir(parents=True)
+    now = time.time()
+    terminal = _local_record(jobs, "job-a", "completed")
+    sibling = _local_record(jobs, "job-a.retry", sibling_state)
+    os.utime(sibling["record"], (now - 10, now - 10))
+    before = sibling["record"].read_bytes()
+    sibling_stdout = sibling["stdout"].read_bytes()
+
+    retention.prune_endpoint_state(
+        base, now=now, force=True, jobs_max_entries=0, jobs_max_bytes=0,
+    )
+
+    assert sibling["record"].read_bytes() == before
+    assert sibling["stdout"].read_bytes() == sibling_stdout
+    assert not terminal["record"].exists()
+    assert not terminal["stdout"].exists()
+
+
+def test_local_prune_protects_the_active_transaction_job(tmp_path):
+    base = tmp_path / "endpoints" / "ep1"
+    jobs = base / "jobs"
+    jobs.mkdir(parents=True)
+    now = time.time()
+    active = _local_record(jobs, "job-active", "succeeded")
+    retention.prune_endpoint_state(
+        base, now=now, force=True, jobs_max_entries=0, jobs_max_bytes=0,
+        protect_job_ids={"job-active"},
+    )
+    assert active["record"].exists()
+    assert active["stdout"].exists()
+
+
+def test_local_prune_rechecks_terminal_state_after_acquiring_lock(tmp_path, monkeypatch):
+    base = tmp_path / "endpoints" / "ep1"
+    jobs = base / "jobs"
+    jobs.mkdir(parents=True)
+    now = time.time()
+    record = _local_record(jobs, "job-raced", "succeeded")["record"]
+    real_acquire = retention._acquire_record_lock
+
+    def acquire_after_writer(path, timeout):
+        path.write_text(json.dumps({"job_id": "job-raced", "state": "running"}),
+                        encoding="utf-8")
+        return real_acquire(path, timeout)
+
+    monkeypatch.setattr(retention, "_acquire_record_lock", acquire_after_writer)
+    retention.prune_endpoint_state(
+        base, now=now, force=True, jobs_max_entries=0, jobs_max_bytes=0,
+    )
+    assert record.exists()
+
+
+def test_remote_gc_cursor_advances_past_uncollectable_prefix(worker, tmp_path):
+    now = time.time()
+    jobs = tmp_path / ".remote-dev" / "jobs"
+    _remote_job(tmp_path, "job-a-active", state="running", drained=False)
+    _remote_job(tmp_path, "job-b-active", state="running", drained=False)
+    _remote_job(tmp_path, "job-c-expired", finished_at=now - 30 * 86400)
+
+    first = worker.collect_terminal_jobs(
+        jobs_root=jobs, now=now, max_entries=2, time_budget_seconds=2.0,
+    )
+    assert first["scanned"] == 2
+    assert first["next_cursor"] == "job-b-active"
+    assert (jobs / "job-c-expired").exists()
+
+    second = worker.collect_terminal_jobs(
+        jobs_root=jobs, now=now, max_entries=2,
+        cursor=first["next_cursor"], time_budget_seconds=2.0,
+    )
+    assert second["removed"] == ["job-c-expired"]
+    assert not (jobs / "job-c-expired").exists()
+    assert (jobs / "job-a-active").exists()
+    assert (jobs / "job-b-active").exists()
+    assert second["cursor_wrapped"] is True
+    assert second["next_cursor"] == ""
+
+
+def test_housekeeping_persists_cursor_and_wraps(worker, tmp_path):
+    now = time.time()
+    jobs = tmp_path / ".remote-dev" / "jobs"
+    _remote_job(tmp_path, "job-a-active", state="running", drained=False)
+    _remote_job(tmp_path, "job-b-active", state="running", drained=False)
+    _remote_job(tmp_path, "job-c-expired", finished_at=now - 30 * 86400)
+
+    first = worker.maybe_run_job_housekeeping(tmp_path, now=now, force=True, max_entries=2)
+    marker = json.loads((jobs / ".housekeeping.json").read_text(encoding="utf-8"))
+    assert marker["last_cursor"] == marker["cursor"] == first["next_cursor"] == "job-b-active"
+    assert (jobs / "job-c-expired").exists()
+
+    second = worker.maybe_run_job_housekeeping(tmp_path, now=now + 1, force=True, max_entries=2)
+    assert second["removed"] == ["job-c-expired"]
+    marker = json.loads((jobs / ".housekeeping.json").read_text(encoding="utf-8"))
+    assert marker["last_cursor"] == marker["cursor"] == ""
+
+
+def test_remote_gc_dry_run_never_removes_trash_or_jobs(worker, tmp_path):
+    now = time.time()
+    jobs = tmp_path / ".remote-dev" / "jobs"
+    _remote_job(tmp_path, "job-dryrun-0001", finished_at=now - 30 * 86400)
+    trash = jobs / ".trash-job-old-12345678"
+    trash.mkdir()
+    old = now - 3600
+    os.utime(trash, (old, old))
+
+    stats = worker.collect_terminal_jobs(jobs_root=jobs, now=now, dry_run=True)
+
+    assert stats["would_remove"] == ["job-dryrun-0001"]
+    assert stats["trash_would_clean"] == 1
+    assert stats["trash_cleaned"] == 0
+    assert (jobs / "job-dryrun-0001").exists()
+    assert trash.exists()
+
+
+def test_remote_gc_holds_control_and_supervisor_locks_during_removal(worker, tmp_path):
+    now = time.time()
+    jobs = tmp_path / ".remote-dev" / "jobs"
+    job = _remote_job(tmp_path, "job-fenced-0001", finished_at=now - 30 * 86400)
+    fcntl = pytest.importorskip("fcntl")
+    with (job / "lock").open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stats = worker.collect_terminal_jobs(jobs_root=jobs, now=now)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    assert stats["removed"] == []
+    assert job.exists()
+    assert stats["skipped_active"] >= 1
+
+    with worker._held_job_locks(job) as first:
+        assert first is True
+        with worker._held_job_locks(job) as second:
+            assert second is False
+
+
+def test_capped_log_derives_truncation_after_metadata_crash(worker, tmp_path):
+    payload = bytes(range(256)) * 20
+    with worker.CappedLog(tmp_path, "stdout", 1024) as log:
+        log.write(payload)
+    meta = json.loads((tmp_path / "logs.json").read_text(encoding="utf-8"))
+    expected_truncated = meta["stdout"]["truncated_head_bytes"]
+    expected_logical = meta["stdout"]["logical_bytes_written"]
+    assert expected_truncated > 0
+
+    # Simulate a crash between segment rotation and logs.json publication by
+    # restoring the pre-rotation truncated offset while keeping logical bytes.
+    meta["stdout"]["truncated_head_bytes"] = 0
+    (tmp_path / "logs.json").write_text(json.dumps(meta), encoding="utf-8")
+    reopened = worker.CappedLog(tmp_path, "stdout", 1024)
+    reopened.close()
+    healed = json.loads((tmp_path / "logs.json").read_text(encoding="utf-8"))["stdout"]
+    assert healed["logical_bytes_written"] == expected_logical
+    assert healed["truncated_head_bytes"] == expected_truncated
+
+
+def test_capped_log_close_persists_metadata_after_rotation_failure(worker, tmp_path):
+    (tmp_path / "stdout.log.prev").write_bytes(b"p" * 100)
+    log = worker.CappedLog(tmp_path, "stdout", 64)
+    real_replace = worker.os.replace
+
+    def fail_rotation(source, destination):
+        if str(destination).endswith(".log.prev"):
+            raise OSError("simulated rotation failure")
+        return real_replace(source, destination)
+
+    with mock.patch.object(worker.os, "replace", side_effect=fail_rotation):
+        with pytest.raises(OSError, match="rotation failure"):
+            log.write(b"x" * 200)
+        log.close()
+
+    meta = json.loads((tmp_path / "logs.json").read_text(encoding="utf-8"))["stdout"]
+    assert meta["truncated_head_bytes"] >= 100
+    assert "accounting_warning" in meta
+    assert log.accounting_warning
+
+
+def test_stop_records_stop_json_before_bounded_maintenance(worker, tmp_path):
+    job_id = "job-stop-order"
+    directory = tmp_path / ".remote-dev" / "jobs" / job_id
+    directory.mkdir(parents=True)
+    (directory / "receipt.json").write_text("{}", encoding="utf-8")
+    seen = {}
+
+    def fake_maintenance(root, identifier):
+        seen["stop_json"] = (directory / "stop.json").exists()
+        return {"skipped": "timeout", "error": "maintenance timeout"}
+
+    running = {"state": "running", "quiet": False, "unknown": [],
+               "processes": [{"pid": 123, "start_ticks": "1"}]}
+    with mock.patch.object(worker, "job_status", return_value=running), \
+            mock.patch.object(worker, "signal_processes"), \
+            mock.patch.object(worker, "_bounded_housekeeping", side_effect=fake_maintenance):
+        result = worker.control_job(
+            {"root": str(tmp_path), "job_id": job_id, "action": "stop"}, ""
+        )
+    assert seen["stop_json"] is True
+    assert "maintenance timeout" in result["maintenance_warning"]
+
+
+def test_capped_log_warns_when_rotated_metadata_is_missing(worker, tmp_path):
+    payload = bytes(range(256)) * 20
+    with worker.CappedLog(tmp_path, "stdout", 1024) as log:
+        log.write(payload)
+    (tmp_path / "logs.json").unlink()
+    reopened = worker.CappedLog(tmp_path, "stdout", 1024)
+    assert reopened.accounting_warning
+    assert "understated" in reopened.accounting_warning
+    reopened.close()
+    meta = json.loads((tmp_path / "logs.json").read_text(encoding="utf-8"))["stdout"]
+    assert meta["accounting_warning"]
+
+
+def test_housekeeping_cooldown_marker_failure_is_bounded(worker, tmp_path, monkeypatch):
+    def blocked(_path):
+        raise TimeoutError("blocked marker read")
+
+    monkeypatch.setattr(worker, "_read_json_dict", blocked)
+    stats = worker.maybe_run_job_housekeeping(tmp_path, now=time.time())
+    assert stats["skipped"] == "timeout"
+    assert "TimeoutError" in stats["error"]
