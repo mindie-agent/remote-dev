@@ -1,7 +1,7 @@
 """
 [Role] Client boundary for remote background process supervision (`processes/client.py`).
 [Invariants]
-- Ships `processes/worker.py` over the pooled SSH JSON-RPC channel (`rpc_transport.request`) keyed by SHA-256 code digest (`lru_cache` loaded).
+- Ships the composed `worker_runtime.py` + `worker_gc.py` + `worker.py` source over the pooled SSH JSON-RPC channel (`rpc_transport.request`) keyed by SHA-256 code digest (`lru_cache` loaded).
 - Validates that every supervisor reply is a JSON object containing an explicit `state` field.
 [Timeouts & Locks]
 - Control RPCs have a 30s connection/control budget plus any requested output
@@ -23,15 +23,25 @@ from remote_dev.core.rpc_transport import request as rpc_request
 
 ACTIONS = frozenset({"prepare", "go", "status", "tail", "stop", "stdin", "launch", "exchange"})
 WORKER_RELATIVE = Path(__file__).with_name("worker.py")
+WORKER_SOURCE_PARTS = ("worker_runtime.py", "worker_gc.py", "worker.py")
 CONTROL_TIMEOUT_MS = 30000
 
 @lru_cache(maxsize=1)
 def worker_source() -> str:
-    """Return the Linux supervisor source shipped into the remote root."""
-    path = WORKER_RELATIVE
-    if not path.is_file():
-        raise RuntimeError(f"this install is missing {path.name}")
-    return path.read_text(encoding="utf-8")
+    """Return the self-contained Linux supervisor source shipped into the remote root.
+
+    `worker_runtime.py` and `worker_gc.py` must precede `worker.py`: they carry the
+    capped-log, process-identity, and housekeeping primitives used through this
+    concatenated namespace because the remote host has no importable `remote_dev`
+    package.
+    """
+    parts = []
+    for name in WORKER_SOURCE_PARTS:
+        path = WORKER_RELATIVE.with_name(name)
+        if not path.is_file():
+            raise RuntimeError(f"this install is missing {path.name}")
+        parts.append(path.read_text(encoding="utf-8"))
+    return "\n\n".join(parts)
 
 
 def _as_endpoint(endpoint: Endpoint | Mapping[str, Any]) -> Endpoint:

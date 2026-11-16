@@ -8,7 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 import remote_dev.core.job_ops as job_ops
+import remote_dev.core.job_records as job_records
 import remote_dev.core.state_store as state_store
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core.errors import RemoteExecutionError, error_details
@@ -70,6 +73,38 @@ class RemoteJobControlTests(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
         self.assertTrue(result["job"]["quiet"])
 
+    def test_status_persists_confirmed_terminal_state_for_local_retention(self) -> None:
+        supervisor = _supervisor(
+            state="succeeded", quiet=True,
+            result={
+                "state": "succeeded", "exit_code": 0,
+                "logs": {
+                    "stdout": {"logical_bytes_written": 500, "truncated_head_bytes": 100},
+                    "stderr": {"logical_bytes_written": 20, "truncated_head_bytes": 0},
+                },
+            },
+        )
+        result = self._status(supervisor)
+        saved = json.loads(self.record_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["state"], "succeeded")
+        self.assertEqual(saved["output_logs"]["stdout"]["truncated_head_bytes"], 100)
+        self.assertEqual(saved["output_logs"]["stdout"]["logical_bytes_written"], 500)
+        self.assertEqual(result["job"]["output_logs"]["stdout"]["truncated_head_bytes"], 100)
+
+    def test_status_local_terminal_write_failure_keeps_primary_response(self) -> None:
+        supervisor = _supervisor(state="succeeded", quiet=True,
+                                 result={"state": "succeeded", "exit_code": 0})
+        with mock.patch.object(job_ops, "control", return_value=supervisor), \
+                mock.patch.object(job_ops, "atomic_write_json",
+                           side_effect=OSError("isolated receipt failure")):
+            result = job_ops.remote_job_status(self.endpoint, job_id=self.job_id)["result"]
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["outcome"], "success")
+        self.assertEqual(result["receipt_warning"]["stage"], "job_terminal_state")
+        self.assertEqual(result["receipt_warning"]["error_type"], "OSError")
+        saved = json.loads(self.record_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["state"], "running")
+
     def test_uncertain_supervisor_is_not_quiet_success_of_the_job(self) -> None:
         result = self._status(_supervisor(state="uncertain", quiet=False, unknown=["supervisor lost"]))
         self.assertEqual(result["status"], "uncertain")
@@ -102,6 +137,16 @@ class RemoteJobControlTests(unittest.TestCase):
             result = job_ops.remote_job_stop(self.endpoint, job_id=self.job_id)["result"]
         self.assertEqual(result["status"], "cancelled")
         self.assertEqual(result["outcome"], "cancelled")
+
+    def test_stop_persists_confirmed_terminal_state(self) -> None:
+        supervisor = _supervisor(state="cancelled", quiet=True,
+                                 result={"state": "cancelled"})
+        with mock.patch.object(job_ops, "control", return_value=supervisor):
+            result = job_ops.remote_job_stop(self.endpoint, job_id=self.job_id)["result"]
+        self.assertEqual(result["status"], "cancelled")
+        saved = json.loads(self.record_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["state"], "cancelled")
+        self.assertIn("terminal_observed_at", saved)
 
     def test_status_failure_omits_authorization_and_exposes_actionable_text(self) -> None:
         error = RemoteExecutionError(
@@ -575,9 +620,9 @@ class StartRemoteJobTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == "linux", "exercises the Linux remote process worker")
 class WorkerExchangeAndSubreaperStatusTests(unittest.TestCase):
     def setUp(self) -> None:
-        from remote_dev.processes import worker as worker_module
+        from _worker_source import load_worker_module
 
-        self.worker = worker_module
+        self.worker = load_worker_module()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -672,6 +717,24 @@ class WorkerExchangeAndSubreaperStatusTests(unittest.TestCase):
         self.assertEqual(row["result"]["exit_code"], 0)
         self.assertEqual(row["stdout"], "first line\nsecond line\n")
         self.assertEqual(row["stdout_bytes_remaining"], 0)
+
+
+def test_load_record_rejects_path_traversal_before_path_resolution(tmp_path, monkeypatch):
+    monkeypatch.setenv("REMOTE_DEV_STATE_DIR", str(tmp_path / "state"))
+    endpoint = Endpoint(host="192.0.2.12", port=22, root="/srv/app", cwd="/srv/app")
+    (tmp_path / "outside.json").write_text('{"job_id": "outside"}', encoding="utf-8")
+
+    for candidate in (endpoint, None):
+        with pytest.raises(ValueError) as caught:
+            job_records.load_record(candidate, "../outside")
+        details = error_details(caught.value)
+        assert details["category"] == "caller"
+        assert details["field"] == "job_id"
+        assert details["submission_state"] == "not_sent"
+        assert "must be 3-96 chars" in str(caught.value)
+
+    # Validation happens before `job_record_path` creates the endpoint state tree.
+    assert not (tmp_path / "state").exists()
 
 
 if __name__ == "__main__":

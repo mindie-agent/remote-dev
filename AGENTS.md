@@ -12,12 +12,12 @@
 | `remote_dev/auth/` | Sole owner of user-scoped SSH profiles, credential providers, enrollment and pre-dispatch key repair; coordinator and npu-top consume this API | `setup_access()`, `prepare_auth()`, `auth_status()`, `forget_access()` |
 | `remote_dev/core/file_ops.py` & `remote_file_worker.py` | Remote `read`/`ls`/`write`/`edit`/`multi_edit` with read-ledger SHA-256 optimistic concurrency; `remote_file_worker.py` is a standalone `.py` file loaded via `lru_cache` | `remote_read()`, `remote_write()`, `remote_edit()`, `remote_multi_edit()`, `remote_ls()` |
 | `remote_dev/core/rpc_transport.py` & `processes/rpc_worker.py` | Pooled binary-pipe SSH JSON-RPC transport (`_POOL_LIMIT=32`) and remote `python3 -I` worker | `request()`, `RpcConnection`, `close_connections()` |
-| `remote_dev/core/job_ops.py` & `processes/worker.py` | Durable remote background job supervisor (`prepare`/`go`/`launch`/`exchange`/`status`/`tail`/`stop`) and interactive `stdin` session cursor management | `start_remote_job()`, `remote_job_status()`, `remote_job_stdin()`, `remote_job_stop()`, `remote_job_tail()` |
+| `remote_dev/core/job_ops.py`, `processes/worker.py` & `processes/worker_runtime.py` | Durable remote background job supervisor (`prepare`/`go`/`launch`/`exchange`/`status`/`tail`/`stop`), capped ring logs with honest logical offsets, and bounded terminal-job GC | `start_remote_job()`, `remote_job_status()`, `remote_job_stdin()`, `remote_job_stop()`, `remote_job_tail()` |
 | `remote_dev/core/artifact_ops.py`, `artifact_transport.py` & `processes/artifact_worker.py` | SHA-256 manifest generation and chunked binary `pull`/`push` over an independent SSH channel (`ssh_mux=False, keepalive=True`) | `remote_artifact_manifest()`, `remote_artifact_pull()`, `remote_artifact_push()`, `ArtifactStream` |
 | `remote_dev/core/patch_ops.py` & `search_ops.py` | Atomic multi-file Codex `apply_patch` / unified-diff transactions with rollback (`patch_ops.py`), and `rg` / `grep -E` workspace search (`search_ops.py`) | `remote_apply_patch()`, `remote_glob()`, `remote_grep()` |
 | `remote_dev/core/ssh_transport.py` & `local_process.py` | SSH argv construction (all options before `--`), ControlMaster policy, attached streams (`run_stream`), `-N -L` port forwards (`open_local_forward`), and `OwnedProcess` group/Job-Object lifecycle | `ssh_command()`, `run_script()`, `run_stream()`, `open_local_forward()`, `OwnedProcess` |
 | `remote_dev/diagnostics.py` | Read-only two-stage SSH connection diagnostic (`diagnose_ssh`: Stage 1 mux `60%` vs Stage 2 independent `>= 40%`) | `diagnose_ssh()`, `http_connection()` |
-| `remote_dev/core/state_store.py`, `locking.py` & `atomic.py` | Endpoint/context-scoped local records, cross-thread/process `record_lock` (`RLock` + `flock`/`msvcrt`), and `os.replace()` atomic file publication | `write_read_ledger()`, `load_write_ledger_guard()`, `record_lock()`, `serialize_mutation()` |
+| `remote_dev/core/state_store.py`, `retention.py`, `locking.py` & `atomic.py` | Endpoint/context-scoped local records, bounded 7/14-day retention (`reads`/`logs`/terminal `jobs`), cross-thread/process `record_lock` (`RLock` + `flock`/`msvcrt`), and `os.replace()` atomic file publication | `write_read_ledger()`, `maybe_prune_endpoint_state()`, `prune_stale_session_runtime_dirs()`, `record_lock()`, `serialize_mutation()` |
 
 ## 2. Core State, Concurrency & Timeout Invariants (`v0.0.2` Iron Rules)
 
@@ -35,6 +35,9 @@
 4. **Lightweight Atomic Persistence & Locking (Iron Rule 3)**:
    - Local and remote file replacements use sibling temp files + `fsync` + `os.replace()` (`atomic.replace_file`), without redundant `lstat`/`fstat` ownership ceremonies or shadow state machines.
    - Long job output polls (`yield_time_ms > 250` in `remote_job_stdin`) snapshot the cursor and wait outside `record_lock(path)` so concurrent `stdin` writes or `job_stop` calls never block behind a waiting reader.
+5. **Bounded Storage & Terminal-Only Retention**:
+   - Remote `<root>/.remote-dev/jobs` keeps each stream at `spec.max_log_bytes` (default 256 MiB) through `worker_runtime.CappedLog` and prunes only UID-owned, lock-free, definitively terminal jobs (`7 days` / `128` / `2 GiB`); `running`, `unknown`, and `retain_until_release` jobs are never removed.
+   - Local `state/endpoints/<id>/` prunes `reads`/`logs` (`7 days` / `256` / `128 MiB`) and confirmed-terminal `jobs` (`14 days` / `128` / `256 MiB`); `prune_stale_session_runtime_dirs()` preserves any directory containing a SQLite receipt store.
 
 ## 3. Verification Commands
 

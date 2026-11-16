@@ -5,8 +5,12 @@
 - Writes JSON/text records via sibling `.tmp` + `fsync` + `replace_file` (`os.replace()`).
 [Timeouts & Locks]
 - File replacement tolerates transient Windows sharing locks up to `0.5s` via `atomic.replace_file`.
+- Opportunistic retention runs on record/log writes with a `300s` cooldown marker and a
+  bounded `2s` budget; a prune failure never blocks the caller's committed write.
 [Side-Effect Policy]
 - Mutates files exclusively under `state_root()` (`<cwd>/state` or `REMOTE_DEV_STATE_DIR`).
+- Prunes only expired read ledgers/logs and confirmed-terminal job artifacts; running and
+  `unknown` job records are never removed.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ from .endpoint import Endpoint, substrate_root
 from .container_endpoint import pinned_endpoint
 from .atomic import replace_file
 from .path_policy import path_fingerprint
+from .retention import prune_endpoint_state, prune_stale_session_runtime_dirs
 from remote_dev.result import dumps, new_invocation_id, utc_now_iso
 
 LEDGER_SCOPE_ENV_VARS = ("REMOTE_DEV_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_SESSION_ID", "CODEX_RUN_ID")
@@ -117,7 +122,34 @@ def new_log_dir(endpoint: Endpoint, tool_kind: str, invocation_id: str | None = 
     token = invocation_id or new_invocation_id()
     path = base / "logs" / tool_kind / token
     path.mkdir(parents=True, exist_ok=True)
+    maybe_prune_endpoint_state(endpoint)
     return path
+
+
+def maybe_prune_endpoint_state(
+    endpoint: Endpoint, *, force: bool = False, protect_job_ids=()
+) -> dict[str, Any]:
+    """Apply bounded local retention after a write; never fails the committed write."""
+    return maybe_prune_endpoint_state_dir(
+        state_root() / "endpoints" / endpoint.endpoint_id, force=force,
+        protect_job_ids=protect_job_ids,
+    )
+
+
+def maybe_prune_endpoint_state_dir(
+    base: Path, *, force: bool = False, protect_job_ids=()
+) -> dict[str, Any]:
+    """Run best-effort maintenance without turning it into a caller-visible failure."""
+    try:
+        return prune_endpoint_state(
+            base, force=force, protect_job_ids=protect_job_ids
+        )
+    except TimeoutError as exc:
+        # The committed record/log write is already durable. A maintenance
+        # timeout is reported, never re-raised into the tool operation.
+        return {"base": str(base), "error": f"TimeoutError: {exc}", "timed_out": True}
+    except OSError as exc:
+        return {"base": str(base), "error": f"{type(exc).__name__}: {exc}"}
 
 
 def _ledger_scope_digest(raw: str) -> str:
@@ -173,6 +205,7 @@ def write_read_ledger(endpoint: Endpoint, file_info: dict[str, Any], client_cont
         "limit": file_info.get("limit"),
     }
     atomic_write_json(path, payload)
+    maybe_prune_endpoint_state(endpoint)
     return path
 
 
@@ -317,9 +350,14 @@ def list_job_records(endpoint_id: str) -> list[dict[str, Any]]:
         if not entry.name.endswith(".json"):
             continue
         path = Path(entry.path)
-        data = _read_owned_record(
-            path, operation="remote.job_status", contract_name="job_record_json", label="job",
-        )
+        try:
+            data = _read_owned_record(
+                path, operation="remote.job_status", contract_name="job_record_json", label="job",
+            )
+        except FileNotFoundError:
+            # A concurrent bounded prune removed this terminal record after the
+            # directory scan; it is no longer part of the list.
+            continue
         records.append({**data, "local_record": str(path)})
     return records
 

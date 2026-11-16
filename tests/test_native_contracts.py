@@ -1131,17 +1131,28 @@ class BackgroundHonestyTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class FinalLogStopTests(unittest.TestCase):
-    def test_tail_text_reads_bounded_suffix_without_whole_file(self):
-        directory = tempfile.mkdtemp(prefix="tail-bounded-")
-        path = Path(directory) / "large.log"
-        with path.open("wb") as stream:
-            stream.seek(64 * 1024 * 1024)
-            stream.write(b"TAIL-LINE\n")
-        with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("whole file read")):
-            text, truncated = native_common._tail_text(path, 4096)
+    def _exercise_bounded_tail(self):
+        with tempfile.TemporaryDirectory(prefix="tail-bounded-") as directory:
+            path = Path(directory) / "large.log"
+            with path.open("wb") as stream:
+                stream.seek(64 * 1024 * 1024)
+                stream.write(b"TAIL-LINE\n")
+            with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("whole file read")):
+                text, truncated = native_common._tail_text(path, 4096)
         self.assertTrue(truncated)
         self.assertTrue(text.endswith("TAIL-LINE\n"))
         self.assertLessEqual(len(text.encode("utf-8")), 4096)
+
+    def test_tail_text_reads_bounded_suffix_without_whole_file(self):
+        self._exercise_bounded_tail()
+
+    def test_tail_text_bounded_read_leaks_no_temp_directories(self):
+        # Regression: the original test used bare tempfile.mkdtemp() and left a
+        # 64 MiB sparse file behind on every run (76 leaked tail-bounded-* dirs).
+        pattern = "tail-bounded-*"
+        before = set(Path(tempfile.gettempdir()).glob(pattern))
+        self._exercise_bounded_tail()
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob(pattern)) - before, set())
 
     def test_refresh_job_output_accepts_completed_nonzero_command(self):
         completed = {
