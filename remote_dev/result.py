@@ -101,12 +101,27 @@ def recording_failure(payload, error, *, stage, operation_completed):
     """Preserve an observed result while exposing a later local record failure."""
     from remote_dev.core.errors import error_details
     result = payload["result"]
-    result.update(execution_outcome=result["outcome"], execution_status=result["status"],
-                  outcome="failed", status="local_recording_failed", operation_completed=operation_completed)
+    execution_outcome = result["outcome"]
+    execution_status = result["status"]
+    primary_succeeded = bool(operation_completed) and execution_outcome in {
+        "success", "cancelled", "cancellation-requested", "already-finished",
+    }
+    error_text = f"{type(error).__name__}: {error}"
+    result.update(
+        execution_outcome=execution_outcome,
+        execution_status=execution_status,
+        outcome=execution_outcome if primary_succeeded else "failed",
+        status="local_recording_failed",
+        operation_completed=operation_completed,
+    )
+    if primary_succeeded:
+        result["receipt_warning"] = error_text
+        result["receipt_unconfirmed"] = True
     result["local_recording"] = {"status": "failed", "stage": stage,
-                                 "error": f"{type(error).__name__}: {error}", "error_details": error_details(error)}
+                                 "error": error_text, "error_details": error_details(error)}
     message = "The remote result was received, but local recording failed; inspect the observed result before any further write."
     result["summary"] += " " + message
+    result.setdefault("warnings", []).append(message)
     payload["text"] += "\n" + message + "\n" + result["local_recording"]["error"] + "\n"
     return payload
 

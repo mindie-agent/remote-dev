@@ -155,16 +155,12 @@ def kimi_task_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
     limit = int(normalized.get("limit", 20))
     jobs: list[dict[str, Any]] = []
     from remote_dev.core.state_store import list_endpoint_records
-    from remote_dev.core.state_store import resolve_ledger_scope
 
-    scope = resolve_ledger_scope()
     for endpoint in list_endpoint_records():
         endpoint_id = str(endpoint.get("endpoint_id") or "")
         if not endpoint_id:
             continue
         for record in list_job_records(endpoint_id):
-            if record.get("session_scope") != scope:
-                continue
             try:
                 state, _job = _live_job(str(record.get("job_id")), strict=True)
             except (ValueError, TimeoutError, OSError) as exc:

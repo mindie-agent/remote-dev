@@ -1,25 +1,50 @@
-"""Live catalogs for a stable native MCP connection.
+"""Live catalogs and concurrent resident dispatch for a stable native MCP connection.
 
-[Role] Observe the existing selected-runtime pointer and invalidate host catalogs.
-[Invariants] Selection has one authority; notifications never replay tool calls.
-[Timeouts & Locks] One 1s watcher, serialized notifications, bounded owned helpers.
-[Side-Effect Policy] Reads bindings and runs exact selected helpers; no activation,
-task attachment, network discovery, or termination of another process.
+[Role]
+Observes the committed selected-runtime pointer, emits `notifications/tools/list_changed`,
+and dispatches concurrent MCP requests across warm resident helper workers (or an
+in-process handler) without cold per-call interpreter startups or single-call blocking.
+
+[Invariants]
+- Selection has one authority; pointer changes affect only newly dispatched calls while
+  in-flight calls finish on their selected generation without replay or cancellation.
+- Concurrent `tools/call` requests (e.g., foreground `remote_bash` alongside
+  `remote_job_status` / `remote_read` / `notifications/cancelled`) execute in parallel
+  across separate work and control thread pools without `-32000` single-flight rejection.
+
+[Timeouts & Locks]
+- One `1s` catalog watcher, serialized wire writes, `660s` tool budget (`15s` metadata
+  budget), and `5s` helper stop drain (`outer_timeout >= inner + cleanup_grace`).
+
+[Side-Effect Policy]
+- Reads committed bindings and pools owned helper processes; closes idle superseded
+  workers and drains all owned processes on transport EOF.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import contextlib
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from typing import Any, Callable
 
+from remote_dev.core.cancellation import request_context
 from remote_dev.core.local_process import OwnedProcess
 
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+_CONTROL_TOOL_SUFFIXES = (
+    "job_status", "job_tail", "job_output", "job_stop", "job_list", "job_kill",
+    "taskoutput", "taskstop", "tasklist",
+    "read", "ls", "glob", "grep", "probe", "stat", "status",
+)
+_MAX_IDLE_PER_KEY = 6
 
 
 def profile_selection(config, scripts, surface, *, config_env, plugin_env):
@@ -96,9 +121,7 @@ class CatalogRefresh:
 
 def selected_rpc(argv, message, *, env=None, timeout=660.0, cancel=None, max_output=32 * 1024 * 1024):
     """One bounded stdio exchange with the selected complete helper generation."""
-    # The caller's envelope includes the owned-tree drain, rather than adding
-    # another five seconds after the native MCP deadline has already elapsed.
-    deadline = time.monotonic() + max(.001, timeout - 5.0)
+    deadline = time.monotonic() + max(0.001, timeout - 5.0)
     with tempfile.TemporaryFile() as source, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         source.write((json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8"))
         source.seek(0)
@@ -115,7 +138,7 @@ def selected_rpc(argv, message, *, env=None, timeout=660.0, cancel=None, max_out
                 if os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > max_output:
                     raise ValueError("selected MCP helper output exceeded its capture limit")
                 try:
-                    process.wait(timeout=min(.05, max(.001, deadline - time.monotonic())))
+                    process.wait(timeout=min(0.05, max(0.001, deadline - time.monotonic())))
                 except subprocess.TimeoutExpired:
                     pass
             if os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > max_output:
@@ -147,17 +170,285 @@ def selected_rpc(argv, message, *, env=None, timeout=660.0, cancel=None, max_out
                     raise
 
 
-def serve_selected(select, *, reader=None, writer=None):
-    """Stable facade for adapters whose helper already processes one request.
+def _resident_argv(argv: list[str]) -> tuple[list[str], bool]:
+    """Map helper argv onto a persistent line-delimited stdio command when supported."""
+    items = [str(part) for part in argv]
+    if "--once" not in items:
+        return items, True
+    filtered = [part for part in items if part != "--once"]
+    for idx in range(1, len(filtered)):
+        candidate = filtered[idx]
+        if candidate.startswith("-"):
+            continue
+        if Path(candidate).name == "mcp_server.py" and idx + 1 < len(filtered):
+            prefix = filtered[:idx]
+            surface = filtered[idx + 1]
+            helper = str(Path(__file__).with_name("_resident_helper.py").resolve())
+            return [*prefix, helper, candidate, surface], True
+        break
+    return items, False
 
-    select() returns (argv, env) from one existing committed binding. Requests
-    keep that selection until completion; pointer changes only affect new calls.
+
+class _ResidentWorker:
+    """One warm persistent stdio helper process bound to a specific generation."""
+
+    def __init__(self, argv: list[str], env: dict[str, str] | None):
+        self.owner = OwnedProcess(
+            argv,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.process = self.owner.process
+        self._replies: queue.Queue[bytes | BaseException | None] = queue.Queue()
+        self._stderr_tail = bytearray()
+        self.usable = True
+        self._closed = False
+        self._stdout_thread = threading.Thread(target=self._read_stdout, daemon=True)
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stdout_thread.start()
+        self._stderr_thread.start()
+
+    def _read_stdout(self) -> None:
+        try:
+            assert self.process.stdout is not None
+            while True:
+                line = self.process.stdout.readline()
+                if not line:
+                    self._replies.put(None)
+                    return
+                self._replies.put(line)
+        except BaseException as exc:  # pragma: no cover - defensive pipe error propagation
+            self._replies.put(exc)
+
+    def _read_stderr(self) -> None:
+        try:
+            assert self.process.stderr is not None
+            while True:
+                chunk = self.process.stderr.read1(1024) if hasattr(self.process.stderr, "read1") else self.process.stderr.read(1024)
+                if not chunk:
+                    return
+                self._stderr_tail.extend(chunk)
+                del self._stderr_tail[:-2000]
+        except OSError:
+            return
+
+    def is_alive(self) -> bool:
+        return self.usable and not self._closed and self.process.poll() is None
+
+    def exchange(
+        self,
+        message: dict[str, Any],
+        *,
+        timeout: float = 660.0,
+        cancel: threading.Event | None = None,
+        max_output: int = 32 * 1024 * 1024,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + max(0.001, timeout - 5.0)
+        payload = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
+        response: dict[str, Any] | None = None
+        primary: BaseException | None = None
+        try:
+            if cancel is not None and cancel.is_set():
+                err = InterruptedError("MCP request cancelled before dispatch")
+                err.not_sent = True  # type: ignore[attr-defined]
+                raise err
+            if self.process.stdin is None or self.process.poll() is not None:
+                self.usable = False
+                raise RuntimeError("selected MCP helper exited before request dispatch")
+            self.process.stdin.write(payload)
+            self.process.stdin.flush()
+            while True:
+                if cancel is not None and cancel.is_set():
+                    self.usable = False
+                    raise InterruptedError("selected MCP helper cancelled; no automatic replay")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.usable = False
+                    raise TimeoutError("selected MCP helper timed out; no automatic replay")
+                try:
+                    item = self._replies.get(timeout=min(0.05, max(0.001, remaining)))
+                except queue.Empty:
+                    if self.process.poll() is not None and self._replies.empty():
+                        self.usable = False
+                        detail = self._stderr_tail.decode("utf-8", errors="replace")
+                        raise RuntimeError(f"selected MCP helper failed: {detail}")
+                    continue
+                if item is None:
+                    self.usable = False
+                    detail = self._stderr_tail.decode("utf-8", errors="replace")
+                    raise RuntimeError(f"selected MCP helper closed stdout: {detail}")
+                if isinstance(item, BaseException):
+                    self.usable = False
+                    raise RuntimeError(f"selected MCP helper read failed: {item}") from item
+                if len(item) > max_output:
+                    self.usable = False
+                    raise ValueError("selected MCP helper output exceeded its capture limit")
+                if not item.strip():
+                    continue
+                parsed = json.loads(item.decode("utf-8"))
+                if not isinstance(parsed, dict):
+                    self.usable = False
+                    raise ValueError("selected MCP helper returned a non-object frame")
+                if "id" not in parsed and isinstance(parsed.get("method"), str):
+                    # Ignore helper-local notifications; the outer CatalogRefresh owns notifications.
+                    continue
+                if parsed.get("id") != message.get("id"):
+                    self.usable = False
+                    raise ValueError("selected MCP helper response identity differs")
+                response = parsed
+                return response
+        except BaseException as exc:
+            primary = exc
+            self.usable = False
+            raise
+        finally:
+            if not self.usable:
+                try:
+                    self.close(timeout=5.0)
+                except Exception as exc:
+                    if primary is not None:
+                        primary.add_note("Selected helper cleanup failed: " + str(exc))
+                    elif isinstance(response, dict) and isinstance(response.get("result"), dict):
+                        res = response["result"]
+                        res.setdefault("structuredContent", {}).update(
+                            receipt_warning="Selected helper cleanup failed: " + str(exc),
+                            receipt_unconfirmed=True,
+                        )
+                    else:
+                        raise
+
+    def close(self, *, timeout: float = 5.0) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.usable = False
+        with contextlib.suppress(OSError, ValueError):
+            if self.process.stdin is not None:
+                self.process.stdin.close()
+        self.owner.stop(timeout=timeout)
+        self._stdout_thread.join(timeout=0.5)
+        self._stderr_thread.join(timeout=0.5)
+
+
+class _ResidentPool:
+    """Warm worker pool keyed by `(tuple(argv), tuple(sorted(env.items())))`."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._idle: dict[tuple[Any, ...], list[_ResidentWorker]] = {}
+        self._active_key: tuple[Any, ...] | None = None
+        self._closed = False
+
+    def call(
+        self,
+        argv: list[str],
+        env: dict[str, str] | None,
+        message: dict[str, Any],
+        *,
+        timeout: float,
+        cancel: threading.Event | None,
+    ) -> dict[str, Any]:
+        resident_cmd, supports_resident = _resident_argv(argv)
+        if not supports_resident:
+            return selected_rpc(argv, message, env=env, timeout=timeout, cancel=cancel)
+        key = (tuple(resident_cmd), tuple(sorted((env or {}).items())))
+        stale: list[_ResidentWorker] = []
+        worker: _ResidentWorker | None = None
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("MCP helper pool is shutting down")
+            if self._active_key is not None and self._active_key != key:
+                for old_key in [k for k in list(self._idle) if k != key]:
+                    stale.extend(self._idle.pop(old_key, ()))
+            self._active_key = key
+            bucket = self._idle.get(key) or []
+            while bucket:
+                candidate = bucket.pop()
+                if candidate.is_alive():
+                    worker = candidate
+                    break
+                stale.append(candidate)
+        for old in stale:
+            with contextlib.suppress(Exception):
+                old.close(timeout=2.0)
+        if worker is None:
+            worker = _ResidentWorker(resident_cmd, env)
+        try:
+            return worker.exchange(message, timeout=timeout, cancel=cancel)
+        finally:
+            retire = False
+            with self._lock:
+                if self._closed or not worker.is_alive() or self._active_key != key:
+                    retire = True
+                else:
+                    bucket = self._idle.setdefault(key, [])
+                    if len(bucket) >= _MAX_IDLE_PER_KEY:
+                        retire = True
+                    else:
+                        bucket.append(worker)
+            if retire:
+                with contextlib.suppress(Exception):
+                    worker.close(timeout=2.0)
+
+    def retire_superseded(self, current_key: tuple[Any, ...]) -> None:
+        stale: list[_ResidentWorker] = []
+        with self._lock:
+            self._active_key = current_key
+            for old_key in [k for k in list(self._idle) if k != current_key]:
+                stale.extend(self._idle.pop(old_key, ()))
+        for old in stale:
+            with contextlib.suppress(Exception):
+                old.close(timeout=2.0)
+
+    def close(self) -> None:
+        stale: list[_ResidentWorker] = []
+        with self._lock:
+            self._closed = True
+            for workers in self._idle.values():
+                stale.extend(workers)
+            self._idle.clear()
+        for worker in stale:
+            with contextlib.suppress(Exception):
+                worker.close(timeout=2.0)
+
+
+def _is_short_control_call(message: dict[str, Any]) -> bool:
+    if message.get("method") != "tools/call":
+        return True
+    params = message.get("params")
+    if not isinstance(params, dict):
+        return False
+    name = str(params.get("name") or "").lower()
+    if name.endswith(("job_stdin", "write_stdin")):
+        args = params.get("arguments")
+        args = args if isinstance(args, dict) else {}
+        delay = args.get("yield_time_ms")
+        if delay is None:
+            delay = 250 if args.get("chars") or args.get("eof") else 1000
+        return isinstance(delay, (int, float)) and 0 <= delay <= 250
+    return name.endswith(_CONTROL_TOOL_SUFFIXES)
+
+
+def serve_selected(
+    select,
+    *,
+    reader=None,
+    writer=None,
+    handler: Callable[[dict[str, Any], threading.Event | None], dict[str, Any]] | None = None,
+):
+    """Concurrent MCP stdio gateway over a selected runtime generation or in-process handler.
+
+    `select()` returns `(argv, env)` from one committed binding (or `(callable, env)`
+    when in-process). Concurrent requests run in parallel across work and control
+    lanes without single-flight `-32000` blocking or cold per-request Python startups.
     """
     reader, writer = reader or sys.stdin, writer or sys.stdout
     output_lock = threading.Lock()
-    cancellation = threading.Event()
-    worker = None
-    request_id = None
+    pending_lock = threading.Lock()
+    pending: dict[Any, threading.Event] = {}
+    pool = _ResidentPool()
 
     def send(value):
         with output_lock:
@@ -165,34 +456,63 @@ def serve_selected(select, *, reader=None, writer=None):
             writer.flush()
 
     def revision():
-        argv, env = select()
-        return tuple(argv), tuple(sorted((env or {}).items()))
+        target, env = select()
+        env_key = tuple(sorted((env or {}).items()))
+        if callable(target):
+            return (id(target), env_key)
+        resident_cmd, supports_resident = _resident_argv(target)
+        key = (tuple(resident_cmd if supports_resident else target), env_key)
+        if supports_resident:
+            pool.retire_superseded(key)
+        return tuple(target), env_key
 
     refresh = CatalogRefresh(revision, send)
 
-    def dispatch(message, cancel):
+    def dispatch(message: dict[str, Any], cancel: threading.Event | None) -> None:
         stage = "select_runtime"
+        request_id = message.get("id")
         try:
-            argv, env = select()
-            stage = "dispatch_helper"
-            response = selected_rpc(
-                argv, message, env=env, cancel=cancel,
-                timeout=660 if message.get("method") == "tools/call" else 15,
-            )
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("MCP request cancelled before dispatch")
+            if handler is not None:
+                stage = "dispatch_helper"
+                with request_context(cancel or threading.Event()):
+                    response = handler(message, cancel)
+            else:
+                target, env = select()
+                if cancel is not None and cancel.is_set():
+                    raise InterruptedError("MCP request cancelled before dispatch")
+                stage = "dispatch_helper"
+                timeout = 660.0 if message.get("method") == "tools/call" else 15.0
+                if callable(target):
+                    with request_context(cancel or threading.Event()):
+                        response = target(message, cancel)
+                else:
+                    response = pool.call(
+                        target, env, message, timeout=timeout, cancel=cancel,
+                    )
         except Exception as exc:
-            response = {"jsonrpc": "2.0", "id": message["id"], "result": {
+            not_sent = stage != "dispatch_helper" or bool(getattr(exc, "not_sent", False))
+            response = {"jsonrpc": "2.0", "id": request_id, "result": {
                 "isError": True, "content": [{"type": "text", "text": str(exc)}],
                 "structuredContent": {
                     "error_type": type(exc).__name__, "automatic_retry": False,
                     "stage": stage,
                     "status": "cancelled" if isinstance(exc, InterruptedError) else "helper_failed",
-                    "execution": ("outcome_unconfirmed" if stage == "dispatch_helper"
+                    "execution": ("outcome_unconfirmed" if not not_sent
                                   and message.get("method") == "tools/call" else "not_started"),
                 },
             }}
+        finally:
+            if request_id is not None:
+                with pending_lock:
+                    pending.pop(request_id, None)
         refresh.check()
-        send(response)
+        if response is not None:
+            send(response)
 
+    work_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="mindie-mcp-work")
+    control_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="mindie-mcp-ctrl")
     try:
         for line in reader:
             if not line.strip():
@@ -206,34 +526,46 @@ def serve_selected(select, *, reader=None, writer=None):
                 continue
             method = message.get("method")
             if method == "notifications/cancelled":
-                if (message.get("params") or {}).get("requestId") == request_id:
-                    cancellation.set()
+                cancelled_id = (message.get("params") or {}).get("requestId")
+                with pending_lock:
+                    cancel_event = pending.get(cancelled_id)
+                if cancel_event is not None:
+                    cancel_event.set()
                 continue
             if "id" not in message:
                 continue
+            request_id = message["id"]
             if method == "initialize":
-                argv, env = select()
-                response = selected_rpc(argv, message, env=env, timeout=15)
-                response["result"].setdefault("capabilities", {})["tools"] = {"listChanged": True}
+                if handler is not None:
+                    response = handler(message, None)
+                else:
+                    target, env = select()
+                    if callable(target):
+                        response = target(message, None)
+                    else:
+                        response = pool.call(target, env, message, timeout=15.0, cancel=None)
+                response.setdefault("result", {}).setdefault("capabilities", {})["tools"] = {"listChanged": True}
                 send(response)
                 refresh.start()
             elif method == "ping":
-                send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
-            elif method == "tools/call":
-                if worker is not None and worker.is_alive():
-                    send({"jsonrpc": "2.0", "id": message["id"],
-                          "error": {"code": -32000, "message": "component call already running; not executed"}})
-                    continue
-                cancellation, request_id = threading.Event(), message["id"]
-                worker = threading.Thread(target=dispatch, args=(message, cancellation), daemon=True)
-                worker.start()
+                send({"jsonrpc": "2.0", "id": request_id, "result": {}})
             else:
-                dispatch(message, None)
+                cancel_event = threading.Event()
+                with pending_lock:
+                    if request_id in pending:
+                        send({"jsonrpc": "2.0", "id": request_id,
+                              "error": {"code": -32600, "message": "request id is already running"}})
+                        continue
+                    pending[request_id] = cancel_event
+                executor = control_executor if _is_short_control_call(message) else work_executor
+                executor.submit(dispatch, message, cancel_event)
     finally:
         refresh.close()
-        cancellation.set()
-        if worker is not None:
-            worker.join(timeout=6)
-            if worker.is_alive():
-                raise TimeoutError("selected MCP call did not drain after cancellation")
+        with pending_lock:
+            active_events = list(pending.values())
+        for event in active_events:
+            event.set()
+        control_executor.shutdown(wait=True)
+        work_executor.shutdown(wait=True)
+        pool.close()
     return 0

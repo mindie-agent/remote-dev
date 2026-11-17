@@ -36,22 +36,13 @@ def _job_record(job_id: str) -> dict[str, Any]:
     return record
 
 def _assert_visible(record: dict[str, Any]) -> None:
-    from remote_dev.core.errors import caller_error as _caller_error
-    from remote_dev.core.state_store import resolve_ledger_scope
+    """Explicit job_id handles resolve across connections/subagents within one user profile.
 
-    scope = resolve_ledger_scope()
-    recorded = record.get("session_scope")
-    if not recorded:
-        raise _caller_error(
-            f"job {record.get('job_id')} predates trusted session scoping; "
-            "refusing native cross-session visibility",
-            PermissionError,
-        )
-    if recorded != scope:
-        raise _caller_error(
-            f"job {record.get('job_id')} belongs to a different session; refusing cross-session control",
-            PermissionError,
-        )
+    `session_scope` remains optional correlation metadata on the persisted job
+    record; never reject cross-connection or subagent polling/stopping (`P2.7`).
+    """
+    del record
+    return None
 
 def _record_output_path(record: dict[str, Any], stream: str = "stdout") -> str | None:
     remote_dir = record.get("remote_dir")

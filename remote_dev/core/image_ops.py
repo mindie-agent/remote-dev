@@ -28,18 +28,20 @@ import pathlib
 import sys
 
 request = json.loads(sys.stdin.read())
+root = pathlib.Path(request.get("root") or "/").resolve()
 path = pathlib.Path(request["path"])
 limit = int(request["max_bytes"])
 region = request.get("region")
 max_edge = request.get("max_edge")
-if path.is_symlink():
-    print(json.dumps({"status": "symlink_not_allowed", "error": "refusing to read a symlink as an image"})); raise SystemExit(0)
-if not path.is_file():
+resolved = path.resolve()
+if resolved != root and root not in resolved.parents:
+    print(json.dumps({"status": "path_outside_root", "error": f"remote image path escapes root: {resolved}"})); raise SystemExit(0)
+if not resolved.is_file():
     print(json.dumps({"status": "not_file", "error": "remote image path is not a regular file"})); raise SystemExit(0)
-size = path.stat().st_size
+size = resolved.stat().st_size
 if size > limit:
     print(json.dumps({"status": "too_large", "error": f"image is {size} bytes, over the {limit}-byte bound", "size": size})); raise SystemExit(0)
-data = path.read_bytes()
+data = resolved.read_bytes()
 if data.startswith(b"\x89PNG\r\n\x1a\n"):
     mime = "image/png"
 elif data.startswith(b"\xff\xd8\xff"):
@@ -137,7 +139,7 @@ def remote_read_image(
     data = run_remote_python(
         endpoint,
         REMOTE_IMAGE_PY,
-        {"path": path, "max_bytes": int(max_bytes), "region": region, "max_edge": max_edge},
+        {"root": endpoint.root, "path": path, "max_bytes": int(max_bytes), "region": region, "max_edge": max_edge},
         timeout_ms=timeout_ms,
     )
     status = str(data.get("status") or "failed")

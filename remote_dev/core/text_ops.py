@@ -1,7 +1,7 @@
 """
 [Role] Bounded UTF-8 text fetch for native notebook/attachment renderers (`text_ops.py`).
 [Invariants]
-- Resolves under the endpoint root/cwd, refuses symlinks, and reads at most max_bytes.
+- Resolves under the endpoint root/cwd, allows valid symlinks within root while rejecting escapes, and reads at most max_bytes.
 [Timeouts & Locks]
 - Single remote Python call; forwards the caller timeout.
 [Side-Effect Policy]
@@ -23,16 +23,18 @@ import json
 import pathlib
 import sys
 request = json.loads(sys.stdin.read())
+root = pathlib.Path(request.get("root") or "/").resolve()
 path = pathlib.Path(request["path"])
 limit = int(request["max_bytes"])
-if path.is_symlink():
-    print(json.dumps({"status": "symlink_not_allowed", "error": "refusing to read a symlink"})); raise SystemExit(0)
-if not path.is_file():
+resolved = path.resolve()
+if resolved != root and root not in resolved.parents:
+    print(json.dumps({"status": "path_outside_root", "error": f"remote path escapes root: {resolved}"})); raise SystemExit(0)
+if not resolved.is_file():
     print(json.dumps({"status": "not_file", "error": "remote path is not a regular file"})); raise SystemExit(0)
-size = path.stat().st_size
+size = resolved.stat().st_size
 if size > limit:
     print(json.dumps({"status": "too_large", "error": f"file is {size} bytes, over the {limit}-byte bound", "size": size})); raise SystemExit(0)
-data = path.read_bytes()
+data = resolved.read_bytes()
 if b"\x00" in data[:8192]:
     print(json.dumps({"status": "binary_file", "error": "file is not UTF-8 text", "size": size})); raise SystemExit(0)
 print(json.dumps({"status": "ok", "size": size, "text": data.decode("utf-8", errors="replace")}))
@@ -61,7 +63,7 @@ def remote_read_utf8_text(
         )
         return {"text": result["summary"] + "\n" + str(exc) + "\n", "result": result}
     data = run_remote_python(
-        endpoint, REMOTE_TEXT_PY, {"path": path, "max_bytes": int(max_bytes)}, timeout_ms=timeout_ms
+        endpoint, REMOTE_TEXT_PY, {"root": endpoint.root, "path": path, "max_bytes": int(max_bytes)}, timeout_ms=timeout_ms
     )
     status = str(data.get("status") or "failed")
     if status != "ok":

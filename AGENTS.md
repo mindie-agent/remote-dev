@@ -1,54 +1,49 @@
-# Remote Dev (`remote-dev`) — Agent-Native Architecture & Invariants
+# Remote Dev (`remote-dev`) — Control-Plane Architecture & Invariants
 
-`remote-dev` provides the shared remote workspace substrate (19 canonical `remote.*` tools + 60 native 6-Harness aliases over SSH JSON-RPC, durable background job supervision, and hash-verified binary artifact streaming) for MindIE Agent.
+Shared SSH workspace, durable background job supervision, and 7-Harness MCP substrate (`control-plane` repository class) for MindIE Agent.
 
-## 1. Module Navigation & Responsibilities
+## 1. Domain Boundary & Five Iron Rules
 
-| Module | Role | Key Entry Points |
-| :--- | :--- | :--- |
-| `remote_dev/mcp/tools.py` & `schemas.py` | MCP tool dispatcher, `remote://` resource reader, and 6-Harness alias normalizer (19 canonical tools + 60 native tool aliases across Claude Code, Codex, Kimi, Cursor, Antigravity, DSH) | `call_tool()`, `list_tools()`, `normalize_arguments()` |
-| `remote_dev/mcp/server.py` | Stdio JSON-RPC 2.0 MCP server (`Content-Length` framed & newline-delimited) with dedicated short-control thread pool | `main()`, `Dispatcher`, `handle()` |
-| `remote_dev/cli.py` | Unified CLI entry point (`remote-dev <tool>`) sharing the MCP schema and dispatcher | `main()`, `run_tool()` |
-| `remote_dev/auth/` | Sole owner of user-scoped SSH profiles, credential providers, enrollment and pre-dispatch key repair; coordinator and npu-top consume this API | `setup_access()`, `prepare_auth()`, `auth_status()`, `forget_access()` |
-| `remote_dev/core/file_ops.py` & `remote_file_worker.py` | Remote `read`/`ls`/`write`/`edit`/`multi_edit` with read-ledger SHA-256 optimistic concurrency; `remote_file_worker.py` is a standalone `.py` file loaded via `lru_cache` | `remote_read()`, `remote_write()`, `remote_edit()`, `remote_multi_edit()`, `remote_ls()` |
-| `remote_dev/core/rpc_transport.py` & `processes/rpc_worker.py` | Pooled binary-pipe SSH JSON-RPC transport (`_POOL_LIMIT=32`) and remote `python3 -I` worker | `request()`, `RpcConnection`, `close_connections()` |
-| `remote_dev/core/job_ops.py`, `processes/worker.py` & `processes/worker_runtime.py` | Durable remote background job supervisor (`prepare`/`go`/`launch`/`exchange`/`status`/`tail`/`stop`), capped ring logs with honest logical offsets, and bounded terminal-job GC | `start_remote_job()`, `remote_job_status()`, `remote_job_stdin()`, `remote_job_stop()`, `remote_job_tail()` |
-| `remote_dev/core/artifact_ops.py`, `artifact_transport.py` & `processes/artifact_worker.py` | SHA-256 manifest generation and chunked binary `pull`/`push` over an independent SSH channel (`ssh_mux=False, keepalive=True`) | `remote_artifact_manifest()`, `remote_artifact_pull()`, `remote_artifact_push()`, `ArtifactStream` |
-| `remote_dev/core/patch_ops.py` & `search_ops.py` | Atomic multi-file Codex `apply_patch` / unified-diff transactions with rollback (`patch_ops.py`), and `rg` / `grep -E` workspace search (`search_ops.py`) | `remote_apply_patch()`, `remote_glob()`, `remote_grep()` |
-| `remote_dev/core/ssh_transport.py` & `local_process.py` | SSH argv construction (all options before `--`), ControlMaster policy, attached streams (`run_stream`), `-N -L` port forwards (`open_local_forward`), and `OwnedProcess` group/Job-Object lifecycle | `ssh_command()`, `run_script()`, `run_stream()`, `open_local_forward()`, `OwnedProcess` |
-| `remote_dev/diagnostics.py` | Read-only two-stage SSH connection diagnostic (`diagnose_ssh`: Stage 1 mux `60%` vs Stage 2 independent `>= 40%`) | `diagnose_ssh()`, `http_connection()` |
-| `remote_dev/core/state_store.py`, `retention.py`, `locking.py` & `atomic.py` | Endpoint/context-scoped local records, bounded 7/14-day retention (`reads`/`logs`/terminal `jobs`), cross-thread/process `record_lock` (`RLock` + `flock`/`msvcrt`), and `os.replace()` atomic file publication | `write_read_ledger()`, `maybe_prune_endpoint_state()`, `prune_stale_session_runtime_dirs()`, `record_lock()`, `serialize_mutation()` |
+1. **Shared SSH Auth, Concurrency Ledgers & External Contracts**:
+   - `remote_dev/auth/` is the sole owner of user-scoped SSH profiles (`~/.mindie/ssh/credentials.json`) consumed by `coordinator` and `npu-top`.
+   - Preserve all external import paths (`ssh_forward.py` re-exports in `ssh_transport.py`, `tools/validate_remote_dev_scaffold.py`, `wb_native_compat.py`), optimistic read-ledger SHA-256 hashes, and atomic multi-file patch rollback.
+2. **Zero Session-Binding Gates & Concurrent MCP Dispatch (`P2.7`, `AD-02`, `AD-03`)**:
+   - Standard zero-`_meta` MCP `tools/call` works without prior session hooks or required `request_nonce`.
+   - Explicit `job_id` handles resolve across MCP reconnections and subagents within the user profile (`_assert_visible` never raises cross-session `PermissionError`; `session_scope` is correlation metadata only).
+   - `catalog_refresh.serve_selected` dispatches concurrent `tools/call` requests across warm resident helper pools (work + control lanes) without `-32000` single-flight blocks or cold per-call `python -I --once` startups.
+3. **Standalone Pure-Stdlib Workers, Streaming I/O & Event-Driven Supervision (`Iron Rule 4`, `Principle 18`)**:
+   - All 12 remote worker modules (`remote_file_worker.py`, `remote_file_text.py`, `search_worker.py`, `patch_worker.py`, `worker.py`, `worker_runtime.py`, `worker_gc.py`, `artifact_worker.py`, `python_inventory.py`, `mutation.py`, `probe.py`, `rpc_worker.py`) use 100% Python stdlib (`python3 -I` safe), and the compressed Windows SSH `rpc_worker.py` + `mutation.py` bootstrap stays strictly `< 8191` chars.
+   - File/artifact SHA-256 digests stream in `64 KiB` chunks with valid in-root symlink and `.git` linked-worktree support (`AD-07`) while blocking out-of-root symlink escapes and destination symlink overwrites.
+   - Local `_posix_owner.py` and remote `worker.py` / `worker_runtime.py` use `selectors.DefaultSelector` + wakeup pipes/signals instead of `20 Hz` / `100 Hz` sleep spin-loops.
+4. **External-Effect & Receipt Honesty (`Principles 9 & 14`, Iron Rule 2)**:
+   - Never replay an `uncertain` mutation; always place `except TimeoutError: raise` before `except OSError:`.
+   - `dsh_bash` inspects failed/uncertain launch outcomes before returning background job handles.
+   - When a primary remote operation completes (`operation_completed=True`), `recording_failure()` preserves `outcome="success"` (`isError=False`) and attaches `receipt_warning` + `receipt_unconfirmed=True`.
+5. **Bounded Local & Remote Retention (`Principle 18`)**:
+   - `prune_endpoint_state()` bounds `reads/`, `logs/`, terminal `jobs/`, `context/` (protecting `latest.json` and its `full_probe`), `artifacts/` (protecting `< 60s` transfers), and `patches/`.
+   - `prune_stale_session_runtime_dirs()` verifies dead PIDs without `os.kill(pid, 0)` on Windows and checks both POSIX `flock` and Windows `CreateFileW(dwShareMode=0)` + `msvcrt.locking(LK_NBLCK)`, never deleting SQLite receipt stores.
 
-## 2. Core State, Concurrency & Timeout Invariants (`v0.0.2` Iron Rules)
+## 2. Module Navigation
 
-1. **Timeout Arithmetic & Multi-Stage Isolation**:
-   - **Job Stop Drain**: `job_ops.py` and `processes/worker.py` enforce `STOP_DRAIN_SECONDS >= STOP_GRACE_SECONDS + 3.0` (`max(5.0, grace + 3.0)` locally; `15.0 >= 10.0 + 3.0` on the worker) so `SIGTERM` group draining completes before `SIGKILL` escalation and outer poll cutoff.
-   - **RPC Handshake Deadline**: `rpc_transport.py` computes `acquire_deadline` at `request()` entry and enforces it across both `_acquire()` pool waiting and `RpcConnection.request()` worker readiness (`self.ready.wait`), preventing hangs on half-open SSH connections.
-   - **Two-Stage SSH Diagnostic**: `diagnostics.diagnose_ssh()` splits `timeout_ms` into Stage 1 (`60%`, multiplexed) and Stage 2 (`max(2000ms, 40%)`, independent `ssh_mux=False`) so a hung `ControlMaster` socket never starves the fallback probe.
-2. **Remote `python3 -I` Isolation & Standalone Worker Modules (Iron Rule 4)**:
-   - All remote Python workers (`rpc_worker.py`, `worker.py`, `artifact_worker.py`, `CONNECTION_PROBE_SCRIPT`) execute under `python3 -I` so files in the remote login directory or workspace never shadow Python stdlib modules.
-   - `remote_file_worker.py` is maintained as a standalone `.py` module loaded via `functools.lru_cache(maxsize=1)` in `file_ops.py`.
-3. **External-Effect Honesty (`not_sent` / `acknowledged` / `uncertain`) (Iron Rule 2 & Principle 14)**:
-   - Never automatically retry a submitted remote mutation or job launch.
-   - Pre-dispatch failures set `submission_state="not_sent"` (`retryable=True` when transient); post-write disconnects/timeouts on mutating calls set `submission_state="uncertain"`.
-   - If a remote operation succeeds (`acknowledged`) but local read-ledger, cursor, or snapshot recording fails, `recording_failure()` preserves `operation_completed=True` and `execution_outcome="success"` while surfacing `status="local_recording_failed"`.
-4. **Lightweight Atomic Persistence & Locking (Iron Rule 3)**:
-   - Local and remote file replacements use sibling temp files + `fsync` + `os.replace()` (`atomic.replace_file`), without redundant `lstat`/`fstat` ownership ceremonies or shadow state machines.
-   - Long job output polls (`yield_time_ms > 250` in `remote_job_stdin`) snapshot the cursor and wait outside `record_lock(path)` so concurrent `stdin` writes or `job_stop` calls never block behind a waiting reader.
-5. **Bounded Storage & Terminal-Only Retention**:
-   - Remote `<root>/.remote-dev/jobs` keeps each stream at `spec.max_log_bytes` (default 256 MiB) through `worker_runtime.CappedLog` and prunes only UID-owned, lock-free, definitively terminal jobs (`7 days` / `128` / `2 GiB`); `running`, `unknown`, and `retain_until_release` jobs are never removed.
-   - Local `state/endpoints/<id>/` prunes `reads`/`logs` (`7 days` / `256` / `128 MiB`) and confirmed-terminal `jobs` (`14 days` / `128` / `256 MiB`); `prune_stale_session_runtime_dirs()` preserves any directory containing a SQLite receipt store.
+- `remote_dev/mcp/server.py`, `tools.py`, `schemas.py`, `catalog_refresh.py`, `_resident_helper.py`: Concurrent stdio MCP server, 7-Harness alias normalization, and warm generation-aware resident gateway.
+- `remote_dev/mcp/native_handlers_*.py`, `native_common.py`, `wb_native_compat.py`: Harness-native adapters (`codex`, `claude`, `kimi`, `dsh`, `wb`).
+- `remote_dev/auth/`: Shared SSH key enrollment, credential store, and pre-dispatch verification.
+- `remote_dev/core/ssh_transport.py`, `ssh_stream.py`, `ssh_forward.py`, `rpc_transport.py`, `local_process.py`, `_posix_owner.py`: SSH argv/ControlMaster policy, binary RPC pool, port forwards, and owned process-group / Windows Job supervision.
+- `remote_dev/core/file_ops.py`, `patch_ops.py`, `artifact_ops.py`, `search_ops.py`, `job_ops.py`, `shell_ops.py`: Remote workspace operations and durable job control.
+- `remote_dev/core/state_store.py`, `retention.py`, `session_retention.py`, `windows_probe.py`: Atomic local state and cross-platform bounded GC.
 
-## 3. Verification Commands
+## 3. Verification & Pre-PR Gate
 
-Run the local unit + property test suite:
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) ([English](CONTRIBUTING.en.md)) before submitting changes:
 
 ```bash
-pytest -q
-```
+# Local isolated Tier 0/1 suite
+pytest -q -m "not live_npu"
 
-Run the live non-destructive integration suite against standing A2 (`173.125.1.2`) and A3 (`192.168.13.165`) Ascend NPU clusters:
-
-```bash
+# Standing A2 (173.125.1.2) & A3 (192.168.13.165) non-destructive Tier 2 suite (never use .153)
 REMOTE_DEV_LIVE_NPU=1 pytest tests/test_live_npu_endpoints.py -q
+
+# Unix LF line-ending & control-plane PR checklist gates
+python3 .github/scripts/check_lf_eol.py
+python3 .github/scripts/check_pr_checklist.py --profile control-plane --body-file <pr_body.md>
 ```

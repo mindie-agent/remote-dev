@@ -206,23 +206,31 @@ def _session_result(endpoint, record, path, row, *, tool, started, start, budget
 
 def _recording_failure(endpoint, record, path, row, error, *, tool, started, start, budget, preserve_full_page=False):
     """An acknowledged remote result survives a failed local output commit."""
+    error_text = f"{type(error).__name__}: {error}"
     payload = _session_result(
         endpoint, record, path, row, tool=tool, started=started, start=start, budget=budget,
-        local_cache_error=f"{type(error).__name__}: {error}",
+        local_cache_error=error_text,
         preserve_full_page=preserve_full_page,
     )
     result = payload["result"]
-    result["execution_outcome"] = result["outcome"]
+    execution_outcome = result["outcome"]
+    completed = bool(row.get("quiet")) and row.get("state") in TERMINAL_JOB_STATES
+    primary_succeeded = completed and execution_outcome in {
+        "success", "cancelled", "cancellation-requested", "already-finished",
+    }
+    result["execution_outcome"] = execution_outcome
     result["execution_status"] = result["status"]
-    result["outcome"] = "failed"
+    result["outcome"] = execution_outcome if primary_succeeded else "failed"
     result["status"] = "local_recording_failed"
     result["session_id"] = record["job_id"]
+    if primary_succeeded:
+        result["receipt_warning"] = error_text
+        result["receipt_unconfirmed"] = True
     result["local_recording"] = {
-        "status": "failed", "error": f"{type(error).__name__}: {error}",
+        "status": "failed", "error": error_text,
         "error_details": error_details(error),
         "observed_cursors": {name + "_offset": row.get(name + "_offset") for name in ("stdout", "stderr")},
     }
-    completed = bool(row.get("quiet")) and row.get("state") in TERMINAL_JOB_STATES
     result["operation_completed"] = completed
     result.setdefault("error_details", {"category": "local_recording", "submission_state": "acknowledged", "retryable": False})
     result["error_details"]["operation_completed"] = completed

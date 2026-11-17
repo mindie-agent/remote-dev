@@ -97,13 +97,19 @@ def sha256_bytes(data: bytes) -> str:
 
 def file_info(path: pathlib.Path, *, content: bytes | None = None) -> dict[str, object]:
     st = path.stat()
-    data = path.read_bytes() if content is None else content
+    if content is None:
+        digest = _stream_sha256(path)
+        size = st.st_size
+    else:
+        digest = sha256_bytes(content)
+        size = len(content)
     return {
         "path": str(path),
         "resolved_path": str(path.resolve()),
-        "sha256": sha256_bytes(data),
-        "size": len(data),
+        "sha256": digest,
+        "size": size,
         "mtime_ns": st.st_mtime_ns,
+        "symlink": path.is_symlink(),
     }
 
 
@@ -144,14 +150,14 @@ def main() -> None:
 
     if op == "stat":
         path, resolved = resolve_path(payload["file_path"], root, cwd)
-        if not path.exists() and not path.is_symlink():
-            print(json.dumps({"status": "missing", "path": str(path), "exists": False}, sort_keys=True))
+        if not path.exists():
+            if path.is_symlink():
+                print(json.dumps({"status": "dangling_symlink", "path": str(path), "exists": False, "is_symlink": True}, sort_keys=True))
+            else:
+                print(json.dumps({"status": "missing", "path": str(path), "exists": False}, sort_keys=True))
             raise SystemExit(0)
-        if path.is_symlink():
-            print(json.dumps({"status": "symlink", "path": str(path), "exists": True, "is_file": path.is_file()}, sort_keys=True))
-            raise SystemExit(0)
-        info = file_info(path) if path.is_file() else {"path": str(path)}
-        print(json.dumps({"status": "ok", "path": str(path), "exists": True, "is_file": path.is_file(), **info}, sort_keys=True))
+        info = file_info(path) if path.is_file() else {"path": str(path), "resolved_path": str(resolved), "symlink": path.is_symlink()}
+        print(json.dumps({"status": "ok", "path": str(path), "exists": True, "is_file": path.is_file(), "is_symlink": path.is_symlink(), **info}, sort_keys=True))
         raise SystemExit(0)
 
     if op == "read":
@@ -391,27 +397,53 @@ def main() -> None:
                 raise SystemExit(0)
 
         if content_offset > 0 and offset == 1 and start_line is None:
-            raw_bytes = path.read_bytes()
-            if b"\x00" in raw_bytes[:8192]:
-                fail("binary_file", "remote.read returns UTF-8 text; use remote.artifact_pull for binary/image files")
+            hasher = hashlib.sha256() if verify else None
+            base_line = 0
+            total_newlines = 0
+            last_byte = b""
+            selected = []
+            has_more_lines = False
+            with path.open("rb") as fh:
+                head = fh.read(8192)
+                if b"\x00" in head:
+                    fail("binary_file", "remote.read returns UTF-8 text; use remote.artifact_pull for binary/image files")
+                fh.seek(0)
+                pos = 0
+                while True:
+                    chunk = fh.read(65536)
+                    if not chunk:
+                        break
+                    if hasher is not None:
+                        hasher.update(chunk)
+                    total_newlines += chunk.count(b"\n")
+                    last_byte = chunk[-1:]
+                    if pos < content_offset:
+                        prefix_take = min(len(chunk), content_offset - pos)
+                        base_line += chunk[:prefix_take].count(b"\n")
+                    pos += len(chunk)
+                total = (0 if pos == 0 else total_newlines + (0 if last_byte == b"\n" else 1))
+                if content_offset < pos:
+                    fh.seek(content_offset)
+                    for idx in range(base_line + 1, base_line + limit + 2):
+                        raw_line = fh.readline()
+                        if not raw_line:
+                            break
+                        if len(selected) >= limit:
+                            has_more_lines = True
+                            break
+                        line_text = raw_line.rstrip(b"\r\n").decode("utf-8", errors="replace")
+                        clipped = len(line_text) > max_line_chars
+                        selected.append((idx, line_text[:max_line_chars], clipped))
             after = path.stat()
             if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
                 fail("file_changed", "file changed during read; retry to obtain a consistent read")
-            digest_hex = sha256_bytes(raw_bytes) if verify else None
-            total = len(raw_bytes.decode("utf-8", errors="replace").splitlines())
-            sliced_bytes = raw_bytes[content_offset:]
-            base_line = raw_bytes[:content_offset].count(b"\n")
-            sliced_lines = sliced_bytes.decode("utf-8", errors="replace").splitlines()
-            selected = []
-            for idx, line_text in enumerate(sliced_lines[:limit], base_line + 1):
-                clipped = len(line_text) > max_line_chars
-                selected.append((idx, line_text[:max_line_chars], clipped))
+            digest_hex = hasher.hexdigest() if hasher is not None else None
             truncated_lines = sum(clipped for _, _, clipped in selected)
             numbered = "\n".join(f"{index} | {body}" + ("<remote-dev line truncated>" if clipped else "")
                                  for index, body, clipped in selected)
             line_start = selected[0][0] if selected else 0
             line_end = selected[-1][0] if selected else 0
-            partial = content_offset > 0 or len(sliced_lines) > limit
+            partial = content_offset > 0 or has_more_lines
             info = {"path": str(path), "resolved_path": str(resolved), "size": after.st_size,
                     "mtime_ns": after.st_mtime_ns, "sha256": digest_hex,
                     "total_lines": total, "offset": line_start or 1, "limit": limit,

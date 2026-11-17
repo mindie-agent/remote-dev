@@ -26,7 +26,7 @@ from remote_dev.result import make_result, utc_now_iso
 from .ssh_transport import run_script
 from .runtime_env import runtime_env_lines
 from .path_policy import assert_under_root
-from .state_store import atomic_write_json, ensure_endpoint_state
+from .state_store import atomic_write_json, ensure_endpoint_state, maybe_prune_endpoint_state
 
 
 @lru_cache(maxsize=1)
@@ -112,9 +112,10 @@ def write_context_snapshot(endpoint: Endpoint, summary: dict[str, Any], full_pro
     }
     stamp = payload["created_at"].replace(":", "").replace("-", "")
     full_path = base / f"context-{stamp}.json"
+    payload["refs"]["full_probe"] = str(full_path)
     atomic_write_json(full_path, payload if full_probe is None else {**payload, "full_probe": full_probe})
     atomic_write_json(base / "latest.json", payload)
-    payload["refs"]["full_probe"] = str(full_path)
+    maybe_prune_endpoint_state(endpoint)
     return payload
 
 
@@ -202,9 +203,12 @@ def remote_probe(endpoint: Endpoint, *, timeout_ms: int | None = None, diagnose_
         text += result["next"]["message"] + "\n"
     if recording_error:
         execution_outcome, execution_status = result["outcome"], result["status"]
-        result.update(outcome="failed", status="local_recording_failed", operation_completed=True,
+        primary_succeeded = execution_outcome == "success"
+        result.update(outcome=execution_outcome if primary_succeeded else "failed",
+                      status="local_recording_failed", operation_completed=True,
                       execution_outcome=execution_outcome, execution_status=execution_status,
                       recording_error=recording_error,
+                      **({"receipt_warning": recording_error, "receipt_unconfirmed": True} if primary_succeeded else {}),
                       summary="Remote probe completed, but the local context snapshot could not be recorded.")
         text += result["summary"] + "\n" + recording_error + "\n"
     return {"text": text, "result": result}

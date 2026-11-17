@@ -26,6 +26,9 @@ import contextlib
 import fcntl
 import json
 import os
+import selectors
+import signal
+import time
 import uuid
 from pathlib import Path
 
@@ -456,3 +459,102 @@ def read_log_window(directory, stream, start_logical, max_bytes, *, tail_bytes=N
         if handle is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
+
+
+def summarize_log_accounting(max_log_bytes, stdout_log, stderr_log):
+    """Build final `logs` summary dictionary for `result.json`."""
+    accounting = {"max_log_bytes": max_log_bytes}
+    for name, log in (("stdout", stdout_log), ("stderr", stderr_log)):
+        previous = _file_size(log.prev_path)
+        current = _file_size(log.path)
+        accounting[name] = {
+            "logical_bytes_written": log.logical_bytes_written,
+            "truncated_head_bytes": log.truncated_head_bytes,
+            "generation": log.generation,
+            "retained_bytes": previous + current,
+            "previous_bytes": previous,
+            "current_bytes": current,
+            "rotated": bool(previous),
+        }
+        if log.accounting_warning:
+            accounting[name]["accounting_warning"] = log.accounting_warning
+    warnings = [log.accounting_warning for log in (stdout_log, stderr_log) if log.accounting_warning]
+    if warnings:
+        accounting["accounting_warning"] = "; ".join(warnings)
+    return accounting
+
+
+def nudge_supervisor(directory):
+    """Wake an active verified supervisor via `SIGUSR1` only if it advertised support."""
+    base = Path(directory)
+    ready = read_json(base / "supervisor-ready.json")
+    if not ready or ready.get("wakeup_sigusr1") is not True:
+        return
+    receipt_path = base / "receipt.json"
+    if not receipt_path.exists():
+        return
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if not receipt or not isinstance(receipt.get("pid"), int):
+        return
+    processes, _ = owned_processes(receipt)
+    if any(row["pid"] == receipt["pid"] and row["start_ticks"] == receipt["start_ticks"] for row in processes):
+        with contextlib.suppress(OSError):
+            os.kill(receipt["pid"], signal.SIGUSR1)
+
+
+class SupervisorWakeup:
+    """Event-driven `SIGCHLD`/`SIGUSR1` wakeup pipe + `selectors` multiplexer."""
+
+    def __init__(self):
+        self.wake_r, self.wake_w = os.pipe()
+        os.set_blocking(self.wake_r, False)
+        os.set_blocking(self.wake_w, False)
+        signal.signal(signal.SIGCHLD, lambda *_: None)
+        signal.signal(signal.SIGUSR1, lambda *_: None)
+        signal.set_wakeup_fd(self.wake_w, warn_on_full_buffer=False)
+
+    def drain(self):
+        with contextlib.suppress(BlockingIOError, OSError):
+            while os.read(self.wake_r, 4096):
+                pass
+
+    def wait_gate(self, deadline):
+        with selectors.DefaultSelector() as sel:
+            sel.register(self.wake_r, selectors.EVENT_READ)
+            wait_s = 0.05 if deadline is None else min(0.05, max(0.0, deadline - time.monotonic()))
+            sel.select(timeout=wait_s)
+
+    def wait_io(self, *, master_fd, pty_eof, output_pipes, pipe_eof, interactive, tty,
+                fifo_fd, fifo_drained, pending_stdin, stdin_cap, pipe_w,
+                terminal, code, deadline, stopping_at, grace_seconds):
+        with selectors.DefaultSelector() as sel:
+            sel.register(self.wake_r, selectors.EVENT_READ)
+            if master_fd is not None and not pty_eof:
+                events = selectors.EVENT_READ | (selectors.EVENT_WRITE if pending_stdin else 0)
+                sel.register(master_fd, events)
+            for stream_name, output in output_pipes.items():
+                if stream_name not in pipe_eof:
+                    sel.register(output.fileno(), selectors.EVENT_READ)
+            if interactive:
+                if fifo_fd is not None and not fifo_drained and len(pending_stdin) < stdin_cap:
+                    sel.register(fifo_fd, selectors.EVENT_READ)
+                if not tty and pending_stdin and pipe_w is not None:
+                    sel.register(pipe_w, selectors.EVENT_WRITE)
+            now = time.monotonic()
+            wait_s = 0.05 if terminal or code is not None else 0.5
+            if deadline is not None and not terminal:
+                wait_s = min(wait_s, max(0.0, deadline - now))
+            elif terminal and stopping_at is not None:
+                escalate_in = (stopping_at + grace_seconds) - now
+                if escalate_in > 0:
+                    wait_s = min(wait_s, escalate_in)
+            sel.select(timeout=wait_s)
+
+    def close(self):
+        with contextlib.suppress(OSError, ValueError):
+            signal.set_wakeup_fd(-1)
+        for fd in (self.wake_r, self.wake_w):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        self.wake_r = self.wake_w = None

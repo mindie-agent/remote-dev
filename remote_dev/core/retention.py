@@ -43,7 +43,16 @@ from pathlib import Path
 
 from remote_dev.core.errors import RemoteExecutionError
 from remote_dev.core.locking import record_lock, try_record_thread_lock
-from remote_dev.core.windows_probe import windows_pid_alive
+from remote_dev.core.session_retention import (
+    RECEIPT_STORE_SUFFIXES,
+    SESSION_LOCK_NAMES,
+    SESSION_RUNTIME_PREFIXES,
+    _contains_receipt_store,
+    _pid_is_dead,
+    _session_lock_free,
+    _session_pid,
+    prune_stale_session_runtime_dirs,
+)
 
 try:  # POSIX lock probing; Windows uses msvcrt.locking for the same byte lock.
     import fcntl
@@ -62,6 +71,16 @@ LOGS_MAX_BYTES = 128 * 1024 * 1024
 JOBS_TTL_SECONDS = 14 * 24 * 60 * 60
 JOBS_MAX_ENTRIES = 128
 JOBS_MAX_BYTES = 256 * 1024 * 1024
+CONTEXT_TTL_SECONDS = 7 * 24 * 60 * 60
+CONTEXT_MAX_ENTRIES = 64
+CONTEXT_MAX_BYTES = 64 * 1024 * 1024
+ARTIFACTS_TTL_SECONDS = 7 * 24 * 60 * 60
+ARTIFACTS_MAX_ENTRIES = 64
+ARTIFACTS_MAX_BYTES = 512 * 1024 * 1024
+ARTIFACTS_MIN_AGE_SECONDS = 60
+PATCHES_TTL_SECONDS = 7 * 24 * 60 * 60
+PATCHES_MAX_ENTRIES = 256
+PATCHES_MAX_BYTES = 128 * 1024 * 1024
 PRUNE_COOLDOWN_SECONDS = 300
 PRUNE_TIME_BUDGET_SECONDS = 2.0
 PRUNE_MAX_ENTRIES = 4096
@@ -72,18 +91,7 @@ STALE_JOB_LOCK_SECONDS = 24 * 60 * 60
 JOB_COMPANION_SUFFIXES = (
     ".stdout.log", ".stderr.log", ".stdout.log.prev", ".stderr.log.prev", ".json",
 )
-SESSION_RUNTIME_PREFIXES = ("gate-v1", "runtime", "session")
-SESSION_LOCK_NAMES = ("session.lock", "runtime.lock", "worker.lock", "lock")
-RECEIPT_STORE_SUFFIXES = (
-    ".sqlite", ".sqlite3", ".db", ".sqlite-wal", ".sqlite-shm",
-    ".sqlite3-wal", ".sqlite3-shm", ".sqlite-journal", ".sqlite3-journal",
-    ".db-wal", ".db-shm",
-)
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,95}$")
-_SESSION_RUNTIME_RE = re.compile(
-    r"^(?:" + "|".join(re.escape(prefix) for prefix in SESSION_RUNTIME_PREFIXES) + r")[-_.]",
-    re.IGNORECASE,
-)
 
 
 def _scandir(directory, deadline):
@@ -553,6 +561,124 @@ def _marker_recent(marker, now, cooldown_seconds):
     return 0 <= now - previous < cooldown_seconds
 
 
+def _protected_context_names(directory):
+    protected = {"latest.json"}
+    latest = _json_record(Path(directory) / "latest.json")
+    if isinstance(latest, dict):
+        refs = latest.get("refs")
+        if isinstance(refs, dict):
+            full_probe = refs.get("full_probe")
+            if isinstance(full_probe, str) and full_probe:
+                protected.add(Path(full_probe).name)
+        created_at = latest.get("created_at")
+        if isinstance(created_at, str) and created_at:
+            stamp = created_at.replace(":", "").replace("-", "")
+            protected.add(f"context-{stamp}.json")
+    return protected
+
+
+def _prune_context(directory, *, now, deadline, ttl_seconds, max_entries, max_bytes):
+    protected = _protected_context_names(directory)
+    entries = []
+    for item in _scandir(directory, deadline):
+        if item.name.startswith(".") or item.name in protected:
+            continue
+        try:
+            if not item.is_file(follow_symlinks=False) or not item.name.endswith(".json"):
+                continue
+            info = item.stat(follow_symlinks=False)
+            entries.append({"path": Path(item.path), "mtime": info.st_mtime, "size": info.st_size})
+        except TimeoutError:
+            raise
+        except OSError:
+            continue
+    return _apply_limits(
+        entries, now=now, ttl_seconds=ttl_seconds,
+        max_entries=max_entries, max_bytes=max_bytes, deadline=deadline,
+    )
+
+
+def _prune_artifacts(directory, *, now, deadline, ttl_seconds, max_entries, max_bytes):
+    entries = []
+    min_age = ARTIFACTS_MIN_AGE_SECONDS if ttl_seconds > 0 else 0
+    for item in _scandir(directory, deadline):
+        if item.name.startswith(".") or item.name.endswith(".lock"):
+            continue
+        try:
+            info = item.stat(follow_symlinks=False)
+            if min_age and 0 <= now - info.st_mtime < min_age:
+                continue  # protect young staging directories
+            path = Path(item.path)
+            size = (info.st_size if stat.S_ISREG(info.st_mode)
+                    else _entry_size(path, deadline))
+            entries.append({"path": path, "mtime": info.st_mtime, "size": size})
+        except TimeoutError:
+            raise
+        except OSError:
+            continue
+    removed, freed, skipped_locked = 0, 0, 0
+    expired = {entry["path"] for entry in entries if now - entry["mtime"] > ttl_seconds}
+    kept = [entry for entry in entries if entry["path"] not in expired]
+    kept_bytes = sum(entry["size"] for entry in kept)
+    for entry in sorted(entries, key=lambda row: (row["mtime"], str(row["path"]))):
+        if time.monotonic() >= deadline:
+            break
+        over_limit = len(kept) > max_entries or kept_bytes > max_bytes
+        if entry["path"] not in expired and not over_limit:
+            break
+        lock = _acquire_record_lock(entry["path"], 0.01)
+        if lock is None:
+            skipped_locked += 1
+            continue  # active transfer holds `record_lock(base)`: never delete!
+        try:
+            freed += _remove(entry["path"])
+            if not os.path.lexists(entry["path"]):
+                removed += 1
+                if entry["path"] not in expired:
+                    kept = [row for row in kept if row["path"] != entry["path"]]
+                    kept_bytes -= entry["size"]
+        finally:
+            lock.__exit__(None, None, None)
+    for item in _scandir(directory, deadline):
+        if time.monotonic() >= deadline or not item.name.endswith(".lock"):
+            continue
+        target_name = item.name[:-5]
+        target_path = Path(directory) / target_name
+        if not target_name or os.path.lexists(target_path):
+            continue
+        thread_lock = try_record_thread_lock(target_path)
+        if thread_lock is None:
+            continue
+        try:
+            if os.name == "nt" or fcntl is not None:
+                _unlink_stale_lock(
+                    directory, target_name, target_path, Path(item.path), now=now, deadline=deadline
+                )
+        finally:
+            thread_lock.release()
+    return {"removed": removed, "freed_bytes": freed, "skipped_locked": skipped_locked}
+
+
+def _prune_patches(directory, *, now, deadline, ttl_seconds, max_entries, max_bytes):
+    entries = []
+    for item in _scandir(directory, deadline):
+        if item.name.startswith("."):
+            continue
+        try:
+            if not item.is_file(follow_symlinks=False) or not item.name.endswith(".json"):
+                continue
+            info = item.stat(follow_symlinks=False)
+            entries.append({"path": Path(item.path), "mtime": info.st_mtime, "size": info.st_size})
+        except TimeoutError:
+            raise
+        except OSError:
+            continue
+    return _apply_limits(
+        entries, now=now, ttl_seconds=ttl_seconds,
+        max_entries=max_entries, max_bytes=max_bytes, deadline=deadline,
+    )
+
+
 def prune_endpoint_state(
     base,
     *,
@@ -569,6 +695,15 @@ def prune_endpoint_state(
     jobs_ttl_seconds=JOBS_TTL_SECONDS,
     jobs_max_entries=JOBS_MAX_ENTRIES,
     jobs_max_bytes=JOBS_MAX_BYTES,
+    context_ttl_seconds=CONTEXT_TTL_SECONDS,
+    context_max_entries=CONTEXT_MAX_ENTRIES,
+    context_max_bytes=CONTEXT_MAX_BYTES,
+    artifacts_ttl_seconds=ARTIFACTS_TTL_SECONDS,
+    artifacts_max_entries=ARTIFACTS_MAX_ENTRIES,
+    artifacts_max_bytes=ARTIFACTS_MAX_BYTES,
+    patches_ttl_seconds=PATCHES_TTL_SECONDS,
+    patches_max_entries=PATCHES_MAX_ENTRIES,
+    patches_max_bytes=PATCHES_MAX_BYTES,
     protect_job_ids=(),
 ):
     """Prune one endpoint state directory under a cooldown and bounded budget.
@@ -598,6 +733,18 @@ def prune_endpoint_state(
         max_entries=jobs_max_entries, max_bytes=jobs_max_bytes,
         protect_job_ids=protect_job_ids,
     )
+    stats["context"] = _prune_context(
+        base / "context", now=now, deadline=deadline, ttl_seconds=context_ttl_seconds,
+        max_entries=context_max_entries, max_bytes=context_max_bytes,
+    )
+    stats["artifacts"] = _prune_artifacts(
+        base / "artifacts", now=now, deadline=deadline, ttl_seconds=artifacts_ttl_seconds,
+        max_entries=artifacts_max_entries, max_bytes=artifacts_max_bytes,
+    )
+    stats["patches"] = _prune_patches(
+        base / "patches", now=now, deadline=deadline, ttl_seconds=patches_ttl_seconds,
+        max_entries=patches_max_entries, max_bytes=patches_max_bytes,
+    )
     try:
         _write_marker(marker, {
             "schema_version": "remote-dev.prune.v1",
@@ -605,194 +752,12 @@ def prune_endpoint_state(
             "reads_removed": stats["reads"]["removed"],
             "logs_removed": stats["logs"]["removed"],
             "jobs_removed": stats["jobs"]["removed"],
+            "context_removed": stats["context"]["removed"],
+            "artifacts_removed": stats["artifacts"]["removed"],
+            "patches_removed": stats["patches"]["removed"],
         })
     except TimeoutError:
         raise
     except OSError as exc:
         stats["marker_error"] = f"{type(exc).__name__}: {exc}"
-    return stats
-
-
-def _session_pid(directory):
-    for name in ("pid", "session.json", "runtime.json"):
-        path = directory / name
-        if name == "pid":
-            try:
-                value = int(path.read_text(encoding="utf-8").strip())
-            except TimeoutError:
-                raise
-            except (OSError, ValueError):
-                continue
-            if value > 0:
-                return value
-        else:
-            record = _json_record(path)
-            try:
-                value = int(record.get("pid")) if record else 0
-            except (TypeError, ValueError):
-                value = 0
-            if value > 0:
-                return value
-    return None
-
-
-def _pid_is_dead(pid, *, platform=None, winapi=None):
-    """Provably-gone check; `os.kill` is strictly POSIX-only.
-
-    On Windows `os.kill(pid, 0)` means CTRL_C_EVENT and falls back to
-    TerminateProcess, so it must never be used as a liveness probe.
-    `windows_probe.WindowsProcessApi` owns the explicit-argtypes
-    `ctypes.WinDLL("kernel32", use_last_error=True)` OpenProcess/GetExitCodeProcess
-    path; `winapi` is injectable for focused unit tests.
-    """
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    platform = os.name if platform is None else platform
-    if platform == "posix":
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        except TimeoutError:
-            raise
-        except OSError:
-            return False
-        return False
-    if platform == "nt":
-        try:
-            return not windows_pid_alive(pid, winapi)
-        except TimeoutError:
-            raise
-        except (OSError, AttributeError):
-            return False  # cannot verify liveness: retain the directory
-    return False
-
-
-def _session_lock_free(directory):
-    for name in SESSION_LOCK_NAMES:
-        path = directory / name
-        if not path.exists():
-            continue
-        if fcntl is None:
-            return False
-        try:
-            handle = path.open("rb")
-        except TimeoutError:
-            raise
-        except OSError:
-            return False
-        try:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return False
-            except TimeoutError:
-                raise
-            except OSError:
-                return False
-        finally:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            finally:
-                handle.close()
-    return True
-
-
-def _contains_receipt_store(directory, deadline):
-    """True when a receipt/SQLite store exists or the tree cannot be fully inspected."""
-    pending = [Path(directory)]
-    seen = 0
-    while pending:
-        if time.monotonic() >= deadline:
-            return True  # incomplete inspection: preserve the directory
-        current = pending.pop()
-        try:
-            entries = os.scandir(current)
-        except TimeoutError:
-            raise
-        except OSError:
-            return True  # unreadable tree: never treat it as receipt-free
-        with entries:
-            for entry in entries:
-                seen += 1
-                if seen > PRUNE_MAX_ENTRIES:
-                    return True  # incomplete inspection: preserve the directory
-                try:
-                    if entry.is_file(follow_symlinks=False):
-                        name = entry.name.lower()
-                        if "receipt" in name or name.endswith(RECEIPT_STORE_SUFFIXES):
-                            return True
-                    elif entry.is_dir(follow_symlinks=False):
-                        pending.append(Path(entry.path))
-                except TimeoutError:
-                    raise
-                except OSError:
-                    return True
-    return False
-
-
-def prune_stale_session_runtime_dirs(
-    root,
-    *,
-    now=None,
-    max_age_seconds=24 * 60 * 60,
-    max_entries=PRUNE_MAX_ENTRIES,
-    dry_run=False,
-):
-    """Remove dead-PID, unlocked `gate-v1*`/`runtime*`/`session*` dirs older than 24h.
-
-    Age, receipt-store, and lock guards run before any PID probe. A directory is
-    preserved unless it is older than `max_age_seconds`, has no SQLite receipt
-    store, every lock probe succeeds non-blockingly, and its recorded PID is
-    provably gone. Unknown ownership is never treated as deletable.
-    """
-    root = Path(root)
-    now = time.time() if now is None else float(now)
-    stats = {"root": str(root), "scanned": 0, "removed": [], "would_remove": [],
-             "skipped": {}, "errors": []}
-    if not root.is_dir():
-        return stats
-    deadline = time.monotonic() + PRUNE_TIME_BUDGET_SECONDS
-    for entry in _scandir(root, deadline)[:max_entries]:
-        name = entry.name
-        if not _SESSION_RUNTIME_RE.match(name) or not entry.is_dir(follow_symlinks=False):
-            continue
-        stats["scanned"] += 1
-        directory = Path(entry.path)
-        reason = None
-        try:
-            info = entry.stat(follow_symlinks=False)
-            # Cheap/irreversible guards run before any PID probe: a young,
-            # receipt-bearing, or locked directory is never a deletion candidate.
-            if now - info.st_mtime <= max_age_seconds:
-                reason = "not_stale"
-            elif _contains_receipt_store(directory, deadline):
-                reason = "receipt_store"
-            elif not _session_lock_free(directory):
-                reason = "locked_or_unverifiable"
-            else:
-                pid = _session_pid(directory)
-                if pid is None:
-                    reason = "no_pid"
-                elif not _pid_is_dead(pid):
-                    reason = "pid_alive_or_unknown"
-        except TimeoutError:
-            raise
-        except OSError as exc:
-            stats["errors"].append(f"{name}: {type(exc).__name__}: {exc}")
-            continue
-        if reason is not None:
-            stats["skipped"][reason] = stats["skipped"].get(reason, 0) + 1
-            continue
-        if dry_run:
-            stats["would_remove"].append(name)
-            continue
-        try:
-            shutil.rmtree(directory)
-        except TimeoutError:
-            raise
-        except OSError as exc:
-            stats["errors"].append(f"{name}: {type(exc).__name__}: {exc}")
-            continue
-        stats["removed"].append(name)
     return stats
