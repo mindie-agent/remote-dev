@@ -1,8 +1,8 @@
 """
 [Role] Remote artifact manifest generation and hash-verified pull/push orchestration (`artifact_ops.py`).
 [Invariants]
-- Rejects symlinks and path traversal (`..` or symlink parents escaping `local_dir` or `endpoint.root`) before creating directories or transferring bytes.
-- Skips hash-identical files during `remote_artifact_pull` and refuses to overwrite differing local files unless `overwrite=True`.
+- Allows valid symlinks within authorized `endpoint.root` / explicit `local_path` (e.g., HuggingFace Hub snapshots and `.so` links) while rejecting symlinks or `..` traversal escaping the authorized root, and refusing to overwrite destination symlinks on write.
+- Streams SHA-256 digests in `64 KiB` chunks; skips hash-identical files during `remote_artifact_pull` and refuses to overwrite differing local files unless `overwrite=True`.
 [Timeouts & Locks]
 - Serializes transfers per endpoint via `@serialize_mutation` and forwards `timeout_ms` to `ArtifactStream`.
 [Side-Effect Policy]
@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
-from .locking import serialize_mutation
+from .locking import record_lock, serialize_mutation
 
 from .endpoint import Endpoint
 from .container_endpoint import pinned_endpoint
@@ -46,40 +46,70 @@ resolved = target.resolve()
 if resolved != root and root not in resolved.parents:
     print(json.dumps({"status": "blocked", "error": f"remote path is outside root: {resolved}", "remote_path": str(target)}))
     raise SystemExit(0)
-if not target.exists() and not resolved.exists():
+if not resolved.exists():
     print(json.dumps({"status": "needs_input", "error": "remote path does not exist", "remote_path": str(target)}))
-    raise SystemExit(0)
-if target.is_symlink():
-    print(json.dumps({"status": "blocked", "error": "artifact symlinks are not allowed", "remote_path": str(target)}))
     raise SystemExit(0)
 
 def sha256_file(path):
     h = hashlib.sha256()
     size = 0
     with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+        for chunk in iter(lambda: fh.read(65536), b""):
             h.update(chunk)
             size += len(chunk)
     return h.hexdigest(), size
 
+def within_root(candidate):
+    real = candidate.resolve()
+    return real == root or root in real.parents, real
+
 files = []
-paths = [target] if target.is_file() else sorted(pathlib.Path(target).rglob("*"))
-for path in paths:
-    if path.is_symlink():
-        print(json.dumps({"status": "blocked", "error": f"artifact symlink is not allowed: {path}"}))
+if resolved.is_file():
+    candidates = [target]
+else:
+    candidates = []
+    visited = set()
+    for cur_dir, dirs, filenames in os.walk(target, followlinks=True):
+        cur_path = pathlib.Path(cur_dir)
+        ok, real_dir = within_root(cur_path)
+        if not ok:
+            print(json.dumps({"status": "blocked", "error": f"artifact symlink escapes root: {cur_path} -> {real_dir}"}))
+            raise SystemExit(0)
+        try:
+            dir_st = real_dir.stat()
+        except OSError:
+            dirs[:] = []
+            continue
+        dir_id = (dir_st.st_dev, dir_st.st_ino)
+        if dir_id in visited:
+            dirs[:] = []
+            continue
+        visited.add(dir_id)
+        dirs.sort()
+        for fname in sorted(filenames):
+            candidates.append(cur_path / fname)
+
+for path in candidates:
+    ok, real = within_root(path)
+    if not ok:
+        print(json.dumps({"status": "blocked", "error": f"artifact symlink escapes root: {path} -> {real}"}))
         raise SystemExit(0)
-    if not path.is_file():
+    if not real.exists() or not real.is_file():
+        if path.is_symlink() and not real.exists():
+            print(json.dumps({"status": "blocked", "error": f"dangling artifact symlink: {path}"}))
+            raise SystemExit(0)
         continue
-    digest, size = sha256_file(path)
-    st = path.stat()
+    digest, size = sha256_file(real)
+    st = real.stat()
     files.append({
-        "relpath": "." if path == target else str(path.relative_to(target)),
+        "relpath": "." if path == target else path.relative_to(target).as_posix(),
         "path": str(path),
         "size": size,
         "sha256": digest,
         "mode": stat.S_IMODE(st.st_mode),
         "mtime_ns": st.st_mtime_ns,
     })
+files.sort(key=lambda item: pathlib.PurePosixPath(item["relpath"]).parts)
 print(json.dumps({
     "schema_version": "remote-dev.artifact_manifest.v1",
     "status": "ok",
@@ -99,31 +129,57 @@ def _duration_ms(start: float) -> int:
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+        for chunk in iter(lambda: fh.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
 
 
 def _local_manifest(local_path: Path) -> dict[str, Any]:
+    import os as _os
+
     raw_path = local_path.expanduser()
-    if raw_path.is_symlink():
-        raise ValueError(f"local artifact symlinks are not allowed: {raw_path}")
     resolved = raw_path.resolve()
     if not resolved.exists():
-        raise FileNotFoundError(f"local artifact path does not exist: {resolved}")
+        raise FileNotFoundError(f"local artifact path does not exist: {raw_path}")
     files: list[dict[str, Any]] = []
-    roots = [resolved] if resolved.is_file() else sorted(path for path in resolved.rglob("*") if path.is_file())
-    for path in roots:
-        if path.is_symlink():
-            raise ValueError(f"local artifact symlinks are not allowed: {path}")
-        stat = path.stat()
+    if resolved.is_file():
+        candidates = [resolved]
+    else:
+        candidates = []
+        visited: set[tuple[int, int]] = set()
+        for cur_dir, dirs, filenames in _os.walk(resolved, followlinks=True):
+            cur_path = Path(cur_dir)
+            real_dir = cur_path.resolve()
+            if real_dir != resolved and resolved not in real_dir.parents:
+                raise ValueError(f"local artifact symlink escapes source root: {cur_path}")
+            dir_st = real_dir.stat()
+            dir_id = (dir_st.st_dev, dir_st.st_ino)
+            if dir_id in visited:
+                dirs[:] = []
+                continue
+            visited.add(dir_id)
+            dirs.sort()
+            for fname in sorted(filenames):
+                candidates.append(cur_path / fname)
+    for path in candidates:
+        real = path.resolve()
+        if real != resolved and resolved not in real.parents:
+            raise ValueError(f"local artifact symlink escapes source root: {path}")
+        if not real.exists():
+            if path.is_symlink():
+                raise ValueError(f"dangling local artifact symlink: {path}")
+            continue
+        if not real.is_file():
+            continue
+        stat = real.stat()
         files.append({
             "relpath": "." if path == resolved else path.relative_to(resolved).as_posix(),
-            "path": str(path),
+            "path": str(real),
             "size": stat.st_size,
-            "sha256": _sha256_file(path),
+            "sha256": _sha256_file(real),
             "mtime_ns": stat.st_mtime_ns,
         })
+    files.sort(key=lambda item: PurePosixPath(item["relpath"]).parts)
     return {
         "schema_version": "remote-dev.local_artifact_manifest.v1",
         "status": "ok",
@@ -224,9 +280,12 @@ def remote_artifact_manifest(endpoint: Endpoint, *, remote_path: str, timeout_ms
     )
     if recording_error:
         execution_outcome, execution_status = result["outcome"], result["status"]
-        result.update(outcome="failed", status="local_recording_failed", operation_completed=True,
+        primary_succeeded = execution_outcome == "success"
+        result.update(outcome=execution_outcome if primary_succeeded else "failed",
+                      status="local_recording_failed", operation_completed=True,
                       execution_outcome=execution_outcome, execution_status=execution_status,
                       recording_error=recording_error,
+                      **({"receipt_warning": recording_error, "receipt_unconfirmed": True} if primary_succeeded else {}),
                       summary="Remote artifact manifest was received, but local recording failed.")
         return {"text": result["summary"] + "\n" + recording_error + "\n", "result": result}
     return {"text": f"RemoteArtifactManifest {status}: {path}\nfiles: {data.get('file_count', 0)}\n", "result": result}
@@ -268,27 +327,36 @@ def remote_artifact_pull(endpoint: Endpoint, *, remote_path: str, local_dir: str
     manifest = manifest_payload["result"].get("manifest", {})
     if manifest_payload["result"]["outcome"] != "success" or manifest.get("status") != "ok":
         return manifest_payload
+    import contextlib
+
+    managed_state_pull = not local_dir
     base = Path(local_dir) if local_dir else ensure_endpoint_state(endpoint) / "artifacts" / uuid.uuid4().hex
     base.mkdir(parents=True, exist_ok=True)
+    pull_guard = (
+        record_lock(base, timeout_seconds=5.0)
+        if managed_state_pull
+        else contextlib.nullcontext()
+    )
     pulled, skipped, pending, conflicts = [], [], [], []
     evidence = {"manifest": manifest, "pulled": pulled, "skipped": skipped, "local_dir": str(base), "remote_path": remote_path}
     try:
-        for item in manifest.get("files", []):
-            path = _safe_local_artifact_path(base, str(item["relpath"]), create_parents=False)
-            if path.is_file() and path.stat().st_size == item["size"] and _sha256_file(path) == item["sha256"]:
-                skipped.append({"relpath": item["relpath"], "local_path": str(path), "reason": "hash-match"})
-            elif path.exists() and (not overwrite or not path.is_file()):
-                conflicts.append(str(path))
-            else:
-                pending.append((item, path))
-        if conflicts:
-            return _pull_destination_exists(endpoint, started, start, evidence, conflicts)
-        if pending:
-            with ArtifactStream(endpoint, "pull", len(pending), timeout_ms) as stream:
-                for item, path in pending:
-                    _safe_local_artifact_path(base, str(item["relpath"]))
-                    digest = stream.pull(item, path, overwrite=overwrite)
-                    pulled.append({"relpath": item["relpath"], "local_path": str(path), "sha256": digest, "size": item["size"]})
+        with pull_guard:
+            for item in manifest.get("files", []):
+                path = _safe_local_artifact_path(base, str(item["relpath"]), create_parents=False)
+                if path.is_file() and path.stat().st_size == item["size"] and _sha256_file(path) == item["sha256"]:
+                    skipped.append({"relpath": item["relpath"], "local_path": str(path), "reason": "hash-match"})
+                elif path.exists() and (not overwrite or not path.is_file()):
+                    conflicts.append(str(path))
+                else:
+                    pending.append((item, path))
+            if conflicts:
+                return _pull_destination_exists(endpoint, started, start, evidence, conflicts)
+            if pending:
+                with ArtifactStream(endpoint, "pull", len(pending), timeout_ms) as stream:
+                    for item, path in pending:
+                        _safe_local_artifact_path(base, str(item["relpath"]))
+                        digest = stream.pull(item, path, overwrite=overwrite)
+                        pulled.append({"relpath": item["relpath"], "local_path": str(path), "sha256": digest, "size": item["size"]})
     except FileExistsError as exc:
         return _pull_destination_exists(endpoint, started, start, evidence, [str(exc.filename or exc)])
     except TimeoutError:

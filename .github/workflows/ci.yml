@@ -32,8 +32,18 @@ jobs:
       - name: Install package
         run: python -m pip install -e ".[test]"
       - name: Unit tests
-        # Mocked transports and temporary state only; no SSH server, no hardware.
-        run: python -m pytest -m "not live_npu" --durations=20 --junitxml=contracts.xml
+        env:
+          HOME: ${{ runner.temp }}/rdev-home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/xdg-config
+          XDG_DATA_HOME: ${{ runner.temp }}/xdg-data
+          MINDIE_CONFIG_HOME: ${{ runner.temp }}/mindie-config
+          MINDIE_DATA_HOME: ${{ runner.temp }}/mindie-data
+          MINDIE_DIAGNOSTICS_ROOT: ${{ runner.temp }}/mindie-diag
+          REMOTE_DEV_AUTH_DIR: ${{ runner.temp }}/rdev-auth
+          REMOTE_DEV_STATE_DIR: ${{ runner.temp }}/rdev-state
+        run: |
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$MINDIE_CONFIG_HOME" "$MINDIE_DATA_HOME" "$MINDIE_DIAGNOSTICS_ROOT" "$REMOTE_DEV_AUTH_DIR" "$REMOTE_DEV_STATE_DIR"
+          python -m pytest -m "not live_npu" --durations=20 --junitxml=contracts.xml
       - name: Publish failing test details
         if: failure()
         run: python tests/ci_failure_summary.py contracts.xml
@@ -53,8 +63,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
-        # Minimum Python is checked on Linux; native OS behavior uses the
-        # same current interpreter rather than repeating the whole matrix.
         python: ["3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -66,9 +74,14 @@ jobs:
       - name: Install package
         run: python -m pip install -e ".[test]"
       - name: All portable client contracts
-        # No SSH server. These prove the local macOS/Windows client path:
-        # pipe readers, process-group stop, control() JSON stdin shipping,
-        # and ordinary job wrappers. Linux worker tests skip off Linux.
+        env:
+          HOME: ${{ runner.temp }}/rdev-home
+          USERPROFILE: ${{ runner.temp }}/rdev-home
+          MINDIE_CONFIG_HOME: ${{ runner.temp }}/mindie-config
+          MINDIE_DATA_HOME: ${{ runner.temp }}/mindie-data
+          MINDIE_DIAGNOSTICS_ROOT: ${{ runner.temp }}/mindie-diag
+          REMOTE_DEV_AUTH_DIR: ${{ runner.temp }}/rdev-auth
+          REMOTE_DEV_STATE_DIR: ${{ runner.temp }}/rdev-state
         run: python -m pytest -q tests -m "not live_npu" --durations=20 --junitxml=client-portability.xml
       - name: Publish failing test details
         if: failure()
@@ -82,7 +95,7 @@ jobs:
           retention-days: 7
 
   wheel:
-    name: Wheel install (P14)
+    name: Out-of-tree Wheel Smoke (P14)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -94,18 +107,20 @@ jobs:
           python-version: "3.12"
       - name: Install uv
         run: python -m pip install uv
-      - name: Build wheel, install clean venv, import, --help, worker source
+      - name: Build wheel, install in blank out-of-tree venv, verify CLI, workers, and MCP initialize
         run: |
           set -euo pipefail
+          unset PYTHONPATH
           uv build
-          wheel=$(ls -1 dist/*.whl)
-          clean=$(mktemp -d)
+          wheel="$(realpath dist/*.whl)"
+          clean="$(mktemp -d)"
+          cd "$clean"
           python -m venv "$clean/venv"
           "$clean/venv/bin/python" -m pip install "$wheel"
-          "$clean/venv/bin/python" -c "import remote_dev; print(remote_dev.__version__)"
+          "$clean/venv/bin/python" -c "import pathlib, remote_dev; p=pathlib.Path(remote_dev.__file__).resolve(); assert 'site-packages' in p.parts, p; print(remote_dev.__version__)"
           "$clean/venv/bin/python" -c "from remote_dev.processes import control, worker_source; src=worker_source(); assert callable(control); assert 'PR_SET_CHILD_SUBREAPER' in src; assert 'REMOTE_DEV_JOB_TOKEN' in src; assert 'MINDIE_REMOTE_JOB' not in src"
           "$clean/venv/bin/remote-dev" --help
-
+          printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}\n' | "$clean/venv/bin/python" -m remote_dev.mcp.server | grep -q '"protocolVersion"'
 
   real-ssh:
     name: OpenSSH loopback and durable jobs
@@ -138,6 +153,7 @@ jobs:
     needs: [contracts, client-portability, wheel, real-ssh]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}

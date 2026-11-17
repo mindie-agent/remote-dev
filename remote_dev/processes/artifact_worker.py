@@ -21,7 +21,7 @@ import stat
 import sys
 import tempfile
 
-CHUNK_SIZE = 1024 * 1024
+CHUNK_SIZE = 65536
 
 # REMOTE_DEV_MUTATION_LOCK
 
@@ -45,13 +45,14 @@ def checked_path(root, raw, *, writing=False):
     resolved = path.resolve()
     if resolved != root and root not in resolved.parents:
         raise ValueError("artifact path escapes root")
-    if path.is_symlink():
+    if writing and path.is_symlink():
         raise ValueError("artifact symlinks are not allowed")
-    if path.exists() and not stat.S_ISREG(path.stat().st_mode):
+    target = path if writing else resolved
+    if target.exists() and not stat.S_ISREG(target.stat().st_mode):
         raise ValueError("artifact is not a regular file")
     if writing:
         path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    return target
 
 
 def transfer(source, destination, size):

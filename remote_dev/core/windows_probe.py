@@ -21,6 +21,13 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 STILL_ACTIVE = 259
 ERROR_INVALID_PARAMETER = 87
 ERROR_ACCESS_DENIED = 5
+GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
+OPEN_EXISTING = 3
+FILE_ATTRIBUTE_NORMAL = 0x80
+INVALID_HANDLE_VALUE = -1
+ERROR_FILE_NOT_FOUND = 2
+ERROR_PATH_NOT_FOUND = 3
 
 
 class WindowsProcessApi:
@@ -121,8 +128,85 @@ def windows_lock_free(lock_path, *, msvcrt_module=None):
         handle.close()
 
 
+class WindowsFileShareApi:
+    """Explicit-argtypes Win32 CreateFileW(dwShareMode=0) open-handle probe."""
+
+    def __init__(self):
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        kernel32.CreateFileW.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        self._ctypes = ctypes
+        self._kernel32 = kernel32
+        self._invalid = ctypes.c_void_p(INVALID_HANDLE_VALUE).value
+
+    def open_exclusive(self, path):
+        handle = self._kernel32.CreateFileW(
+            str(path),
+            GENERIC_READ | GENERIC_WRITE,
+            0,  # dwShareMode=0 fails if any live process holds the lock file open
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        if handle is None or handle == 0 or handle == -1 or handle == self._invalid:
+            return None
+        return handle
+
+    def last_error(self):
+        return self._ctypes.get_last_error()
+
+    def close(self, handle):
+        return self._kernel32.CloseHandle(handle)
+
+
+def windows_exclusive_open_free(lock_path, *, share_api=None):
+    """Return True only when no process holds an open Win32 handle on `lock_path`."""
+    try:
+        api = share_api if share_api is not None else WindowsFileShareApi()
+    except (OSError, AttributeError):
+        return False
+    handle = api.open_exclusive(lock_path)
+    if handle is None:
+        return api.last_error() in (ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND)
+    try:
+        return True
+    finally:
+        try:
+            api.close(handle)
+        except TimeoutError:
+            raise
+        except OSError:
+            pass
+
+
+def windows_session_lock_free(lock_path, *, msvcrt_module=None, share_api=None):
+    """Verify both exclusive-handle freedom and MSVCRT byte-0 lock freedom on Windows."""
+    import os
+
+    if share_api is not None or os.name == "nt":
+        if not windows_exclusive_open_free(lock_path, share_api=share_api):
+            return False
+    return windows_lock_free(lock_path, msvcrt_module=msvcrt_module)
+
+
 __all__ = [
+    "WindowsFileShareApi",
     "WindowsProcessApi",
+    "windows_exclusive_open_free",
     "windows_lock_free",
     "windows_pid_alive",
+    "windows_session_lock_free",
 ]

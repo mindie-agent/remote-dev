@@ -124,35 +124,40 @@ def worker(directory):
     if libc.prctl(36, 1, 0, 0, 0) != 0:  # Linux PR_SET_CHILD_SUBREAPER
         raise OSError(ctypes.get_errno(), "cannot supervise orphan descendants")
     spec = read_json(directory / "spec.json")
-    # Hold the supervisor fence for this process lifetime so housekeeping never
-    # mistakes a live supervisor for a terminal one.
     worker_lock = (directory / "worker.lock").open("a+b")
     fcntl.flock(worker_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    # Interactive jobs proxy the on-disk FIFO into the child pipe, attaching the
-    # reader before supervisor-ready.json so a post-prepare write always finds it.
+    wakeup = SupervisorWakeup()
     tty = bool(spec.get("tty"))
     interactive = bool(spec.get("interactive")) or tty
     fifo_fd = None
+    fifo_keepalive_w = None
     if interactive:
         fifo_fd = os.open(directory / "stdin.pipe", os.O_RDONLY | os.O_NONBLOCK)
-    atomic_json(directory / "supervisor-ready.json", {"pid": os.getpid()})
+        fifo_keepalive_w = os.open(directory / "stdin.pipe", os.O_WRONLY | os.O_NONBLOCK)
+    def _close_worker_fds():
+        for fd in (fifo_keepalive_w, fifo_fd):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        wakeup.close()
+    atomic_json(directory / "supervisor-ready.json", {"pid": os.getpid(), "wakeup_sigusr1": True})
     prepared_timeout = spec.get("prepared_timeout_seconds")
     deadline = None if prepared_timeout is None else time.monotonic() + prepared_timeout
     while not (directory / "go.json").exists():
+        wakeup.drain()
         if (directory / "stop.json").exists() or (deadline is not None and time.monotonic() >= deadline):
-            if fifo_fd is not None:
-                os.close(fifo_fd)
+            _close_worker_fds()
             atomic_json(directory / "result.json", {"state": "cancelled", "reason": "start gate not opened", "descendants_drained": True})
             return
-        time.sleep(0.005)
+        wakeup.wait_gate(deadline)
     gate = read_json(directory / "go.json")
     if (directory / "stop.json").exists() or (gate.get("valid_until") is not None and gate["valid_until"] <= time.time()):
-        if fifo_fd is not None:
-            os.close(fifo_fd)
+        _close_worker_fds()
         atomic_json(directory / "result.json", {"state": "cancelled", "reason": "activation ticket expired", "descendants_drained": True})
         return
     pipe_w = None
     master_fd = None
+    pty_eof = False
     if tty:
         master_fd, slave_fd = pty.openpty()
         fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
@@ -202,12 +207,11 @@ def worker(directory):
         fifo_drained = False
         terminal_eof_sent = False
         while True:
+            wakeup.drain()
             code = child.poll()
             if code is not None and shell_exit_observed is None:
                 shell_exit_observed = time.monotonic()
-            if master_fd is not None:
-                # Drain the PTY into the same durable output log. stdout and
-                # stderr share a terminal, as with a native tty session.
+            if master_fd is not None and not pty_eof:
                 for _ in range(16):
                     try:
                         chunk = os.read(master_fd, 65536)
@@ -218,8 +222,10 @@ def worker(directory):
                     except OSError as exc:
                         if exc.errno != errno.EIO:
                             raise
-                        break  # last slave closed
+                        pty_eof = True
+                        break
                     if not chunk:
+                        pty_eof = True
                         break
                     stdout_log.write(chunk)
             for stream_name, output in output_pipes.items():
@@ -242,14 +248,15 @@ def worker(directory):
                         break
                     (stdout_log if stream_name == "stdout" else stderr_log).write(chunk)
             if code is not None:
-                # poll() reaps the direct Popen child first. Then reap adopted
-                # orphans without stealing the shell's exit status.
                 with contextlib.suppress(ChildProcessError):
                     while os.waitpid(-1, os.WNOHANG)[0]:
                         pass
             if interactive:
-                # Backpressure: once the in-memory buffer hits the cap, stop
-                # draining the FIFO so writers block instead of growing RAM.
+                if not stdin_eof and (directory / "stdin-eof.json").exists():
+                    stdin_eof = True
+                    if fifo_keepalive_w is not None:
+                        os.close(fifo_keepalive_w)
+                        fifo_keepalive_w = None
                 if fifo_fd is not None and len(pending_stdin) < STDIN_BUFFER_CAP:
                     try:
                         chunk = os.read(fifo_fd, 65536)
@@ -258,9 +265,6 @@ def worker(directory):
                     if chunk:
                         pending_stdin.extend(chunk)
                     elif stdin_eof:
-                        # b"" from a FIFO read means every writer is gone and
-                        # the kernel buffer is empty: all accepted stdin bytes
-                        # are now in pending_stdin, none stay behind in the FIFO.
                         fifo_drained = True
                 if pending_stdin and pipe_w is not None:
                     try:
@@ -277,13 +281,10 @@ def worker(directory):
                         if not tty:
                             os.close(pipe_w)
                             pipe_w = None
-                if not stdin_eof and (directory / "stdin-eof.json").exists():
-                    stdin_eof = True
                 if stdin_eof and fifo_drained and fifo_fd is not None:
                     os.close(fifo_fd)
                     fifo_fd = None
                 if stdin_eof and fifo_drained and not pending_stdin and pipe_w is not None:
-                    # EOF reaches the child only after every accepted byte.
                     if tty:
                         if not terminal_eof_sent:
                             os.write(pipe_w, b"\x04")
@@ -300,43 +301,26 @@ def worker(directory):
                 processes, _ = owned_processes(receipt)
                 force = bool(stop and stop.get("force")) or time.monotonic() >= stopping_at + _stop_grace_seconds()
                 signal_processes(processes, signal.SIGKILL if force else signal.SIGTERM, exclude=os.getpid())
-            # This kernel list includes zombies and adopted clean-env children.
-            # A process cannot fork again after it has been reaped; only this
-            # empty-child boundary allows the supervisor to publish completion.
             children = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children").read_text(encoding="utf-8", errors="replace").strip()
-            if code is not None and not children and len(pipe_eof) >= len(output_pipes):
+            if code is not None and not children and len(pipe_eof) >= len(output_pipes) and (master_fd is None or pty_eof):
                 break
-            time.sleep(0.01)
+            wakeup.wait_io(
+                master_fd=master_fd, pty_eof=pty_eof, output_pipes=output_pipes, pipe_eof=pipe_eof,
+                interactive=interactive, tty=tty, fifo_fd=fifo_fd, fifo_drained=fifo_drained,
+                pending_stdin=pending_stdin, stdin_cap=STDIN_BUFFER_CAP, pipe_w=pipe_w,
+                terminal=terminal, code=code, deadline=deadline, stopping_at=stopping_at,
+                grace_seconds=_stop_grace_seconds(),
+            )
         for output in output_pipes.values():
             with contextlib.suppress(OSError):
                 output.close()
         if pipe_w is not None:
-            os.close(pipe_w)
-        if fifo_fd is not None:
-            os.close(fifo_fd)
+            with contextlib.suppress(OSError):
+                os.close(pipe_w)
+        _close_worker_fds()
     command_finished = time.monotonic()
     shell_exit_observed = shell_exit_observed if shell_exit_observed is not None else command_finished
-    log_accounting = {"max_log_bytes": max_log_bytes}
-    for _name, _log in (("stdout", stdout_log), ("stderr", stderr_log)):
-        _previous = _file_size(_log.prev_path)
-        _current = _file_size(_log.path)
-        log_accounting[_name] = {
-            "logical_bytes_written": _log.logical_bytes_written,
-            "truncated_head_bytes": _log.truncated_head_bytes,
-            "generation": _log.generation,
-            "retained_bytes": _previous + _current,
-            "previous_bytes": _previous,
-            "current_bytes": _current,
-            "rotated": bool(_previous),
-        }
-        if _log.accounting_warning:
-            log_accounting[_name]["accounting_warning"] = _log.accounting_warning
-    _warnings = [
-        _log.accounting_warning
-        for _log in (stdout_log, stderr_log) if _log.accounting_warning
-    ]
-    if _warnings:
-        log_accounting["accounting_warning"] = "; ".join(_warnings)
+    log_accounting = summarize_log_accounting(max_log_bytes, stdout_log, stderr_log)
     result = {"state": terminal or ("succeeded" if code == 0 else "failed"),
               "exit_code": code, "descendants_drained": True,
               "started_at": command_started_at, "finished_at": time.time(),
@@ -574,6 +558,7 @@ def control_job(request, source, cancel_event=None):
                 raise ValueError("jobs require activation_timeout_seconds None or a finite positive number")
             atomic_json(directory / "go.json", {"authorization": request["authorization"], "opened_at": opened,
                                                "valid_until": None if activation_timeout is None else opened + activation_timeout})
+            nudge_supervisor(directory)
         elif action == "stop":
             receipt = read_json(directory / "receipt.json")
             if receipt is None:
@@ -583,12 +568,9 @@ def control_job(request, source, cancel_event=None):
             if status["quiet"] or status["unknown"]:
                 maintenance = _bounded_housekeeping(root, identifier)
                 return attach_maintenance_warning(status, maintenance)
-            # Record and signal the stop FIRST; housekeeping must never delay
-            # the cancellation side effect.
             processes = status["processes"]
             atomic_json(directory / "stop.json", {"at": time.time(), "force": bool(request.get("force"))})
-            # Signal only PIDs whose marker/start ticks were just observed; keep
-            # the subreaper alive so it drains and publishes completion.
+            nudge_supervisor(directory)
             signal_processes(processes, signal.SIGKILL if request.get("force") else signal.SIGTERM,
                              exclude=receipt["pid"] if receipt.get("supervision") == "subreaper" else None)
             maintenance = _bounded_housekeeping(root, identifier)
@@ -718,6 +700,7 @@ def control_job(request, source, cancel_event=None):
             eof_applied = eof_requested and not buffer_full
             if eof_applied:
                 atomic_json(directory / "stdin-eof.json", {"at": time.time()})
+                nudge_supervisor(directory)
             return {"state": status["state"], "accepted": True, "written": written,
                     "written_chars": len(raw[:written].decode("utf-8")),
                     "eof": eof_applied, "eof_deferred": eof_requested and buffer_full,
@@ -771,9 +754,9 @@ def run_supervisor(directory):
             sys.stderr.flush()
         raise SystemExit(1)
 
-if __name__ == "__main__" and "CappedLog" not in globals():
-    # Direct `python worker.py --worker <dir>` debugging: load the companions
-    # that worker_source() normally concatenates ahead of this module.
+if "CappedLog" not in globals():
+    # Direct module import or `python worker.py --worker <dir>` debugging: load
+    # the companions that worker_source() concatenates ahead of this module.
     for _companion in ("worker_runtime.py", "worker_gc.py"):
         _runtime = Path(__file__).with_name(_companion)
         exec(compile(_runtime.read_text(encoding="utf-8"), str(_runtime), "exec"), globals())

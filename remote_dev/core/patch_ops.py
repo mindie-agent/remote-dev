@@ -26,7 +26,7 @@ from .errors import PathPolicyError
 from .path_policy import join_under_root
 from remote_dev.result import make_result, utc_now_iso
 from .ssh_transport import run_remote_python, run_rpc_script
-from .state_store import atomic_write_json, ensure_endpoint_state
+from .state_store import atomic_write_json, ensure_endpoint_state, maybe_prune_endpoint_state
 
 
 @lru_cache(maxsize=1)
@@ -275,6 +275,11 @@ def _apply_unified_patch(
             "def fail(status, error):",
             "    print(f'REMOTE_DEV_PATCH_PREFLIGHT {status}: {error}', file=sys.stderr)",
             "    raise SystemExit(72)",
+            "def _sha256_file(target):",
+            "    h=hashlib.sha256(); sz=0",
+            "    with target.open('rb') as fh:",
+            "        for chunk in iter(lambda: fh.read(65536), b''): h.update(chunk); sz += len(chunk)",
+            "    return h.hexdigest(), sz",
             "root=pathlib.Path(sys.argv[2]).resolve()",
             "cwd=pathlib.Path(sys.argv[3]).resolve()",
             "before={}",
@@ -290,7 +295,7 @@ def _apply_unified_patch(
             "            fail('symlink_not_allowed', f'refusing to patch symlink: {p}')",
             "        if not p.is_file():",
             "            fail('not_file', f'refusing to patch non-regular file: {p}')",
-            "        before[raw]=hashlib.sha256(p.read_bytes()).hexdigest()",
+            "        before[raw], _ = _sha256_file(p)",
             "    else:",
             "        parent=p.parent.resolve()",
             "        if parent != root and root not in parent.parents:",
@@ -307,6 +312,11 @@ def _apply_unified_patch(
             "git apply \"$tmp\"",
             "python3 -I - \"$tmp_before\" \"$tmp_stat\" " + path_args + " <<'REMOTE_DEV_CHANGED'",
             "import hashlib, json, pathlib, sys",
+            "def _sha256_file(target):",
+            "    h=hashlib.sha256(); sz=0",
+            "    with target.open('rb') as fh:",
+            "        for chunk in iter(lambda: fh.read(65536), b''): h.update(chunk); sz += len(chunk)",
+            "    return h.hexdigest(), sz",
             "before=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))",
             "diffstat=pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')",
             "changed=[]",
@@ -315,7 +325,7 @@ def _apply_unified_patch(
             "    digest=None",
             "    size=0",
             "    if p.exists() and p.is_file():",
-            "        data=p.read_bytes(); digest=hashlib.sha256(data).hexdigest(); size=len(data)",
+            "        digest, size = _sha256_file(p)",
             "    changed.append({'path': str(p), 'before_sha256': before.get(raw), 'after_sha256': digest, 'size': size})",
             "print(json.dumps({'status':'applied','changed_files':changed,'diffstat':diffstat}))",
             "REMOTE_DEV_CHANGED",
@@ -403,6 +413,7 @@ def _patch_result(
         ref_path = patch_dir / f"{result['invocation_id']}.json"
         atomic_write_json(ref_path, result)
         result["refs"]["metadata"] = str(ref_path)
+        maybe_prune_endpoint_state(endpoint)
     except TimeoutError:
         raise
     except (OSError, ValueError, RuntimeError) as exc:

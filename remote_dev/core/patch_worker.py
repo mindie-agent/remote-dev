@@ -235,8 +235,16 @@ except Exception as exc:  # noqa: BLE001
     rollback_status = restore(before_state)
     fail("commit_failed", f"{type(exc).__name__}: {exc}", rollback_status=rollback_status)
 
+def _stream_sha(path: pathlib.Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 for item in changed:
     path = pathlib.Path(item["path"])
-    item["after_sha256"] = sha(path.read_bytes()) if path.exists() and path.is_file() else None
+    item["after_sha256"] = _stream_sha(path) if path.exists() and path.is_file() else None
     item["size"] = path.stat().st_size if path.exists() else 0
 print(json.dumps({"status": "applied", "changed_files": changed, "diff_preview": "".join(diffs)[:16000]}, sort_keys=True))

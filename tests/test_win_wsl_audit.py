@@ -97,8 +97,8 @@ def test_wsl_posix_unshadowed_command_skips_drvfs_and_pe_shims_and_fails_closed(
     native_ssh.chmod(0o755)
     native_keygen = native_bin / "ssh-keygen"
     native_keygen.write_text(
-        '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do if [ "$1" = "-f" ]; then f="$2"; shift 2; else shift; fi; done\n'
-        'printf "PRIVATE\\n" > "$f"\nchmod 600 "$f"\nprintf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@wsl\\n" > "$f.pub"\n',
+        '#!/bin/sh\numask 077\nwhile [ "$#" -gt 0 ]; do if [ "$1" = "-f" ]; then f="$2"; shift 2; else shift; fi; done\n'
+        'printf "PRIVATE\\n" > "$f"\nprintf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@wsl\\n" > "$f.pub"\n',
         encoding="utf-8",
     )
     native_keygen.chmod(0o755)

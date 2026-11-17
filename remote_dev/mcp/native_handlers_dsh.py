@@ -1,6 +1,6 @@
 """
 [Role] DSH 0.2.0-rc.2 native handlers (read_image/bash/job_output/job_list/job_kill).
-[Invariants] Consumptive job_output, native background shape, strict session scope.
+[Invariants] Consumptive job_output, native background shape, cross-session handle access.
 [Timeouts & Locks] Canonical job control owns deadlines.
 [Side-Effect Policy] Mutations only through canonical core.
 """
@@ -99,18 +99,15 @@ def dsh_job_output(profile: str, spec: NativeToolSpec, native: dict[str, Any], n
 
 @handler("dsh_job_list")
 def dsh_job_list(profile: str, spec: NativeToolSpec, native: dict[str, Any], normalized: dict[str, Any], call_canonical: CanonicalCall) -> dict[str, Any]:
-    from remote_dev.core.state_store import list_endpoint_records, list_job_records, resolve_ledger_scope
+    from remote_dev.core.state_store import list_endpoint_records, list_job_records
     from remote_dev.result import make_result
 
-    scope = resolve_ledger_scope()
     jobs = []
     for endpoint in list_endpoint_records():
         endpoint_id = str(endpoint.get("endpoint_id") or "")
         if not endpoint_id:
             continue
         for record in list_job_records(endpoint_id):
-            if record.get("session_scope") != scope:
-                continue
             remote_status: Mapping[str, Any] = {}
             status_detail = None
             try:
@@ -214,6 +211,28 @@ def dsh_bash(profile: str, spec: NativeToolSpec, native: dict[str, Any], normali
     stderr = str(preview.get("stderr") or "")
     exit_code = result.get("exit_code")
     background = native.get("run_in_background") is True
+    job_id = result.get("job_id") or result.get("session_id")
+    error_info = result.get("error_details") if isinstance(result.get("error_details"), Mapping) else {}
+    uncertain = (
+        bool(result.get("unknown"))
+        or result.get("status") == "submission_uncertain"
+        or error_info.get("submission_state") == "uncertain"
+        or state in {"uncertain", "lost_outcome", "unknown"}
+    )
+    launched_command = (
+        isinstance(job_id, str)
+        and bool(job_id)
+        and not uncertain
+        and result.get("status") != "local_recording_failed"
+        and result.get("error_details") is None
+        and (
+            state in {"prepared", "running"}
+            or (state in {"succeeded", "failed", "timeout", "cancelled"} and type(exit_code) is int)
+        )
+    )
+    if background and not launched_command:
+        result["tool"] = spec.wire
+        return payload
     timeout_ms = int(native.get("timeoutMs", 120000))
     if background:
         kind = "background"
