@@ -24,17 +24,19 @@ REMOTE_IMAGE_PY = r'''
 import base64
 import io
 import json
+import os
 import pathlib
 import sys
 
 request = json.loads(sys.stdin.read())
-root = pathlib.Path(request.get("root") or "/").resolve()
+raw_root = request.get("root")
+root = pathlib.Path(raw_root).resolve() if raw_root and not (os.name == "nt" and raw_root == "/") else None
 path = pathlib.Path(request["path"])
 limit = int(request["max_bytes"])
 region = request.get("region")
 max_edge = request.get("max_edge")
 resolved = path.resolve()
-if resolved != root and root not in resolved.parents:
+if root is not None and resolved != root and root not in resolved.parents:
     print(json.dumps({"status": "path_outside_root", "error": f"remote image path escapes root: {resolved}"})); raise SystemExit(0)
 if not resolved.is_file():
     print(json.dumps({"status": "not_file", "error": "remote image path is not a regular file"})); raise SystemExit(0)
