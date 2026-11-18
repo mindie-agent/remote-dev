@@ -467,6 +467,7 @@ def test_windows_session_lock_liveness_and_endpoint_context_artifacts_patches_gc
     old_art = ep / "artifacts" / "art-expired"
     old_art.mkdir()
     (old_art / "manifest.json").write_text("{}", encoding="utf-8")
+    os.utime(old_art / "manifest.json", (now - 30 * 86400, now - 30 * 86400))
     os.utime(old_art, (now - 30 * 86400, now - 30 * 86400))
 
     fresh_art = ep / "artifacts" / "art-inflight"
