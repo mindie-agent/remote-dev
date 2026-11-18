@@ -209,19 +209,6 @@ BY_HARNESS.setdefault("wb", {
             },
         },
         {
-            "name": "BashOutput",
-            "schema_kind": "json",
-            "required": ["shell_id"],
-            "defaults": {},
-            "input_schema": {
-                "properties": {
-                    "shell_id": {"type": "string", "description": "The ID of the background shell to retrieve output from."},
-                    "filter": {"type": "string", "description": "Optional regex pattern to filter output lines."},
-                },
-                "required": ["shell_id"],
-            },
-        },
-        {
             "name": "TaskStop",
             "schema_kind": "json",
             "required": [],
@@ -232,18 +219,6 @@ BY_HARNESS.setdefault("wb", {
                     "shell_id": {"type": "string", "description": "Deprecated: use task_id instead."},
                 },
                 "required": [],
-            },
-        },
-        {
-            "name": "KillShell",
-            "schema_kind": "json",
-            "required": ["shell_id"],
-            "defaults": {},
-            "input_schema": {
-                "properties": {
-                    "shell_id": {"type": "string", "description": "The ID of the background shell to kill."},
-                },
-                "required": ["shell_id"],
             },
         },
         {
@@ -348,7 +323,7 @@ class CatalogContractTests(unittest.TestCase):
         })
 
     def test_exact_native_wire_names_are_present(self) -> None:
-        for profile in NATIVE_PROFILES:
+        for profile in BY_HARNESS:
             with self.subTest(profile=profile):
                 actual = set(_catalog(profile))
                 expected = {
@@ -359,7 +334,7 @@ class CatalogContractTests(unittest.TestCase):
                 self.assertEqual(missing, [], f"{profile} missing native tools: {missing}")
 
     def test_native_schema_required_properties_types_enums_defaults(self) -> None:
-        for profile in NATIVE_PROFILES:
+        for profile in BY_HARNESS:
             cat = _catalog(profile)
             for tool in BY_HARNESS[profile]["tools"]:
                 name = "remote_" + tool["name"]
@@ -413,7 +388,7 @@ class CatalogContractTests(unittest.TestCase):
     def test_native_schema_has_no_extra_native_properties(self) -> None:
         """Strict native parity: report compatibility/extra fields, do not allowlist."""
         problems: list[str] = []
-        for profile in NATIVE_PROFILES:
+        for profile in BY_HARNESS:
             cat = _catalog(profile)
             for tool in BY_HARNESS[profile]["tools"]:
                 if tool.get("schema_kind") == "freeform_lark_grammar":

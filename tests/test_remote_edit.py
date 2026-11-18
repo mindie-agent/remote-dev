@@ -135,24 +135,22 @@ class RemoteEditTests(unittest.TestCase):
                 (
                     "remote.edit",
                     lambda p: {"file_path": str(p), "old_string": "delete_me = 1\n", "new_string": ""},
+                    None,
                 ),
                 (
                     "remote_Edit",
                     lambda p: {"file_path": str(p), "old_string": "delete_me = 1\n", "new_string": ""},
+                    "claude",
                 ),
                 (
-                    "remote_StrReplaceFile",
-                    lambda p: {"path": str(p), "old_str": "delete_me = 1\n", "new_str": ""},
+                    "remote_edit_file",
+                    lambda p: {"Path": str(p), "Target": "delete_me = 1\n", "Replacement": ""},
+                    "agy",
                 ),
                 (
-                    "remote_replace_file_content",
-                    lambda p: {
-                        "TargetFile": str(p),
-                        "TargetContent": "delete_me = 1\n",
-                        "ReplacementContent": "",
-                        "StartLine": 1,
-                        "EndLine": 3,
-                    },
+                    "remote_edit",
+                    lambda p: {"filePath": str(p), "oldString": "delete_me = 1\n", "newString": ""},
+                    "oc",
                 ),
             ]
             with mock.patch.object(state_store, "substrate_root", return_value=root / "state"), mock.patch.object(
@@ -160,12 +158,11 @@ class RemoteEditTests(unittest.TestCase):
             ), mock.patch.object(
                 file_ops, "remote_stat", return_value={"status": "missing", "exists": False}
             ):
-                for idx, (tool_name, make_args) in enumerate(cases):
-                    with self.subTest(tool_name=tool_name):
+                for idx, (tool_name, make_args, profile) in enumerate(cases):
+                    with self.subTest(tool_name=tool_name, profile=profile):
                         target = root / f"sample_{idx}.py"
                         target.write_bytes(b"keep_top = 0\ndelete_me = 1\nkeep_bottom = 2\n")
                         remote_target = PurePosixPath("/workspace") / target.name
-                        profile = "claude" if tool_name == "remote_Edit" else None
                         res = mcp_tools.call_tool(
                             tool_name, {**endpoint_args, **make_args(remote_target)}, profile=profile
                         )

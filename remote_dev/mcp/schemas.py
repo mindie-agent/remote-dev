@@ -1,9 +1,9 @@
 """
-[Role] JSON Schema definitions and 6-Harness tool/parameter alias tables (`mcp/schemas.py`).
+[Role] JSON Schema definitions and the 7-Harness native/canonical catalog (`mcp/schemas.py`).
 [Invariants]
-- Defines `TOOL_SCHEMAS` for all 18 canonical `remote.*` tools, `ALIASES` (portable `remote_*` wire names), `HARNESS_TOOL_ALIASES` (40 native tool habits across 6 Harnesses), and `PARAM_ALIASES`.
+- Defines `TOOL_SCHEMAS` for all 20 canonical `remote.*` tools, `ALIASES` (portable `remote_*` wire names), `HARNESS_TOOL_ALIASES` (legacy native habits), and `harness_catalog`.
+- A bound harness profile advertises only its native-mirrored tools plus declared remote-only support tools; the canonical profile advertises exactly the 20 portable aliases.
 - Keeps aliasable required parameters enforced in `mcp/tools.py` so provider-side JSON Schema validators never reject valid alias-only calls.
-- Advertises conditional endpoint selection in actual endpoint-bound tool descriptions and host/port property descriptions while keeping a plain object schema.
 [Timeouts & Locks]
 - Pure in-memory schema and argument normalization (`normalize_arguments`).
 [Side-Effect Policy]
@@ -100,6 +100,9 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "password": {"type": "string", "minLength": 1, "writeOnly": True, "description": "SSH password already supplied by the user, imported once for action=setup. Use it directly to install and verify a public key; never echo it. Mutually exclusive with password_env."},
         "password_env": {"type": "string", "description": "For action=setup, name of a password environment variable already available to this server process. Variables set in a separate terminal do not reach a running MCP server; use password for credentials already supplied by the user. Mutually exclusive with password."},
         "install_key": {"type": "boolean", "default": True, "description": "Install and independently verify a public key; retain the password for recovery. If key authentication remains unavailable, use verified password authentication."},
+        "save_default": {"type": "boolean", "default": False, "description": "After a verified setup, record this non-secret endpoint as the default alias in the local endpoints file. Passwords are never stored."},
+        "save_alias": {"type": "string", "description": "After a verified setup, record this non-secret endpoint under this alias in the local endpoints file. Passwords are never stored."},
+        "discover": {"type": "boolean", "default": False, "description": "Attach one bounded read-only host discovery (OS, NPU presence, running containers) to a verified setup or status result; discovery failures never fail authentication."},
     }),
     "remote.read": schema(
         {
@@ -338,8 +341,9 @@ for _job_name in ("remote.job_status", "remote.job_tail", "remote.job_output", "
 
 ALIASES: dict[str, str] = {name.replace(".", "_"): name for name in TOOL_SCHEMAS}
 
-# Additional Harness-native tool name aliases accepted by canonical_name() / call_tool()
-# across Codex, Claude Code, Cursor, Kimi Code, DSH, and Antigravity.
+# Legacy Harness-native name aliases resolved by canonical_name() for local
+# compatibility helpers. The strict call_tool boundary never accepts another
+# harness's native wire name under a bound profile.
 HARNESS_TOOL_ALIASES: dict[str, str] = {
     "remote.view_file": "remote.read",
     "remote_view_file": "remote.read",
@@ -375,12 +379,8 @@ HARNESS_TOOL_ALIASES: dict[str, str] = {
     "remote_manage_task": "remote.job_status",
     "remote.command_status": "remote.job_status",
     "remote_command_status": "remote.job_status",
-    "remote.bash_output": "remote.job_status",
-    "remote_bash_output": "remote.job_status",
     "remote.task_output": "remote.job_status",
     "remote_task_output": "remote.job_status",
-    "remote.kill_shell": "remote.job_stop",
-    "remote_kill_shell": "remote.job_stop",
     "remote.task_stop": "remote.job_stop",
     "remote_task_stop": "remote.job_stop",
     "remote.find_by_name": "remote.glob",
@@ -417,205 +417,13 @@ HARNESS_TOOL_ALIASES: dict[str, str] = {
     "remote_LS": "remote.ls",
     "remote.JobOutput": "remote.job_output",
     "remote_JobOutput": "remote.job_output",
-    "remote.BashOutput": "remote.job_status",
-    "remote_BashOutput": "remote.job_status",
     "remote.TaskOutput": "remote.job_status",
     "remote_TaskOutput": "remote.job_status",
-    "remote.KillShell": "remote.job_stop", "remote_KillShell": "remote.job_stop",
     "remote.TaskStop": "remote.job_stop", "remote_TaskStop": "remote.job_stop",
     "remote.ViewImage": "remote.read", "remote_ViewImage": "remote.read",
 }
 
-# Thin client-native parameter aliases folded into the canonical fields by
-# normalize_arguments. One shared mapping serves the MCP dispatcher and the
-# CLI --input-json path; there is no per-client execution fork. A canonical
-# key always wins over its alias, and unknown keys pass through untouched so
-# consumer resolver selectors keep working.
-PARAM_ALIASES: dict[str, dict[str, str]] = {
-    "remote.read": {
-        "path": "file_path",
-        "TargetFile": "file_path",
-        "target_file": "file_path",
-        "AbsolutePath": "file_path",
-        "absolute_path": "file_path",
-        "File": "file_path",
-        "line_offset": "offset",
-        "n_lines": "limit",
-        "StartLine": "start_line",
-        "start_line_one_indexed": "start_line",
-        "EndLine": "end_line",
-        "end_line_one_indexed_inclusive": "end_line",
-        "ContentOffset": "content_offset",
-        "ItemOffset": "item_offset",
-        "NodePaths": "node_paths",
-        "symbol": "node_paths",
-        "symbols": "node_paths",
-        "should_read_entire_file": "_should_read_entire_file",
-        "image_path": "file_path", "query": "_explanation", "explanation": "_explanation",
-    },
-    "remote.write": {
-        "path": "file_path",
-        "TargetFile": "file_path",
-        "target_file": "file_path",
-        "AbsolutePath": "file_path",
-        "absolute_path": "file_path",
-        "CodeContent": "content",
-        "code_content": "content",
-        "contents": "content",
-        "Overwrite": "overwrite",
-        "Append": "append",
-        "Description": "description",
-        "explanation": "description",
-    },
-    "remote.edit": {
-        "path": "file_path",
-        "TargetFile": "file_path",
-        "target_file": "file_path",
-        "AbsolutePath": "file_path",
-        "absolute_path": "file_path",
-        "TargetContent": "old_string",
-        "target_content": "old_string",
-        "old_str": "old_string",
-        "ReplacementContent": "new_string",
-        "replacement_content": "new_string",
-        "new_str": "new_string",
-        "AllowMultiple": "replace_all",
-        "allow_multiple": "replace_all",
-        "StartLine": "start_line",
-        "start_line_one_indexed": "start_line",
-        "EndLine": "end_line",
-        "end_line_one_indexed_inclusive": "end_line",
-        "Instruction": "instruction",
-        "Description": "description",
-        "explanation": "description",
-    },
-    "remote.multi_edit": {
-        "path": "file_path",
-        "TargetFile": "file_path",
-        "target_file": "file_path",
-        "AbsolutePath": "file_path",
-        "absolute_path": "file_path",
-        "ReplacementChunks": "edits",
-        "replacement_chunks": "edits",
-        "Instruction": "instruction",
-        "Description": "description",
-        "explanation": "description",
-    },
-    "remote.bash": {
-        "cmd": "command",
-        "CommandLine": "command",
-        "command_line": "command",
-        "workdir": "cwd",
-        "working_dir": "cwd",
-        "Cwd": "cwd",
-        "WaitMsBeforeAsync": "yield_time_ms",
-        "wait_ms_before_async": "yield_time_ms",
-        "is_background": "run_in_background",
-        "IsDaemon": "run_in_background",
-        "is_daemon": "run_in_background",
-        "explanation": "description",
-    },
-    "remote.glob": {
-        "Pattern": "pattern",
-        "glob_pattern": "pattern",
-        "file_pattern": "pattern",
-        "query": "pattern",
-        "SearchDirectory": "path",
-        "search_directory": "path",
-        "target_directory": "path",
-        "DirectoryPath": "path",
-        "dir_path": "path",
-        "Extensions": "extensions",
-        "Excludes": "excludes",
-        "exclude_pattern": "excludes",
-        "Type": "entry_type",
-        "type": "entry_type",
-        "file_type": "entry_type",
-        "MaxDepth": "max_depth",
-        "depth": "max_depth",
-        "FullPath": "full_path",
-        "explanation": "_explanation",
-    },
-    "remote.grep": {
-        "Query": "pattern",
-        "query": "pattern",
-        "SearchPath": "path",
-        "search_path": "path",
-        "target_directory": "path",
-        "-i": "case_insensitive",
-        "CaseInsensitive": "case_insensitive",
-        "ignore_case": "case_insensitive",
-        "case_sensitive": "_case_sensitive",
-        "IsRegex": "_is_regex",
-        "is_regex": "_is_regex",
-        "literal": "fixed_strings",
-        "-F": "fixed_strings",
-        "MatchPerLine": "_match_per_line",
-        "match_per_line": "_match_per_line",
-        "Includes": "includes",
-        "include_pattern": "includes",
-        "Excludes": "excludes",
-        "exclude_pattern": "excludes",
-        "-A": "after_context",
-        "-B": "before_context",
-        "-C": "context_lines",
-        "-n": "line_numbers",
-        "head_limit": "limit",
-        "explanation": "_explanation",
-    },
-    "remote.ls": {
-        "DirectoryPath": "path",
-        "directory_path": "path",
-        "dir_path": "path",
-        "target_directory": "path",
-        "MaxDepth": "max_depth",
-        "depth": "max_depth",
-        "recursive": "_recursive",
-        "Excludes": "ignore_globs",
-        "excludes": "ignore_globs",
-        "explanation": "_explanation",
-    },
-    "remote.job_status": {
-        "TaskId": "job_id",
-        "task_id": "job_id",
-        "bash_id": "job_id",
-        "shell_id": "job_id",
-        "Action": "action",
-        "Input": "chars",
-        "input": "chars",
-        "stdin": "chars",
-    },
-    "remote.job_tail": {
-        "TaskId": "job_id",
-        "task_id": "job_id",
-        "bash_id": "job_id",
-        "shell_id": "job_id",
-    },
-    "remote.job_output": {
-        "TaskId": "job_id",
-        "task_id": "job_id",
-        "bash_id": "job_id",
-        "shell_id": "job_id",
-    },
-    "remote.job_stop": {
-        "TaskId": "job_id",
-        "task_id": "job_id",
-        "bash_id": "job_id",
-        "shell_id": "job_id",
-    },
-    "remote.job_stdin": {
-        "TaskId": "job_id",
-        "task_id": "job_id",
-        "bash_id": "job_id",
-        "shell_id": "job_id",
-        "Input": "chars",
-        "input": "chars",
-        "stdin": "chars",
-        "WaitMsBeforeAsync": "yield_time_ms",
-        "wait_ms_before_async": "yield_time_ms",
-    },
-}
-
+from .param_aliases import PARAM_ALIASES  # noqa: F401 - shared table and legacy re-export
 
 def _normalize_edit_chunk(chunk: Any) -> Any:
     if not isinstance(chunk, dict):
@@ -758,42 +566,45 @@ def _advertised_description(name: str, base: str) -> str:
 def harness_catalog(profile: str | None = None) -> list[dict[str, Any]]:
     """Return the exact tools/list payload for a trusted harness profile.
 
-    Build-time catalog generators call this function; the MCP server and CLI
-    use the same function so discovery cannot drift from dispatch.
+    The canonical surface advertises the 20 portable aliases. A bound harness
+    profile advertises only that harness's native-mirrored tools plus the
+    minimal remote-only support tools; cross-harness aliases never leak in.
     """
     from .harness_profiles import (
         CANONICAL_PROFILE,
         native_input_schema,
         resolve_profile,
         specs_for,
+        support_tools_for,
     )
 
     resolved = resolve_profile(profile)
-    # Grok's session registry rejects dotted names even when its MCP doctor
-    # successfully lists them. Advertise the portable aliases to every client;
-    # call_tool still accepts canonical dotted names for existing integrations.
-    tools = [
-        {"name": alias,
-         "description": _advertised_description(name, CANONICAL_DESCRIPTIONS.get(name, name)),
-         "inputSchema": TOOL_SCHEMAS[name]}
-        for alias, name in ALIASES.items()
-    ]
     if resolved == CANONICAL_PROFILE:
-        return tools
-    by_name = {tool["name"]: index for index, tool in enumerate(tools)}
+        return [
+            {"name": alias,
+             "description": _advertised_description(name, CANONICAL_DESCRIPTIONS.get(name, name)),
+             "inputSchema": TOOL_SCHEMAS[name]}
+            for alias, name in ALIASES.items()
+        ]
+    tools: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for spec in specs_for(resolved).values():
-        entry = {
+        if spec.wire in seen:
+            continue
+        seen.add(spec.wire)
+        tools.append({
             "name": spec.wire,
             "description": _advertised_description(spec.canonical, spec.description),
             "inputSchema": native_input_schema(spec, ENDPOINT_PROPS, ENDPOINT_SELECTOR_DESCRIPTION),
-        }
-        # A native name that equals a portable canonical alias (for example
-        # DSH ``read`` -> ``remote_read``) is the same wire name. Native
-        # semantics win on the advertised schema; the server still accepts the
-        # canonical fields for compatibility.
-        if spec.wire in by_name:
-            tools[by_name[spec.wire]] = entry
-        else:
-            by_name[spec.wire] = len(tools)
-            tools.append(entry)
+        })
+    for canonical in support_tools_for(resolved):
+        wire = canonical.replace(".", "_")
+        if wire in seen:
+            continue
+        seen.add(wire)
+        tools.append({
+            "name": wire,
+            "description": _advertised_description(canonical, CANONICAL_DESCRIPTIONS.get(canonical, canonical)),
+            "inputSchema": TOOL_SCHEMAS[canonical],
+        })
     return tools

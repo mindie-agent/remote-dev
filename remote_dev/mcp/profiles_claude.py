@@ -229,17 +229,6 @@ CLAUDE_TASK_OUTPUT = NativeToolSpec(
     normalize=_claude_task_output,
 )
 
-CLAUDE_BASH_OUTPUT = NativeToolSpec(
-    native_name="BashOutput",
-    canonical="remote.job_output",
-    description="Alias of Claude Code TaskOutput in 2.1.269 (task_id/block/timeout).",
-    properties=CLAUDE_TASK_OUTPUT.properties,
-    required=("task_id",),
-    defaults={"block": True, "timeout": 30000},
-    handler="claude_task_output",
-    normalize=_claude_task_output,
-)
-
 CLAUDE_NOTEBOOK_EDIT = NativeToolSpec(
     native_name="NotebookEdit",
     canonical="remote.write",
@@ -270,15 +259,6 @@ CLAUDE_TASK_STOP = NativeToolSpec(
     normalize=_claude_task_stop,
 )
 
-CLAUDE_KILL_SHELL = NativeToolSpec(
-    native_name="KillShell",
-    canonical="remote.job_stop",
-    description="Alias of Claude Code TaskStop (task_id/shell_id).",
-    properties=CLAUDE_TASK_STOP.properties,
-    handler="claude_task_stop",
-    normalize=_claude_task_stop,
-)
-
 
 SPECS = {
     spec.native_name: spec
@@ -290,9 +270,7 @@ SPECS = {
         CLAUDE_GLOB,
         CLAUDE_GREP,
         CLAUDE_TASK_OUTPUT,
-        CLAUDE_BASH_OUTPUT,
         CLAUDE_NOTEBOOK_EDIT,
         CLAUDE_TASK_STOP,
-        CLAUDE_KILL_SHELL
     )
 }

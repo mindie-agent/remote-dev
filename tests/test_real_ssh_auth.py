@@ -158,20 +158,28 @@ def _fresh_call(endpoint, tmp_path, profile="canonical", command="printf fresh-a
     env = dict(os.environ, REMOTE_DEV_STATE_DIR=str(tmp_path / ("new-chat-" + uuid.uuid4().hex)),
                REMOTE_DEV_SESSION_ID=uuid.uuid4().hex)
     env.pop("TEST_SSH_PASSWORD", None)
+    tools = {
+        "canonical": ("remote.bash", {"command": command, "timeout_ms": 15000}),
+        "codex": ("remote_exec_command", {"cmd": command, "yield_time_ms": 15000}),
+        "claude": ("remote_Bash", {"command": command}),
+        "kimi": ("remote_Bash", {"command": command, "description": "fresh auth", "timeout": 15}),
+        "dsh": ("remote_bash", {"command": command, "description": "fresh auth", "timeoutMs": 15000}),
+    }
+    tool_name, tool_args = tools[profile]
     source = """
 import json,sys
 from remote_dev.mcp.tools import call_tool
 from remote_dev.core.rpc_transport import close_connections
 args=json.loads(sys.stdin.read())
 try:
-    print(json.dumps(call_tool("remote.bash",args,profile=sys.argv[1])))
+    print(json.dumps(call_tool(sys.argv[2],args,profile=sys.argv[1])))
 finally:
     close_connections()
 """
     payload = {"host": endpoint.host, "port": endpoint.port, "user": endpoint.user,
                "root": endpoint.root, "cwd": endpoint.cwd, "runtime_env": False,
-               "command": command, "timeout_ms": 15000}
-    process = subprocess.run([sys.executable, "-c", source, profile], input=json.dumps(payload),
+               **tool_args}
+    process = subprocess.run([sys.executable, "-c", source, profile, tool_name], input=json.dumps(payload),
                              text=True, capture_output=True, env=env, timeout=22)
     assert process.returncode == 0, process.stderr
     result = json.loads(process.stdout)

@@ -25,9 +25,9 @@ Shared SSH workspace, durable background job supervision, and 7-Harness MCP subs
 
 ## 2. Module Navigation
 
-- `remote_dev/mcp/server.py`, `tools.py`, `schemas.py`, `catalog_refresh.py`, `_resident_helper.py`: Concurrent stdio MCP server, 7-Harness alias normalization, and warm generation-aware resident gateway.
-- `remote_dev/mcp/native_handlers_*.py`, `native_common.py`, `wb_native_compat.py`: Harness-native adapters (`codex`, `claude`, `kimi`, `dsh`, `wb`).
-- `remote_dev/auth/`: Shared SSH key enrollment, credential store, and pre-dispatch verification.
+- `remote_dev/mcp/server.py`, `tools.py`, `schemas.py`, `catalog_refresh.py`, `_resident_helper.py`: Concurrent stdio MCP server, strict 7-Harness `tools/list`/`tools/call` boundary, and warm generation-aware resident gateway.
+- `remote_dev/mcp/profiles_*.py`, `harness_profiles.py`, `native_spec.py`, `native_handlers_*.py`, `native_common.py`, `wb_native_compat.py`: Harness-native adapters (`codex`, `claude`, `kimi`, `dsh`, `wb`, `agy`, `oc`) with per-profile support-tool declarations.
+- `remote_dev/auth/`: Shared SSH key enrollment, credential store, non-secret endpoint alias persistence (`endpoint_store.py`), bounded onboarding discovery (`discover.py`), and pre-dispatch verification.
 - `remote_dev/core/ssh_transport.py`, `ssh_stream.py`, `ssh_forward.py`, `rpc_transport.py`, `local_process.py`, `_posix_owner.py`: SSH argv/ControlMaster policy, binary RPC pool, port forwards, and owned process-group / Windows Job supervision.
 - `remote_dev/core/file_ops.py`, `patch_ops.py`, `artifact_ops.py`, `search_ops.py`, `job_ops.py`, `shell_ops.py`: Remote workspace operations and durable job control.
 - `remote_dev/core/state_store.py`, `retention.py`, `session_retention.py`, `windows_probe.py`: Atomic local state and cross-platform bounded GC.

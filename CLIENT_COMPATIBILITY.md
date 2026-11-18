@@ -4,13 +4,13 @@
 
 Different AI coding Harnesses (**OpenAI Codex**, **Claude Code**, **Cursor**, **Kimi Code**, **DeepSeek Harness / DSH**, **Google Antigravity**, and **Grok Build**) have distinct native local tool names, parameter shapes, and behavioral expectations — some send `path` or `AbsolutePath` / `TargetFile` instead of `file_path`, some slice files with `StartLine` / `EndLine` or `line_offset` / `n_lines`, some scope file replacements to `[StartLine, EndLine]`, and some inspect AST symbols (`view_file_outline` / `view_code_item`).
 
-`remote-dev` keeps the 19 canonical `remote.*` tools available in every profile. Native basic-tool names (`remote_Read`, `remote_exec_command`, `remote_bash`, …) are exposed only when the server is launched with a trusted `REMOTE_DEV_HARNESS_PROFILE` (`codex`, `claude`, `kimi`, or `dsh`); a plugin binds that profile in its own MCP launcher, never from tool arguments. See [`docs/harness-profiles.md`](./docs/harness-profiles.md) for the per-profile tool list, units, defaults and media limits. Legacy aliases outside the four profiles keep their canonical mapping; native-case aliases such as `remote_Edit` require the owning profile.
+`remote-dev` exposes exactly 20 canonical `remote.*` tools when no harness profile is bound. A trusted `REMOTE_DEV_HARNESS_PROFILE` (`codex`, `claude`, `kimi`, `dsh`, `wb`, `agy`, or `oc`) replaces that surface with only the host's native-mirrored tools plus the four base support tools (`remote_auth`, `remote_probe`, `remote_artifact_pull`, `remote_artifact_push`) and host-specific job controls; a plugin binds that profile in its own MCP launcher, never from tool arguments. See [`docs/harness-profiles.md`](./docs/harness-profiles.md) for the exact per-profile tool list, units, defaults and media limits. Cross-harness aliases and retired `remote_BashOutput` / `remote_KillShell` names are not advertised or accepted under a bound profile.
 
 ---
 
-## 6-Harness Native Tool & Parameter Mapping
+## 7-Harness Native Tool & Parameter Mapping
 
-| Capability | Canonical `remote-dev` Tool | Accepted Harness Tool Aliases | Supported Native Parameter Habits Across All 6 Harnesses |
+| Capability | Canonical `remote-dev` Tool | Accepted Harness Tool Aliases | Supported Native Parameter Habits Across All 7 Harnesses |
 | --- | --- | --- | --- |
 | **Read / Slice / Outline / Code Item** | `remote.read` (`remote_read`) | `remote_view_file`, `remote_read_file`, `remote_view_file_outline`, `remote_view_code_item` | `file_path` / `path` / `AbsolutePath` / `TargetFile` / `target_file` / `File`; `offset` + `limit` (CC), `line_offset` + `n_lines` including negative tail offsets (Kimi), `StartLine` + `EndLine` / `start_line_one_indexed` + `end_line_one_indexed_inclusive` (Antigravity / Cursor / DSH), `ContentOffset` byte/char offset (Antigravity), `should_read_entire_file` (Cursor), `outline=true` + `ItemOffset` (Antigravity `view_file_outline`), `NodePaths` / `symbol` AST & regex symbol extraction (Antigravity `view_code_item`). |
 | **Write / Overwrite / Append** | `remote.write` (`remote_write`) | `remote_write_to_file`, `remote_write_file` | `file_path` / `path` / `TargetFile` / `target_file` / `AbsolutePath`; `content` / `CodeContent` / `contents`; `overwrite` / `Overwrite`, `append` / `Append`, `mode="overwrite"\|"write"\|"append"` (Kimi), automatic `create_dirs=true` when `TargetFile` is used (Antigravity), optional `Description` / `explanation`. |
@@ -21,7 +21,7 @@ Different AI coding Harnesses (**OpenAI Codex**, **Claude Code**, **Cursor**, **
 | **Path & File Search** | `remote.glob` (`remote_glob`) | `remote_find_by_name`, `remote_file_search` | `pattern` / `Pattern` / `query` (optional when filters are given); `path` / `SearchDirectory` / `target_directory`; `Extensions` / `extensions`, `Excludes` / `exclude_pattern`, `Type` (`file` / `directory` / `any`), `MaxDepth` / `depth`, `FullPath` / `full_path`, `respect_gitignore`. |
 | **Directory Listing** | `remote.ls` (`remote_ls`) | `remote_list_dir` | `path` / `DirectoryPath` / `dir_path` / `target_directory`; `MaxDepth` / `depth` / `recursive`, `Excludes` / `ignore_globs`, `all`, `limit`. |
 | **Shell Execution & Background Tasks** | `remote.bash` (`remote_bash`) | `remote_exec_command`, `remote_run_command`, `remote_run_terminal_cmd`, `remote_shell` | `command` / `cmd` / `CommandLine`; `cwd` / `workdir` / `working_dir` / `Cwd`; `yield_time_ms` / `WaitMsBeforeAsync`; `run_in_background` / `is_background` / `IsDaemon` (launches immediately as a managed background job and returns `job_id` / `session_id`); `tty`, `max_output_tokens`, `env`. |
-| **Interactive Stdin & Task Control** | `remote.job_status` / `job_stdin` / `job_tail` / `job_stop` | `remote_manage_task`, `remote_write_stdin`, `remote_bash_output`, `remote_task_output`, `remote_kill_shell`, `remote_task_stop` | `job_id` / `session_id` / `TaskId` / `task_id` / `bash_id` / `shell_id`; `chars` / `Input` / `input` / `stdin`; `Action="list"\|"status"\|"kill"\|"stop"\|"send_input"\|"tail"` (Antigravity `manage_task` parity). |
+| **Interactive Stdin & Task Control** | `remote.job_status` / `job_stdin` / `job_tail` / `job_stop` | `remote_manage_task`, `remote_write_stdin`, `remote_task_output`, `remote_task_stop` | `job_id` / `session_id` / `TaskId` / `task_id` / `bash_id` / `shell_id`; `chars` / `Input` / `input` / `stdin`; `Action="list"\|"status"\|"kill"\|"stop"\|"send_input"\|"tail"` (Antigravity `manage_task` parity). |
 
 ---
 
@@ -57,8 +57,8 @@ Register the MCP server once per project using the ready-made templates in [`exa
 
 ## Built-In Compatibility Features
 
-1. **Underscore, Dotted, and Harness-Native Tool Names Work**:
-   During tool discovery, `remote-dev` advertises portable underscore names (`remote_read`, `remote_apply_patch`, etc.). When calling a tool, canonical dotted names (`remote.read`), underscore names (`remote_read`), and Harness-native remote aliases (`remote_view_file`, `remote_replace_file_content`, `remote_exec_command`, `remote_manage_task`, etc.) are all accepted.
+1. **Strict Per-Profile Tool Surfaces**:
+   Without a profile, `remote-dev` advertises and accepts only the 20 portable canonical names (`remote_read` or `remote.read`). With a profile bound, discovery and dispatch are 1:1: only that host's native wire names plus its declared support tools are available. Call the advertised native name; a dotted canonical name that is not that host's wire name is rejected before any endpoint resolution.
 2. **Strict-Validator Friendly Flat Schemas**:
    Every tool input schema is a flat JSON object with no root `anyOf`, `oneOf`, `allOf`, or `$ref`, ensuring smooth acceptance by strict schema validators.
 3. **Coordinator Zero-Ceremony Endpoint Resolution**:

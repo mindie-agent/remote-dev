@@ -24,13 +24,13 @@ CALLER_ERROR_HINTS = {
 AUTH_ERROR_HINTS = {
     "authentication": "Configure SSH access with remote_auth action=setup using the password already supplied by the user, then continue the task. Use password_env only when the variable is already available to the server process.",
     "authentication_rejected": "SSH authentication was rejected. Check the target host, SSH port and login user against the user's supplied credentials; if setup has not imported the supplied password, call remote_auth action=setup with password before asking for new credentials.",
-    "authentication_timeout": "SSH authentication timed out. Check endpoint connectivity before configuring access again.",
+    "authentication_timeout": "SSH authentication timed out. Check endpoint connectivity before configuring access again; if this component cannot reach the host, continue the task with native ssh or local scripts instead of waiting for remote-dev.",
     "host_key": "SSH host-key verification failed. Confirm the server fingerprint with its administrator before updating known_hosts; do not automatically delete trust records or bypass verification.",
     "credential_required": "Call remote_auth action=setup with the password already supplied by the user to install and verify a public key; subsequent calls reuse the shared SSH profile. If no password was supplied, request only the missing credential.",
     "credential_unavailable": "The saved SSH credential, profile or password_env variable is unavailable in this server process. Use remote_auth action=setup with the password already supplied by the user; setting an environment variable in another terminal cannot update a running MCP server. For older catalogs, import the supplied password with remote-dev auth setup --password-stdin through a local process's stdin.",
     "configuration": "Check the SSH host, port, user, auth_ref, identity_file and known_hosts_file; configure the matching endpoint again if needed.",
-    "connection_unavailable": "Check endpoint connectivity and SSH host-key trust. Do not bypass host-key verification.",
-    "local_recording_failed": "Saving local SSH access state failed. Check the shared SSH state directory before configuring access again.",
+    "connection_unavailable": "Check endpoint connectivity and SSH host-key trust. Do not bypass host-key verification. If this component cannot reach the host, continue the task with native ssh or local scripts while remote-dev is unavailable.",
+    "local_recording_failed": "Saving local SSH access state failed. Check the shared SSH state directory before configuring access again; the verified key or supplied password can still be used through native ssh while local recording is unavailable.",
 }
 
 

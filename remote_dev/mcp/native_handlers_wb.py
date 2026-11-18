@@ -1,5 +1,5 @@
 """
-[Role] WorkBuddy (wb) native handlers (TaskOutput/BashOutput with raw-log incremental cursors & regex filter, ViewImage).
+[Role] WorkBuddy (wb) native handlers (TaskOutput with raw-log incremental cursors & regex filter, ViewImage).
 [Invariants] Preserves Claude/CodeBuddy task output XML envelope while supporting raw-offset incremental vs full=true output reads, regex line filtering, and ViewImage query metadata. Existing log-file or job-record stat/read OSError is never disguised as an empty incremental delta or a missing cursor. Cursor-commit recording_failure never invents outcome=success, never treats a live/non-FSM status as operation_completed, preserves real job execution_outcome over status-query success, and treats explicit wb_output_offsets or in-stream offset null as unreadable.
 [Timeouts & Locks] Canonical job control owns deadlines; cursor persistence acquires record_lock(record_path).
 [Side-Effect Policy] Read-only observation and media fetch via canonical core; persists wb_output_offsets into the reloaded job record and surfaces local_recording_failed on persistence errors.
