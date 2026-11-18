@@ -20,10 +20,15 @@ PROFILE_ENV = "REMOTE_DEV_HARNESS_PROFILE"
 
 CANONICAL_PROFILE = "canonical"
 
-NATIVE_PROFILES = ("codex", "claude", "kimi", "dsh", "wb")
+NATIVE_PROFILES = ("codex", "claude", "kimi", "dsh", "wb", "agy", "oc")
 
 PROFILES = (CANONICAL_PROFILE,) + NATIVE_PROFILES
-_PROFILE_ALIASES = {"workbuddy": "wb"}
+_PROFILE_ALIASES = {
+    "workbuddy": "wb",
+    "antigravity": "agy",
+    "opencode": "oc",
+    "cc": "claude",
+}
 
 class HarnessProfileError(ValueError):
     """The requested profile is unknown or a native call is not bound to it.
@@ -102,6 +107,39 @@ def _number(value: Any) -> Any:
     return value
 
 NATIVE_TOOLS: dict[str, dict[str, NativeToolSpec]] = {profile: {} for profile in NATIVE_PROFILES}
+
+_BASE_SUPPORT_TOOLS = (
+    "remote.auth",
+    "remote.probe",
+    "remote.artifact_pull",
+    "remote.artifact_push",
+)
+
+# Remote-only controls and transfers that accompany each native surface. A
+# profile gets job controls only when its own native tools do not already
+# cover status/output/stop.
+PROFILE_SUPPORT_TOOLS: dict[str, tuple[str, ...]] = {
+    "codex": (*_BASE_SUPPORT_TOOLS, "remote.job_status", "remote.job_stop"),
+    "claude": _BASE_SUPPORT_TOOLS,
+    "kimi": _BASE_SUPPORT_TOOLS,
+    "dsh": _BASE_SUPPORT_TOOLS,
+    "wb": _BASE_SUPPORT_TOOLS,
+    "agy": _BASE_SUPPORT_TOOLS,
+    "oc": (*_BASE_SUPPORT_TOOLS, "remote.job_status", "remote.job_output", "remote.job_stop"),
+}
+
+
+def support_tools_for(profile: str) -> tuple[str, ...]:
+    """Canonical dotted names of the remote-only tools bound to one profile."""
+    return PROFILE_SUPPORT_TOOLS.get(profile, ())
+
+
+def support_tool_canonical(profile: str, name: str) -> str | None:
+    """Return the dotted canonical name for an allowed support wire/dotted name."""
+    for canonical in support_tools_for(profile):
+        if name in (canonical, canonical.replace(".", "_")):
+            return canonical
+    return None
 
 JOB_RECORD_ENDPOINT_DESCRIPTION = (
     "Endpoint selector fields are optional for this tool: the endpoint is "
@@ -233,8 +271,13 @@ def validate_native_arguments(spec: NativeToolSpec, args: Mapping[str, Any], all
             f"{spec.wire} received unsupported argument(s): {', '.join(unknown)}"
         )
     required_aliases = {
-        "file_path": ("path", "AbsolutePath", "TargetFile", "target_file"),
-        "command": ("cmd",),
+        "file_path": ("path", "AbsolutePath", "TargetFile", "target_file", "Path"),
+        "Path": ("file_path",),
+        "filePath": ("file_path",),
+        "oldString": ("old_string",),
+        "newString": ("new_string",),
+        "command": ("cmd", "CommandLine"),
+        "CommandLine": ("command",),
         "job_id": ("session_id", "task_id", "bash_id", "shell_id"),
         "task_id": ("bash_id", "shell_id"),
         "shell_id": ("task_id", "job_id", "bash_id"),

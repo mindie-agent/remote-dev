@@ -171,7 +171,7 @@ class McpSchemaTests(unittest.TestCase):
 
     def test_unknown_tool_is_rejected_before_endpoint_resolution(self) -> None:
         with patch.object(mcp_tools, "resolve_endpoint") as resolve:
-            with self.assertRaises(KeyError):
+            with self.assertRaisesRegex(ValueError, "not part of the canonical remote-dev surface"):
                 mcp_tools.call_tool("vaws.session", {"context_file": "x"})
             resolve.assert_not_called()
 

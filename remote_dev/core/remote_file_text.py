@@ -317,6 +317,34 @@ def scan_text_lines(path: pathlib.Path, max_chars: int, digest=None, *,
                 return
 
 
+def read_byte_sliced_range(path: pathlib.Path, offset: int, limit: int,
+                           byte_offset: int, max_line_chars: int):
+    """Slice one UTF-8 byte offset across a selected line range as a whole.
+
+    Antigravity's ``ByteOffset`` addresses the selected text, not the start of
+    every line. Joining first and slicing once also keeps multibyte characters
+    and line boundaries honest; invalid split sequences decode with U+FFFD.
+    """
+    selected: list[str] = []
+    total = 0
+    for index, (line, _more) in enumerate(scan_text_lines(path, max_line_chars), 1):
+        total = index
+        if offset <= index < offset + limit:
+            selected.append(line)
+    raw_bytes = "\n".join(selected).encode("utf-8")
+    start_line = offset + raw_bytes[:byte_offset].count(b"\n")
+    sliced = raw_bytes[byte_offset:].decode("utf-8", errors="replace")
+    while sliced.startswith(("\n", "\r\n")):
+        sliced = sliced.split("\n", 1)[1] if "\n" in sliced else ""
+        start_line += 1
+    bodies = sliced.split("\n") if sliced else []
+    prepared = []
+    for position, body in enumerate(bodies):
+        clipped = len(body) > max_line_chars
+        prepared.append((start_line + position, body[:max_line_chars], clipped))
+    return prepared, total
+
+
 def extract_symbols(text: str, suffix: str) -> list[dict[str, object]]:
     lines = text.splitlines()
     symbols: list[dict[str, object]] = []

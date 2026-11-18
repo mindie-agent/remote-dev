@@ -534,14 +534,14 @@ class LiveNpuEndpointsTests(unittest.TestCase):
                 self.assertEqual(node_res["outcome"], "success", node_res)
                 self.assertIn("return x + 1", node_res["preview"]["content"])
 
-                # P0-1 verification on real container: delete line with new_string="" across aliases
+                # P0-1 verification on real container: delete a line with new_string=""
                 e_res = call_tool(
-                    "remote_replace_file_content",
+                    "remote.edit",
                     {
                         **base,
-                        "TargetFile": mod_path,
-                        "TargetContent": "        debug_line = 1\n",
-                        "ReplacementContent": "",
+                        "file_path": mod_path,
+                        "old_string": "        debug_line = 1\n",
+                        "new_string": "",
                     },
                 )["result"]
                 self.assertEqual(e_res["outcome"], "success", e_res)

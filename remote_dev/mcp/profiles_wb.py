@@ -22,7 +22,6 @@ from .profiles_claude import (
     CLAUDE_WRITE,
     _CLAUDE_VCS_EXCLUDES,
     _claude_task_output,
-    _claude_task_stop,
 )
 
 
@@ -66,18 +65,6 @@ def _wb_task_output(args: dict[str, Any]) -> dict[str, Any]:
         except re.error as exc:
             raise HarnessProfileError(f"invalid regex in filter: {exc}", field="filter") from exc
     return _claude_task_output(args)
-
-
-def _wb_bash_output(args: dict[str, Any]) -> dict[str, Any]:
-    if args.get("filter") is not None:
-        try:
-            re.compile(str(args["filter"]))
-        except re.error as exc:
-            raise HarnessProfileError(f"invalid regex in filter: {exc}", field="filter") from exc
-    job_id = args.get("shell_id") or args.get("task_id")
-    if not job_id:
-        raise HarnessProfileError("remote_BashOutput requires shell_id", field="shell_id")
-    return {"job_id": str(job_id), **_endpoint_args(args)}
 
 
 def _wb_view_image(args: dict[str, Any]) -> dict[str, Any]:
@@ -189,41 +176,6 @@ WB_TASK_OUTPUT = NativeToolSpec(
     normalize=_wb_task_output,
 )
 
-WB_BASH_OUTPUT = NativeToolSpec(
-    native_name="BashOutput",
-    canonical="remote.job_output",
-    description="Retrieve output from a running or completed background shell (WorkBuddy BashOutput; shell_id/filter).",
-    properties={
-        "shell_id": {
-            "type": "string",
-            "description": "The ID of the background shell to retrieve output from.",
-        },
-        "filter": {
-            "type": "string",
-            "description": "Optional regex pattern to filter output lines.",
-        },
-    },
-    required=("shell_id",),
-    defaults={"block": False, "timeout": 0},
-    handler="wb_task_output",
-    normalize=_wb_bash_output,
-)
-
-WB_KILL_SHELL = NativeToolSpec(
-    native_name="KillShell",
-    canonical="remote.job_stop",
-    description="Stop a running background shell by ID (WorkBuddy KillShell).",
-    properties={
-        "shell_id": {
-            "type": "string",
-            "description": "The ID of the background shell to kill.",
-        },
-    },
-    required=("shell_id",),
-    handler="claude_task_stop",
-    normalize=_claude_task_stop,
-)
-
 WB_VIEW_IMAGE = NativeToolSpec(
     native_name="ViewImage",
     canonical="remote.read",
@@ -256,10 +208,8 @@ SPECS = {
         WB_GLOB,
         WB_GREP,
         WB_TASK_OUTPUT,
-        WB_BASH_OUTPUT,
         WB_NOTEBOOK_EDIT,
         WB_TASK_STOP,
-        WB_KILL_SHELL,
         WB_VIEW_IMAGE,
     )
 }

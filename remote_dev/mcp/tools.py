@@ -1,8 +1,9 @@
 """
-[Role] MCP tool dispatcher, 6-Harness tool/parameter alias router, and `remote://` resource reader (`mcp/tools.py`).
+[Role] MCP tool dispatcher, strict per-harness surface router, and `remote://` resource reader (`mcp/tools.py`).
 [Invariants]
-- Exposes 18 canonical `remote.*` tools (`remote_read`..`remote_probe`) and routes 40 native Harness tool aliases (Claude Code, Codex, Kimi, Cursor, Antigravity, DSH) via `canonical_name` and `normalize_arguments`.
-- Validates required fields and `execution_timeout` before endpoint resolution or any external side effect; missing required fields carry bounded repair metadata.
+- Canonical profile: exactly the 20 portable `remote_*`/`remote.*` tools.
+- Bound profile: only `spec_by_wire(resolved, name)` or declared support tools; every other name is a pre-dispatch caller error.
+- Validates required fields and `execution_timeout` before endpoint resolution or any external side effect.
 [Timeouts & Locks]
 - Forwards validated `timeout_ms` to all underlying `core.*_ops` implementations.
 [Side-Effect Policy]
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 from remote_dev.observability import observed_tool
 from remote_dev.core.errors import caller_error
@@ -40,6 +42,7 @@ from remote_dev.mcp.harness_profiles import (
     resolve_profile,
     spec_by_wire,
     spec_by_wire_any_profile,
+    support_tool_canonical,
 )
 from remote_dev.mcp.schemas import harness_catalog
 from remote_dev.processes import control
@@ -241,6 +244,10 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
     foreground_marker = args.pop("_foreground", None)
     foreground = bool(foreground_marker)
     name = canonical_name(name)
+    if name == "remote.auth" and args.get("host") and "port" not in args and not args.get("alias"):
+        # Frictionless onboarding: a directly supplied SSH host defaults to 22.
+        # Other tools still require host+port together or a configured alias.
+        args["port"] = 22
     if (name == "remote.bash" and foreground_marker is None
             and not bool(args.get("run_in_background", False))):
         # Canonical one-shot Bash keeps the same real head/tail contract under
@@ -284,27 +291,71 @@ def _call_canonical(name: str, arguments: dict[str, Any] | None, *, profile: str
         _require(args, "job_id", name, "session_id")
     if name == "remote.auth":
         from remote_dev.auth import setup_access, auth_status, forget_access
+        from remote_dev.auth.onboarding import finalize_auth_result
         from remote_dev.result import make_result
         action = str(args.get("action") or "setup")
         if action != "setup" and (args.get("password") is not None or args.get("password_env") is not None):
             raise caller_error("SSH password input is only valid for action=setup")
+        discover = bool(args.get("discover", False))
+        if discover and action not in {"setup", "status"}:
+            raise caller_error("remote.auth discover is only valid for action=setup or status")
+        save_default = bool(args.get("save_default", False))
+        save_alias = args.get("save_alias")
+        if save_alias is not None and not isinstance(save_alias, str):
+            raise caller_error("remote.auth save_alias must be a string", field="save_alias")
+        if action != "setup" and (save_default or save_alias):
+            raise caller_error("remote.auth save_default/save_alias are only valid for action=setup")
+        # One monotonic deadline owns the whole receipt-producing operation.
+        # Primary SSH setup, optional endpoint persistence and discovery all
+        # consume the same remaining budget instead of restarting a timeout.
+        deadline = None if timeout_ms is None else time.monotonic() + timeout_ms / 1000.0
+
+        def remaining_ms(default_ms: int) -> int:
+            if deadline is None:
+                return default_ms
+            return max(1, int((deadline - time.monotonic()) * 1000))
+
         if action == "setup":
             facts = setup_access(endpoint, password=args.get("password"), password_env=args.get("password_env"),
                                  identity_file=args.get("identity_file"),
                                  install_key=bool(args.get("install_key", True)),
-                                 timeout_ms=timeout_ms or 30000)
+                                 timeout_ms=remaining_ms(30000))
         elif action == "status":
             facts = auth_status(endpoint)
         elif action == "forget":
-            facts = forget_access(endpoint, timeout_ms=timeout_ms or 30000)
+            facts = forget_access(endpoint, timeout_ms=remaining_ms(30000))
+            from remote_dev.auth.endpoint_store import clear_auth_ref
+            remaining_seconds = None if deadline is None else max(0.0, deadline - time.monotonic())
+            try:
+                cleared = clear_auth_ref(
+                    (facts.get("auth_ref"), getattr(endpoint, "auth_ref", None)),
+                    timeout_seconds=remaining_seconds,
+                )
+                if cleared.get("cleared"):
+                    facts["endpoint_aliases_cleared"] = cleared["cleared"]
+            except Exception as exc:  # noqa: BLE001 - the profile removal already completed
+                facts["endpoint_clear_warning"] = {
+                    "stage": "endpoint_alias_clear",
+                    "error_type": type(exc).__name__,
+                }
         else:
             raise caller_error("remote.auth action must be setup, status, or forget")
+        facts = finalize_auth_result(
+            endpoint, facts, action=action,
+            save_default=save_default, save_alias=save_alias,
+            discover=discover, timeout_ms=timeout_ms, deadline=deadline,
+        )
+        if facts.get("receipt_unconfirmed") and (facts.get("endpoint_save") or {}).get("saved") is False:
+            summary = ("SSH access verified; local endpoint alias recording failed. Continue the task with "
+                       "the verified endpoint; do not repeat key installation to repair local recording.")
+        elif facts.get("receipt_unconfirmed"):
+            summary = ("SSH access verified; local profile recording failed. Use the verified key or supplied "
+                       "password through native tooling; do not repeat key installation to repair local recording.")
+        else:
+            summary = f"SSH authentication {action} completed."
         result = make_result(tool=name, target=endpoint.to_result_target(),
                              outcome="success", status=str(facts.get("status") or "ok"),
-                             summary=("SSH access verified; local profile recording failed. Use the verified key "
-                                      "or supplied password through native tooling; do not repeat key installation "
-                                      "to repair local recording." if facts.get("receipt_unconfirmed") else
-                                      f"SSH authentication {action} completed."), extra=facts)
+                             summary=summary, extra=facts)
         return {"text": json.dumps(facts, ensure_ascii=False) + "\n", "result": result}
     if name == "remote.bash":
         assert endpoint is not None
@@ -539,21 +590,27 @@ def call_tool(
     resolved = resolve_profile(profile)
     args = dict(arguments or {})
     if resolved == CANONICAL_PROFILE:
-        native_elsewhere = spec_by_wire_any_profile(name)
-        if native_elsewhere is not None and name not in ALIASES:
+        if name not in ALIASES and name not in TOOL_SCHEMAS:
+            native_elsewhere = spec_by_wire_any_profile(name)
+            if native_elsewhere is not None:
+                raise caller_error(
+                    f"{name} is a {native_elsewhere[0]} native tool; "
+                    f"bind {PROFILE_ENV}={native_elsewhere[0]} or pass profile=... to use it"
+                )
             raise caller_error(
-                f"{name} is a {native_elsewhere[0]} native tool; "
-                f"bind {PROFILE_ENV}={native_elsewhere[0]} or pass profile=... to use it"
+                f"{name} is not part of the canonical remote-dev surface; "
+                f"bind {PROFILE_ENV}=<harness> or pass profile=... to use that host's native tools"
             )
-    if resolved != CANONICAL_PROFILE:
-        spec = spec_by_wire(resolved, name)
-        if spec is not None:
-            from remote_dev.mcp.harness_native import dispatch_native
+        return _call_canonical(name, args, profile=resolved)
+    spec = spec_by_wire(resolved, name)
+    if spec is not None:
+        from remote_dev.mcp.harness_native import dispatch_native
 
-            return dispatch_native(resolved, spec, args, _call_canonical)
-        other = spec_by_wire_any_profile(name)
-        if other is not None and other[0] != resolved and name not in ALIASES:
-            raise caller_error(
-                f"{name} is a {other[0]} native tool; current harness profile is {resolved}"
-            )
-    return _call_canonical(name, args, profile=resolved)
+        return dispatch_native(resolved, spec, args, _call_canonical)
+    canonical_support = support_tool_canonical(resolved, name)
+    if canonical_support is not None:
+        return _call_canonical(canonical_support, args, profile=resolved)
+    raise caller_error(
+        f"{name} is not available under harness profile {resolved!r}; "
+        "use this host's advertised remote_* tools"
+    )

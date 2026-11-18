@@ -1,5 +1,5 @@
-"""Codex adapter notes for remote-dev.
-
-Codex should map local `apply_patch` habits to `remote.apply_patch` whenever an
-edit targets a remote endpoint.
+"""[Role] Codex adapter naming notes.
+[Invariants] Map local `apply_patch` habits to `remote.apply_patch` only for explicit remote endpoints.
+[Timeouts & Locks] No local waits or locks.
+[Side-Effect Policy] Side-effect free documentation module.
 """

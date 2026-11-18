@@ -1,5 +1,5 @@
 """
-[Role] Unified CLI entry point (`remote-dev <tool>`) for all 18 remote development tools (`cli.py`).
+[Role] Unified CLI entry point (`remote-dev <tool>`) for all 20 remote development tools (`cli.py`).
 [Invariants]
 - Shares the exact same `TOOL_SCHEMAS`, `normalize_arguments`, and `mcp.tools.call_tool` execution path as the MCP server.
 - Emits deterministic UTF-8 `remote-dev.result.v1` JSON to stdout and exits `0` on `success`/`cancelled` or `1` on failure.
@@ -136,10 +136,14 @@ def build_parser(tool: str) -> argparse.ArgumentParser:
     if tool == "auth":
         parser.add_argument("--action", choices=["setup", "status", "forget"], default="setup")
         secret = parser.add_mutually_exclusive_group()
+        secret.add_argument("--password", help="SSH password value; prefer --password-stdin or --prompt to avoid shell history.")
         secret.add_argument("--password-env")
         secret.add_argument("--password-stdin", action="store_true")
         secret.add_argument("--prompt", action="store_true", help="Read the SSH password once without echo.")
         parser.add_argument("--no-install-key", dest="install_key", action="store_false", default=True)
+        parser.add_argument("--save-default", action="store_true", help="Record the verified endpoint as the default alias in the local endpoints file.")
+        parser.add_argument("--save-alias", help="Record the verified endpoint under this alias in the local endpoints file.")
+        parser.add_argument("--discover", action="store_true", help="Attach one bounded read-only host discovery to a verified setup or status result.")
     elif tool == "bash":
         parser.add_argument("--command", "--cmd", dest="command", required=False, help="Shell command (--cmd is the Codex exec_command habit).")
         parser.add_argument("--description")
@@ -254,16 +258,24 @@ def run_tool(tool: str, args: argparse.Namespace) -> dict[str, Any]:
     if "no_live_probe" in data:
         data["live_probe"] = not data.pop("no_live_probe")
     # These flags are consumed by the CLI itself, not remote tool arguments.
-    for key in ("input_json", "selector", "long_stream", "content_file", "patch_file", "edits_json", "head_limit"):
+    for key in ("input_json", "selector", "long_stream", "content_file", "patch_file", "edits_json", "head_limit",
+                "password_stdin", "prompt"):
         data.pop(key, None)
     # JSON aliases override CLI defaults before the canonical dispatcher sees
     # them; otherwise an argparse default could shadow an explicit alias.
     explicit = normalize_arguments(f"remote.{tool}", load_input_json(args.input_json)) if args.input_json else {}
     data.update(explicit)
+    if tool == "auth" and data.get("host") and "port" not in data and not data.get("alias"):
+        # Frictionless onboarding: the auth command alone defaults a direct
+        # host to SSH port 22; every other tool still requires host+port.
+        data["port"] = 22
     if tool not in {"job_status", "job_tail", "job_output", "job_stdin", "job_stop"} or has_selector(data):
         resolve_endpoint(data)
     from remote_dev.mcp.tools import call_tool
-    return call_tool(f"remote.{tool}", data)
+    # The standalone CLI owns the canonical surface. An ambient
+    # REMOTE_DEV_HARNESS_PROFILE belongs to a bound harness process and must not
+    # reroute or reject these dotted canonical names.
+    return call_tool(f"remote.{tool}", data, profile="canonical")
 
 
 def run_tool_main(tool: str, argv: list[str] | None = None) -> int:
@@ -272,21 +284,26 @@ def run_tool_main(tool: str, argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if tool == "auth" and (args.password_stdin or args.prompt):
-            from remote_dev.auth import setup_access
             import getpass
             if args.action != "setup":
                 raise ValueError("password input is only valid for auth setup")
             if args.input_json:
                 raise ValueError("use endpoint flags with --prompt or --password-stdin")
             password = sys.stdin.readline().rstrip("\r\n") if args.password_stdin else getpass.getpass("SSH password: ")
-            endpoint = resolve_endpoint(endpoint_payload(args))
-            facts = setup_access(endpoint, password=password, identity_file=args.identity_file,
-                                 install_key=args.install_key, timeout_ms=args.timeout_ms or 30000)
+            data = endpoint_payload(args)
+            data["action"] = args.action
+            data["install_key"] = args.install_key
+            for key in ("save_default", "save_alias", "discover", "timeout_ms"):
+                value = getattr(args, key, None)
+                if value is not None:
+                    data[key] = value
+            if data.get("host") and "port" not in data and not data.get("alias"):
+                data["port"] = 22
+            resolve_endpoint(data)
+            data["password"] = password
             del password
-            result = make_result(tool="remote.auth", target=endpoint.to_result_target(),
-                                 outcome="success", status=str(facts.get("status") or "ok"),
-                                 summary="SSH authentication setup completed.", extra=facts)
-            return print_payload({"result": result})
+            from remote_dev.mcp.tools import call_tool
+            return print_payload(call_tool("remote.auth", data, profile="canonical"))
         if tool == "auth":
             del args.password_stdin
             del args.prompt

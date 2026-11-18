@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v0.11.13-blue" alt="Release v0.11.13">
+  <img src="https://img.shields.io/badge/Release-v0.11.14-blue" alt="Release v0.11.14">
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI-00ADD8" alt="MCP & CLI">
   <img src="https://img.shields.io/badge/Target-Linux%20SSH%20%26%20Docker-2496ED?logo=docker&logoColor=white" alt="Linux SSH & Docker">
@@ -28,7 +28,7 @@
 
 `remote-dev` 把 Agent 熟悉的本地工具（`Read`、`Write`、`Edit`、`Bash`、`Glob`、`Grep`、`apply_patch` 等）完整做了一套**远端同款（`remote.*`）**。只要加上目标机器的 `host` / `port`（或者给服务器起个别名 `alias`），Agent 就能直接操作远端主机甚至直接钻进远端正在跑的 Docker 容器里干活：
 
-- **19 个核心远端工具（外加 60+ 个 6-Harness 原生别名），跟本地习惯一模一样**：支持通过 MCP Server（`remote-dev server`）挂载给 AI 助手，也支持在终端用 `remote-dev <子命令>` 直接调用。
+- **20 个核心远端工具（外加 7-Harness 严格 1:1 原生工具面），跟本地习惯一模一样**：支持通过 MCP Server（`remote-dev server`）挂载给 AI 助手，也支持在终端用 `remote-dev <子命令>` 直接调用。
 - **免折腾直通远端 Docker 容器**：不用在容器里装 `sshd` 或任何后台服务，只要在参数里加上 `container="你的容器名"`，文件读写、打补丁、跑测试就全在容器里执行。
 - **SSH 长连接复用 + 独立控制通道**：内置跨平台（macOS / Linux / 原生 Windows）SSH 连接池。哪怕后台正在跑几个小时的大编译或压测，你随时查状态（`job_status`）、看实时日志（`job_tail`）或紧急喊停（`job_stop`）都秒回、绝不卡死。
 - **安全稳妥，不瞎猜、不乱试**：每次操作必须明确指定连哪台机器，不会因为你在哪个本地目录就偷偷连错服务器；内置**高危破坏性命令拦截保护**（`v0.11.2+` 自动拦截 `npu-smi set -t reset` 芯片复位、`reboot` / `shutdown` 整机重启关机、磁盘格式化等危险指令）；改文件前如果发现文件被别人动过会自动拦截提醒；如果网络半路断开、不确定命令到底跑没跑上，会如实报告“状态不确定”，绝不自作主张再跑一遍闯祸。
@@ -133,6 +133,9 @@ remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt
 # 若目标服务器仅允许密码登录，可保存密码供后续进程直接复用
 remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt --no-install-key
 
+# 直接粘贴密码（命令行末尾），并把已验证端点保存为默认别名
+remote-dev auth setup --host 192.0.2.10 --user root --password 'paste-here' --save-default
+
 # 查看认证状态或直接执行远端命令
 remote-dev auth status --host 192.0.2.10 --port 22 --user root
 remote-dev bash --host 192.0.2.10 --port 22 --user root --command 'hostname'
@@ -141,6 +144,7 @@ remote-dev bash --host 192.0.2.10 --port 22 --user root --command 'hostname'
 - **跨会话与跨组件持久化（`~/.mindie/ssh`）**：认证档案按精确的 `host + port + user` 存储在当前系统用户的 `~/.mindie/ssh` 目录（Windows 原生环境为 `%USERPROFILE%\.mindie\ssh`），与单个聊天窗口或工作目录解耦，切换终端、会话或插件后无需重新录入。可通过 `REMOTE_DEV_AUTH_DIR` 或 `REMOTE_DEV_CREDENTIAL_FILE` 自定义路径。
 - **公钥优先与自动修复**：首次配置优先验证现有 OpenSSH 密钥，需要时自动在 `~/.mindie/ssh/keys/id_ed25519` 生成无口令私钥并完成公钥安装。若后续远端公钥失效，开发调用会在下发业务命令前自动用已保存的密码修复公钥或回退为密码模式（只读探测与监控直接回退密码认证，不改写远端 `authorized_keys`）。
 - **已提供密码就直接接通**：用户为远端任务提供了 SSH 地址、端口、用户名和密码时，Agent 直接调用 `remote_auth(action="setup", host=..., port=..., user=..., password=...)`。工具自动完成密码验证、公钥安装和独立的公钥登录验证，随后继续原任务。没有本地 `auth_ref` 是首次登记状态，不是要求用户再次配置凭据的理由；公钥不可用时仍可使用已验证的密码模式。
+- **零摩擦机器接入**：`remote.auth` / `remote-dev auth setup|status|forget` 在直接提供 `host` 时默认 SSH 端口 `22`（其他工具仍要求显式 `host+port` 或已配置 alias）。`--password <pw>` 可直接粘贴密码；`--save-default` / `--save-alias lab` 只把非敏感字段（host/port/user/container/cwd/root/auth_ref）原子写入 `endpoints.json`（`0600` 文件 / `0700` 目录 + `record_lock`），之后调用可完全省略 `host`/`port`。`--discover` 额外用一条 `<= 10s` 只读 SSH 命令收集 OS、Ascend NPU 与运行中 Docker 容器；发现失败不会回滚已验证的认证成功。
 - **无弹窗本地文件保护**：凭据保存在本地 `credentials.json`（POSIX 目录权限 `0700`、文件权限 `0600`），不调用系统钥匙串、不触发桌面授权弹窗。CLI 通过 `--prompt`、`--password-stdin` 或 `--password-env VARIABLE` 导入，MCP 支持 `password` 与 `password_env` 两种互斥输入；不回显密码，不将密码写入 SSH 命令行或端点记录。`password_env` 只读取当前服务进程已继承的环境，另一终端临时设置的变量不会进入已运行的 MCP 服务。旧工具目录没有 `password` 参数时，Agent 可通过本地进程的标准输入调用 `remote-dev auth setup --password-stdin` 导入已有密码，无需重问用户。密码更新后重新运行认证登记，执行 `remote-dev auth forget` 可随时清除本地保存的配置与密码。
 
 ---

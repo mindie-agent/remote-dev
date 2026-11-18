@@ -1,23 +1,29 @@
 # Trusted Harness Profiles and Native Basic Tools
 
-`remote-dev` exposes 19 canonical `remote.*` tools. A client that wants the
-native basic-tool surface binds exactly one harness profile; the profile is
-selected only by the server-side environment variable
-`REMOTE_DEV_HARNESS_PROFILE` (or an explicit in-process `profile=` argument),
-never by inspecting tool arguments.
+`remote-dev` exposes 20 canonical `remote.*` tools when no harness profile is
+bound. A client that wants the native basic-tool surface binds exactly one
+harness profile; the profile is selected only by the server-side environment
+variable `REMOTE_DEV_HARNESS_PROFILE` (or an explicit in-process `profile=`
+argument), never by inspecting tool arguments.
 
-| Profile | Bound by | Native wire names additionally exposed |
+| Profile | Bound by | Exact advertised surface |
 | :--- | :--- | :--- |
-| `canonical` | standalone default | none; 19 portable `remote_*` names |
-| `codex` | Codex plugin MCP launcher | `remote_exec_command`, `remote_write_stdin`, `remote_view_image`; `remote_apply_patch` is the canonical tool with a `patch` string because native `apply_patch` is freeform |
-| `claude` | Claude Code plugin MCP launcher | `remote_Read`, `remote_Write`, `remote_Edit`, `remote_NotebookEdit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_TaskOutput`, `remote_BashOutput`, `remote_TaskStop`, `remote_KillShell` |
-| `kimi` | Kimi Code plugin MCP launcher | `remote_Read`, `remote_Write`, `remote_Edit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_ReadMediaFile`, `remote_TaskOutput`, `remote_TaskStop`, `remote_TaskList` |
-| `dsh` | DSH plugin launcher | `remote_read`, `remote_write`, `remote_edit`, `remote_bash`, `remote_glob`, `remote_grep`, `remote_read_image`, `remote_job_output`, `remote_job_list`, `remote_job_kill` |
+| `canonical` | standalone default | only the 20 portable `remote_*` names |
+| `codex` | Codex plugin MCP launcher | native `remote_exec_command`, `remote_write_stdin`, `remote_view_image`, `remote_apply_patch`; support `remote_auth`, `remote_probe`, `remote_artifact_pull`, `remote_artifact_push`, `remote_job_status`, `remote_job_stop` (10) |
+| `claude` | Claude Code plugin MCP launcher | native `remote_Read`, `remote_Write`, `remote_Edit`, `remote_NotebookEdit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_TaskOutput`, `remote_TaskStop`; support 4 base (13) |
+| `kimi` | Kimi Code plugin MCP launcher | native `remote_Read`, `remote_Write`, `remote_Edit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_ReadMediaFile`, `remote_TaskOutput`, `remote_TaskStop`, `remote_TaskList`; support 4 base (14) |
+| `dsh` | DSH plugin launcher | native `remote_read`, `remote_write`, `remote_edit`, `remote_bash`, `remote_glob`, `remote_grep`, `remote_read_image`, `remote_job_output`, `remote_job_list`, `remote_job_kill`; support 4 base (14) |
+| `wb` | WorkBuddy plugin launcher | native `remote_Read`, `remote_Write`, `remote_Edit`, `remote_MultiEdit`, `remote_NotebookEdit`, `remote_Bash`, `remote_Glob`, `remote_Grep`, `remote_TaskOutput`, `remote_TaskStop`, `remote_ViewImage`; support 4 base (15) |
+| `agy` | Google Antigravity MCP launcher | native `remote_read_file`, `remote_write_file`, `remote_edit_file`, `remote_run_command`, `remote_manage_task`, `remote_find_by_name`, `remote_grep_search`, `remote_list_dir`; support 4 base (12) |
+| `oc` | OpenCode MCP launcher | native `remote_read`, `remote_write`, `remote_edit`, `remote_bash`, `remote_glob`, `remote_grep`, `remote_list`; support 4 base plus `remote_job_status`, `remote_job_output`, `remote_job_stop` (14) |
 
-The canonical 19 tools remain callable in every profile. A native wire name
-that collides with a portable canonical alias (for example DSH `remote_read`)
-advertises the native schema and still accepts the canonical fields, so an
-existing `remote_*` call does not break.
+The four base support tools are `remote_auth`, `remote_probe`,
+`remote_artifact_pull` and `remote_artifact_push`. Every bound profile
+advertises only its native-mirrored tools plus the support tools listed above;
+cross-harness canonical clutter is not carried, and `tools/call` rejects any
+name outside that same set. Retired `remote_BashOutput` / `remote_KillShell`
+aliases no longer appear on the Claude Code or WorkBuddy surface:
+`TaskOutput` / `TaskStop` are the single job entry points.
 
 ## Units, defaults and pagination are not interchangeable
 
@@ -46,14 +52,18 @@ existing `remote_*` call does not break.
 - Kimi and Claude `Grep` default to 250 entries and accept `head_limit=0`;
   Kimi uses `count_matches`, Claude uses `count`; DSH `grep` returns 250
   matching lines with no offset/limit parameters.
+- Antigravity `run_command.WaitMsBeforeAsync` and OpenCode `bash.timeout` are
+  milliseconds. `IsDaemon=true` yields a managed background job after the wait
+  budget (default 200 ms); OpenCode `run_in_background` yields immediately.
+  OpenCode accepts both `filePath`/`file_path` (and `oldString`/`old_string`)
+  spellings, and its `write` defaults to `overwrite=true`.
 
 ## Job and stdin semantics
 
-- Claude `TaskOutput` (`block=true`, 30000 ms, max 600000) and its
-  `BashOutput` alias wait for completion when blocking. The returned text is
-  the native `<retrieval_status>/<task_id>/<task_type>/<status>/<output>`
-  envelope. `TaskStop`/`KillShell` treats an already-finished task as a
-  successful no-op.
+- Claude `TaskOutput` (`block=true`, 30000 ms, max 600000) waits for
+  completion when blocking. The returned text is the native
+  `<retrieval_status>/<task_id>/<task_type>/<status>/<output>` envelope.
+  `TaskStop` treats an already-finished task as a successful no-op.
 - Kimi `TaskOutput` is always non-blocking: it returns a status, the last
   32768-byte preview and the full log path. `TaskStop` accepts a reason and
   returns the current status for an already-finished task. `TaskList` lists
@@ -97,10 +107,12 @@ login); they are not host-local approval controls.
 
 ## Standalone and compatibility
 
-Without `REMOTE_DEV_HARNESS_PROFILE`, only the 19 canonical portable names are
-guaranteed. Native-case aliases such as `remote_Edit` require the owning
-profile; legacy aliases that do not belong to one of the four profiles (for
-example `remote_replace_file_content`) keep their canonical mapping.
+Without `REMOTE_DEV_HARNESS_PROFILE`, only the 20 canonical portable names are
+advertised and accepted (`remote_read`, `remote.read`, …). Binding a harness
+profile replaces that surface with the exact native-plus-support set in the
+table above; native-case aliases such as `remote_Edit`, dotted canonical names
+that are not that host's wire name, and any other harness's tools are rejected
+before endpoint resolution.
 
 ## Scope boundary (user-defined)
 
@@ -118,10 +130,11 @@ No renderer is installed on the remote host and no model weights are loaded.
 
 ## Name collisions and canonical compatibility
 
-Standalone remote-dev keeps the 19 canonical portable `remote_*` names. In a
+Standalone remote-dev keeps the 20 canonical portable `remote_*` names. In a
 native profile a wire name that collides with a canonical portable alias (DSH
-`remote_read`, Codex `remote_apply_patch`, …) is the **native** tool with the
-strict native schema; canonical dotted names (`remote.read`) remain callable.
-Native names do not accept canonical-only fields: `remote_exec_command` rejects
-`timeout_ms`, `remote_write_stdin` rejects `eof`, and DSH native names reject
-`cmd`/`timeout_ms`/`lines`. There is no compatibility bypass.
+`remote_read`, OpenCode `remote_read`, Codex `remote_apply_patch`, …) is the
+**native** tool with the strict native schema. Canonical dotted names are not a
+compatibility bypass under a bound profile: call the advertised native wire
+name. Native names do not accept canonical-only fields: `remote_exec_command`
+rejects `timeout_ms`, `remote_write_stdin` rejects `eof`, and DSH native names
+reject `cmd`/`timeout_ms`/`lines`.

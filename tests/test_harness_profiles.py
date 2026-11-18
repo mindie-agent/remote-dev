@@ -55,8 +55,8 @@ class CatalogTests(unittest.TestCase):
         names = {tool["name"] for tool in tools.harness_catalog("claude")}
         for name in (
             "remote_Read", "remote_Write", "remote_Edit", "remote_Bash",
-            "remote_Glob", "remote_Grep", "remote_TaskOutput", "remote_BashOutput",
-            "remote_TaskStop", "remote_KillShell",
+            "remote_Glob", "remote_Grep", "remote_TaskOutput",
+            "remote_TaskStop",
         ):
             self.assertIn(name, names)
         names = {tool["name"] for tool in tools.harness_catalog("dsh")}
@@ -72,8 +72,7 @@ class CatalogTests(unittest.TestCase):
         for name in (
             "remote_Read", "remote_Write", "remote_Edit", "remote_MultiEdit",
             "remote_Bash", "remote_Glob", "remote_Grep", "remote_TaskOutput",
-            "remote_BashOutput", "remote_NotebookEdit", "remote_TaskStop",
-            "remote_KillShell", "remote_ViewImage",
+            "remote_NotebookEdit", "remote_TaskStop", "remote_ViewImage",
         ):
             self.assertIn(name, names)
 
@@ -222,7 +221,7 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(calls[-1][1]["limit"], 25)
             self.assertEqual(calls[-1][1]["offset"], 10)
 
-        # Invalid regex in TaskOutput/BashOutput filter is rejected before dispatch
+        # Invalid regex in the single canonical TaskOutput filter is rejected before dispatch
         with self.assertRaises(HarnessProfileError):
             tools.call_tool(
                 "remote_TaskOutput",
@@ -236,7 +235,7 @@ class CatalogTests(unittest.TestCase):
                 profile="wb",
             )
 
-        # BashOutput / TaskOutput incremental read vs full=true snapshot + regex filter
+        # TaskOutput incremental read vs full=true snapshot + regex filter
         record = {"job_id": "j-wb", "session_scope": "scope", "state": "succeeded"}
         import remote_dev.mcp.native_handlers_claude as claude_handlers
         stdout_state = {"text": "ERROR: bad\nINFO: ok\nERROR: second\n"}
@@ -259,8 +258,8 @@ class CatalogTests(unittest.TestCase):
             mock.patch.object(tools, "_call_canonical", fake_status),
         ):
             payload = tools.call_tool(
-                "remote_BashOutput",
-                {"shell_id": "j-wb", "filter": "^ERROR:"},
+                "remote_TaskOutput",
+                {"task_id": "j-wb", "filter": "^ERROR:"},
                 profile="wb",
             )
             self.assertEqual(payload["result"]["task"]["output"], "ERROR: bad\nERROR: second")

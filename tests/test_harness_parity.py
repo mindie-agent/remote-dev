@@ -1,5 +1,5 @@
-"""Six-harness native-tool parity: Claude Code, Codex, Kimi, Cursor,
-Antigravity, and DeepSeek Harness alias dispatch plus read/grep/ls behavior."""
+"""Seven-harness native-tool parity: Claude Code, Codex, Kimi, WorkBuddy,
+Antigravity, OpenCode, and DeepSeek Harness alias dispatch plus read/grep/ls behavior."""
 
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ def run_grep(payload: dict, *, path_env: str | None = None) -> dict:
 
 
 class SixHarnessParityTests(unittest.TestCase):
-    """End-to-end parity tests across Codex, Claude Code, Cursor, Kimi Code,
-    DeepSeek Harness (DSH), and Antigravity native local tool conventions."""
+    """End-to-end parity tests across Codex, Claude Code, Kimi Code, WorkBuddy,
+    DeepSeek Harness (DSH), Antigravity, and OpenCode native conventions."""
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -71,11 +71,9 @@ class SixHarnessParityTests(unittest.TestCase):
             "remote_send_command_input": "remote.job_stdin",
             "remote_manage_task": "remote.job_status",
             "remote_command_status": "remote.job_status",
-            "remote_bash_output": "remote.job_status",
             "remote_task_output": "remote.job_status",
             "remote_job_output": "remote.job_output",
             "remote.JobOutput": "remote.job_output",
-            "remote_kill_shell": "remote.job_stop",
             "remote_task_stop": "remote.job_stop",
             "remote_find_by_name": "remote.glob",
             "remote_file_search": "remote.glob",
@@ -376,30 +374,31 @@ class SixHarnessParityTests(unittest.TestCase):
 
     def test_bash_and_manage_task_dispatch_across_harnesses(self) -> None:
         endpoint = {"host": "example.invalid", "port": 22}
-        # Antigravity run_command with CommandLine, Cwd, IsDaemon
+        # Antigravity run_command with CommandLine and IsDaemon
         with mock.patch.object(mcp_tools, "remote_bash", return_value={"ok": True}) as run_bash:
             mcp_tools.call_tool(
                 "remote_run_command",
-                {**endpoint, "CommandLine": "python train.py", "Cwd": "/workspace", "IsDaemon": True},
+                {**endpoint, "CommandLine": "python train.py", "IsDaemon": True},
+                profile="agy",
             )
             self.assertEqual(run_bash.call_args.kwargs["command"], "python train.py")
-            self.assertEqual(run_bash.call_args.kwargs["cwd"], "/workspace")
             self.assertEqual(run_bash.call_args.kwargs["yield_time_ms"], 200)
 
         # Antigravity manage_task Action="list" (no job_id required)
-        list_res = mcp_tools.call_tool("remote_manage_task", {"Action": "list"})
+        list_res = mcp_tools.call_tool("remote_manage_task", {"Action": "list"}, profile="agy")
         self.assertEqual(list_res["result"]["outcome"], "success")
         self.assertEqual(list_res["result"]["job_count"], 0)
 
         # Antigravity manage_task Action="kill" -> dispatches to remote_job_stop
         with mock.patch.object(mcp_tools, "remote_job_stop", return_value={"stopped": True}) as run_stop:
-            mcp_tools.call_tool("remote_manage_task", {"Action": "kill", "TaskId": "job-123", "force": True})
+            mcp_tools.call_tool("remote_manage_task", {"Action": "kill", "TaskId": "job-123"}, profile="agy")
             self.assertEqual(run_stop.call_args.kwargs["job_id"], "job-123")
-            self.assertTrue(run_stop.call_args.kwargs["force"])
+            self.assertFalse(run_stop.call_args.kwargs["force"])
 
         # Antigravity manage_task Action="send_input" -> dispatches to remote_job_stdin
         with mock.patch.object(mcp_tools, "remote_job_stdin", return_value={"sent": True}) as run_stdin:
-            mcp_tools.call_tool("remote_manage_task", {"Action": "send_input", "TaskId": "job-123", "Input": "yes\n"})
+            mcp_tools.call_tool("remote_manage_task", {"Action": "send_input", "TaskId": "job-123", "Input": "yes\n"},
+                                profile="agy")
             self.assertEqual(run_stdin.call_args.kwargs["job_id"], "job-123")
             self.assertEqual(run_stdin.call_args.kwargs["chars"], "yes\n")
 

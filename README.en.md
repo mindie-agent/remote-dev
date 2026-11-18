@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v0.11.13-blue" alt="Release v0.11.13">
+  <img src="https://img.shields.io/badge/Release-v0.11.14-blue" alt="Release v0.11.14">
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI-00ADD8" alt="MCP & CLI">
   <img src="https://img.shields.io/badge/Target-Linux%20SSH%20%26%20Docker-2496ED?logo=docker&logoColor=white" alt="Linux SSH & Docker">
@@ -28,7 +28,7 @@ When using AI coding agents like Claude Code, Codex, Kimi Code, or Cursor to wor
 
 `remote-dev` gives your agent **remote twins (`remote.*`)** of the local tools it already knows (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `apply_patch`, etc.). Just pass the target `host` and `port` (or a short `alias`), and your agent can work directly on a remote Linux machine or inside a running Docker container:
 
-- **18 Canonical Remote Tools (+ 40+ 6-Harness Native Aliases) Matching Local Habits**: Available both as a single stdio MCP server (`remote-dev server`) and as one-to-one CLI subcommands (`remote-dev <subcommand>`).
+- **20 Canonical Remote Tools (+ Strict 1:1 7-Harness Native Surfaces) Matching Local Habits**: Available both as a single stdio MCP server (`remote-dev server`) and as one-to-one CLI subcommands (`remote-dev <subcommand>`).
 - **Work Inside Existing Docker Containers with Zero Setup**: Pass `container="<name-or-id>"` on any SSH host endpoint to read, edit, patch, and run commands directly inside a running container — no container SSH daemon or extra agent install required.
 - **Pooled SSH Connections + Dedicated Control Lane**: Reuses persistent binary SSH RPC connections across macOS, Linux, and native Windows. Two dedicated control workers (`job_status` / `job_tail` / `job_stop` / `job_stdin`) ensure you can always check logs or stop a runaway task even when all regular execution slots are busy.
 - **Safe by Design — No Guessing, No Blind Retries**: Targets are always resolved from explicit arguments (never guessed from your local folder). Built-in **destructive command guards** (`v0.11.2+`) automatically block dangerous operations such as `npu-smi set -t reset`, host `reboot` / `shutdown`, and root filesystem wipes before dispatch. Files read in the current session are protected against accidental concurrent overwrites, and if a connection drops mid-flight, `remote-dev` reports `uncertain` instead of blindly re-running a mutating command.
@@ -133,6 +133,9 @@ remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt
 # Or persist password authentication when the server only permits passwords
 remote-dev auth setup --host 192.0.2.10 --port 22 --user root --prompt --no-install-key
 
+# Paste a password at the end of the command and save the verified endpoint as default
+remote-dev auth setup --host 192.0.2.10 --user root --password 'paste-here' --save-default
+
 # Check authentication status or run a remote command
 remote-dev auth status --host 192.0.2.10 --port 22 --user root
 remote-dev bash --host 192.0.2.10 --port 22 --user root --command 'hostname'
@@ -141,6 +144,7 @@ remote-dev bash --host 192.0.2.10 --port 22 --user root --command 'hostname'
 - **Shared Across Sessions & Components (`~/.mindie/ssh`)**: Profiles are keyed by exact `host + port + user` under `~/.mindie/ssh` (`%USERPROFILE%\.mindie\ssh` on native Windows), independent of individual chats or working directories. You can customize the location via `REMOTE_DEV_AUTH_DIR` or `REMOTE_DEV_CREDENTIAL_FILE`.
 - **Key-First with Automatic Recovery**: Setup checks existing OpenSSH keys first and generates `~/.mindie/ssh/keys/id_ed25519` when needed. If a remote public key is later rejected, development calls automatically verify the saved password and repair the key (or fall back to password mode) before dispatching your command, while read-only probes fall back to password auth without touching remote `authorized_keys`.
 - **Use Credentials Already Supplied**: When the user supplies the SSH host, port, login user and password for a remote task, call `remote_auth(action="setup", host=..., port=..., user=..., password=...)`. Setup verifies the password, installs a public key and independently verifies key login, then the agent continues the task. A missing local `auth_ref` means first enrollment; it does not require the user to configure credentials again. Verified password access remains usable when public keys are unavailable.
+- **Frictionless Machine Onboarding**: `remote.auth` / `remote-dev auth setup|status|forget` default a directly supplied `host` to SSH port `22` (other tools still require explicit `host+port` or a configured alias). `--password <pw>` accepts a pasted secret; `--save-default` / `--save-alias lab` atomically merge only non-secret fields (host/port/user/container/cwd/root/auth_ref) into `endpoints.json` (`0600` file / `0700` directory plus `record_lock`), after which calls may omit `host`/`port` entirely. `--discover` adds one bounded (`<= 10s`) read-only SSH command that reports OS, Ascend NPU presence and running Docker containers; discovery failures never roll back verified authentication.
 - **Headless Local File Protection**: Credentials are stored in `~/.mindie/ssh/credentials.json` (`0700` directory / `0600` file on POSIX) without OS keychains or desktop popups. The CLI accepts `--prompt`, `--password-stdin` or `--password-env VARIABLE`; MCP accepts mutually exclusive `password` and `password_env` inputs. Passwords are not echoed or written to SSH command-line arguments or endpoint records. `password_env` reads the running server's inherited environment; setting a variable in another terminal cannot update that process. With an older tool catalog lacking `password`, the agent can import the supplied password through a local process's stdin using `remote-dev auth setup --password-stdin` without asking again. Re-enroll after password rotation, or run `remote-dev auth forget` to remove saved credentials.
 
 ---

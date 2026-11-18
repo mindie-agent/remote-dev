@@ -39,6 +39,7 @@ if __package__:
         _page_metadata,
         _tail_budget,
         scan_text_lines,
+        read_byte_sliced_range,
         extract_symbols,
     )
 else:
@@ -62,6 +63,7 @@ else:
     _page_metadata = _text._page_metadata
     _tail_budget = _text._tail_budget
     scan_text_lines = _text.scan_text_lines
+    read_byte_sliced_range = _text.read_byte_sliced_range
     extract_symbols = _text.extract_symbols
 
 
@@ -458,6 +460,48 @@ def main() -> None:
             if not verify:
                 warnings.append("Content hash not requested; this read does not update the edit concurrency guard.")
             print(json.dumps({"status": "partial" if info["partial"] else "ok", "file": info, "warnings": warnings}, sort_keys=True))
+            raise SystemExit(0)
+
+        if content_offset > 0 and start_line is not None:
+            digest_hex = _stream_sha256(path) if verify else None
+            prepared, total = read_byte_sliced_range(path, offset, limit, content_offset, max_line_chars)
+            after = path.stat()
+            if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+                fail("file_changed", "file changed during read; retry to obtain a consistent read")
+            if payload.get("strict_offset") and offset > total:
+                fail("invalid_pagination", f"offset {offset} is past the end of the file ({total} lines)")
+            if max_chars is not None:
+                prepared, next_offset, next_column = _page_budget(prepared, max_chars, False, 0)
+            else:
+                next_offset = next_column = None
+            if prepared:
+                line_start, line_end = prepared[0][0], prepared[-1][0]
+            elif total:
+                line_start = min(offset, total + 1)
+                line_end = min(offset - 1 + limit, total)
+            else:
+                line_start = line_end = 0
+            info = {
+                "path": str(path), "resolved_path": str(resolved), "size": after.st_size,
+                "mtime_ns": after.st_mtime_ns, "sha256": digest_hex,
+                "total_lines": total, "offset": offset, "limit": limit,
+                "line_start": line_start, "line_end": line_end, "partial": True,
+                "content": _page_content(prepared),
+                "truncated_line_count": sum(1 for _i, _b, more_text in prepared if more_text),
+                "symlink": path.is_symlink(), "content_verified": verify,
+                "content_offset": content_offset,
+            }
+            if max_chars is not None:
+                info["page_lines"] = _page_metadata(prepared, False, 0)
+            if next_offset is not None:
+                info["next_offset"] = next_offset
+                info["next_column_offset"] = next_column or 0
+            warnings = []
+            if info["truncated_line_count"]:
+                warnings.append(f"{info['truncated_line_count']} line(s) truncated to {max_line_chars} chars")
+            if not verify:
+                warnings.append("Content hash not requested; this read does not update the edit concurrency guard.")
+            print(json.dumps({"status": "partial", "file": info, "warnings": warnings}, sort_keys=True))
             raise SystemExit(0)
 
         scan_limit = content_offset + max_line_chars if content_offset > 0 else max_line_chars

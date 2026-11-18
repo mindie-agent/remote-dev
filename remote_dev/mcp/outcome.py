@@ -24,7 +24,7 @@ def operation_outcome(name, payload):
     if (details.get("status") == "local_recording_failed"
             and (details.get("operation_completed") is True or error.get("operation_completed") is True)):
         outcome = details.get("execution_outcome", outcome)
-    command = str(name).lower().endswith(("bash", "job_stdin", "exec_command", "write_stdin", "shell"))
+    command = str(name).lower().endswith(("bash", "job_stdin", "exec_command", "run_command", "write_stdin", "shell"))
     if (command and details.get("state") in {"succeeded", "failed", "timeout", "cancelled"}
             and type(details.get("exit_code")) is int):
         return "succeeded"
