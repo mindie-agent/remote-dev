@@ -97,8 +97,9 @@ def test_save_default_records_non_secret_endpoint_and_resolves_without_selectors
         "host": "192.0.2.10", "port": 22, "user": "alice", "auth_ref": "authref-fixture",
     }
     assert "never-store-me" not in endpoint_file.read_text()
-    assert stat.S_IMODE(endpoint_file.stat().st_mode) == 0o600
-    assert stat.S_IMODE(endpoint_file.parent.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(endpoint_file.stat().st_mode) == 0o600
+        assert stat.S_IMODE(endpoint_file.parent.stat().st_mode) == 0o700
 
     resolved = resolve_endpoint({})
     assert (resolved.host, resolved.port, resolved.user) == ("192.0.2.10", 22, "alice")
@@ -308,7 +309,8 @@ def test_endpoint_store_preserves_existing_parent_directory_mode(tmp_path, monke
     with patcher:
         tools.call_tool("remote_auth", {"host": "192.0.2.10", "save_default": True})
     assert endpoint_file.exists()
-    assert stat.S_IMODE(parent.stat().st_mode) == 0o755
+    if os.name != "nt":
+        assert stat.S_IMODE(parent.stat().st_mode) == 0o755
 
 
 @pytest.mark.parametrize("alias", ["endpoints", "default_alias"])

@@ -44,11 +44,22 @@ def _setup(payload):
 def _call(payload):
     from remote_dev.mcp.tools import call_tool
 
-    return call_tool("remote.bash", {
-        **_endpoint_arguments(payload),
-        "command": payload.get("command", "printf shared-auth-call"),
-        "timeout_ms": 30000,
-    }, profile=payload.get("profile", "canonical"))
+    profile = payload.get("profile", "canonical")
+    cmd = payload.get("command", "printf shared-auth-call")
+    base = _endpoint_arguments(payload)
+    if profile == "codex":
+        return call_tool("remote_exec_command", {**base, "cmd": cmd, "yield_time_ms": 30000}, profile=profile)
+    if profile == "claude":
+        return call_tool("remote_Bash", {**base, "command": cmd, "timeout": 30000}, profile=profile)
+    if profile == "kimi":
+        return call_tool("remote_Bash", {**base, "command": cmd, "timeout": 30}, profile=profile)
+    if profile == "dsh":
+        return call_tool(
+            "remote_bash",
+            {**base, "command": cmd, "description": "shared auth call", "timeoutMs": 30000},
+            profile=profile,
+        )
+    return call_tool("remote.bash", {**base, "command": cmd, "timeout_ms": 30000}, profile=profile)
 
 
 def _coordinator(payload):
@@ -86,10 +97,10 @@ def _kimi(payload):
     arguments = {
         **_endpoint_arguments(payload),
         "command": payload.get("command", "printf plugin-shared-password"),
-        "timeout_ms": 30000,
+        "timeout": 30,
         "request_nonce": "auth-nonce-" + session,
     }
-    name = "remote.bash"
+    name = "remote_Bash"
     identity.publish_nonce_bind(session, arguments["request_nonce"],
                                 name, "call-" + session, arguments)
     reply = mcp_server.handle("remote", {
