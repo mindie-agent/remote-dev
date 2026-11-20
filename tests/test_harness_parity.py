@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -303,21 +304,6 @@ class SixHarnessParityTests(unittest.TestCase):
         self.assertEqual(g_args["includes"], ["*.py"])
         self.assertEqual(g_args["excludes"], ["gen.py"])
 
-        grep_res = run_grep({
-            "op": "grep",
-            "root": str(self.tree),
-            "cwd": str(self.tree),
-            "path": str(self.tree),
-            "pattern": "a+b",
-            "fixed_strings": True,
-            "output_mode": "content",
-            "includes": ["*.py"],
-            "excludes": ["gen.py"],
-        })
-        self.assertEqual(grep_res["status"], "ok")
-        self.assertEqual(len(grep_res["matches"]), 1)
-        self.assertIn("main.py", grep_res["matches"][0])
-
         # Antigravity find_by_name -> remote.glob with Extensions, Excludes, Type, MaxDepth
         f_args = normalize_arguments(
             "remote.glob",
@@ -349,6 +335,23 @@ class SixHarnessParityTests(unittest.TestCase):
         self.assertEqual(glob_res["status"], "ok")
         matched_paths = [m["path"] for m in glob_res["matches"]]
         self.assertEqual(matched_paths, [str(self.tree / "src" / "main.py")])
+
+        if not (shutil.which("rg") or shutil.which("grep")):
+            self.skipTest("requires rg or grep on PATH")
+        grep_res = run_grep({
+            "op": "grep",
+            "root": str(self.tree),
+            "cwd": str(self.tree),
+            "path": str(self.tree),
+            "pattern": "a+b",
+            "fixed_strings": True,
+            "output_mode": "content",
+            "includes": ["*.py"],
+            "excludes": ["gen.py"],
+        })
+        self.assertEqual(grep_res["status"], "ok")
+        self.assertEqual(len(grep_res["matches"]), 1)
+        self.assertIn("main.py", grep_res["matches"][0])
 
     def test_ls_recursive_and_ignore_globs(self) -> None:
         (self.tree / "pkg").mkdir()

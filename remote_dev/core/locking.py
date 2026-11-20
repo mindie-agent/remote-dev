@@ -44,13 +44,23 @@ def _lock_handle_is_current(handle, lock_path: Path) -> bool:
     return own.st_nlink > 0 and (own.st_dev, own.st_ino) == (current.st_dev, current.st_ino)
 
 
+def _lock_key(path: Path) -> str:
+    resolved = str(Path(path).resolve())
+    if os.name == "nt":
+        if resolved[:8].casefold() == "\\\\?\\unc\\":
+            resolved = "\\" + resolved[7:]
+        elif resolved.startswith("\\\\?\\") and len(resolved) >= 7 and resolved[5] == ":":
+            resolved = resolved[4:]
+    return os.path.normcase(resolved)
+
+
 def try_record_thread_lock(path: Path):
     """Acquire only the in-process half of `record_lock`, never blocking.
 
     Local retention uses this to prove no same-process `record_lock` owner
     exists before it takes the OS lock. A `None` return means "busy, skip".
     """
-    key = os.path.normcase(str(Path(path).resolve()))
+    key = _lock_key(path)
     with _guard:
         lock = _locks.setdefault(key, threading.RLock())
     if not lock.acquire(blocking=False):
@@ -68,7 +78,7 @@ def record_lock(path: Path, *, timeout_seconds: float | None = None):
             raise RemoteExecutionError("request cancelled before acquiring record lock")
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("timed out waiting for record lock")
-    key = os.path.normcase(str(path.resolve()))
+    key = _lock_key(path)
     with _guard:
         lock = _locks.setdefault(key, threading.RLock())
     while True:
@@ -78,9 +88,10 @@ def record_lock(path: Path, *, timeout_seconds: float | None = None):
             break
     try:
         waiting()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        from .state_store import _fs_path
+        os.makedirs(_fs_path(path.parent), exist_ok=True)
         lock_path = path.with_name(path.name + ".lock")
-        handle = lock_path.open("a+b")
+        handle = open(_fs_path(lock_path), "a+b")
         try:
             if os.name == "nt":
                 import msvcrt

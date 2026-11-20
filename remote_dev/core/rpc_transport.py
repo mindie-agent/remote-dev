@@ -436,9 +436,10 @@ def request(endpoint, kind, source, payload, *, timeout_ms=None):
     endpoint = pin_container_endpoint(endpoint, timeout_ms=timeout_ms)
     from remote_dev.auth import connection_identity
     from remote_dev.auth.policy import repair_allowed
+    from remote_dev.auth.store import auth_root
     key = (endpoint.host, endpoint.port, endpoint.user, endpoint.identity_file,
            endpoint.connect_timeout_ms, endpoint.container, endpoint.known_hosts_file,
-           connection_identity(endpoint), repair_allowed())
+           str(auth_root()), connection_identity(endpoint), repair_allowed())
     with get_recorder("remote-dev").operation("rpc.pool.acquire", level="DEBUG"):
         entry = _acquire(endpoint, key, deadline=acquire_deadline)
     acquired = time.monotonic()

@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1243,6 +1244,7 @@ class NativeGapTests(unittest.TestCase):
         args = spec.normalize({"file_path": "/tmp/doc.pdf", "pages": "1-2"})
         self.assertEqual(args["pages"], "1-2")
 
+    @unittest.skipUnless(shutil.which("rg") or shutil.which("grep"), "requires rg or grep on PATH")
     def test_grep_head_limit_zero_is_unlimited(self) -> None:
         """Native Kimi/Claude `head_limit=0` means unlimited; the worker caps at 5000."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -1491,6 +1493,7 @@ class WorkerSearchTests(unittest.TestCase):
         payload.update(extra)
         return _run_worker(SEARCH_WORKER, payload, self.root)
 
+    @unittest.skipUnless(shutil.which("rg") or shutil.which("grep"), "requires rg or grep on PATH")
     def test_grep_defaults_pagination_and_zero(self) -> None:
         data = self._grep(output_mode="content", line_numbers=False, limit=2, offset=0)
         self.assertEqual(data["status"], "ok")
@@ -1587,6 +1590,9 @@ class WorkerCanonicalCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(edited["status"], "edited")
         self.assertEqual(target.read_text(encoding="utf-8"), "alpha\nBETA\ngamma\n")
+
+        if not (shutil.which("rg") or shutil.which("grep")):
+            self.skipTest("requires rg or grep on PATH")
 
         grepped = _run_worker(
             SEARCH_WORKER,

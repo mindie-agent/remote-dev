@@ -137,6 +137,9 @@ def _capture_command(command, *, input=None, timeout=None, env=None):
                 observed_exit = proc.poll()
                 try:
                     owner.stop()
+                except Exception as exc:
+                    cleanup.append(f"{type(exc).__name__}: {exc}")
+                try:
                     stdout, stderr = proc.communicate(timeout=1)
                 except subprocess.TimeoutExpired as exc:
                     stdout, stderr = exc.stdout or stdout, exc.stderr or stderr
@@ -157,6 +160,9 @@ def _capture_command(command, *, input=None, timeout=None, env=None):
                     observed_exit = proc.returncode
                     try:
                         owner.stop()
+                    except Exception as cleanup_error:
+                        cleanup.append(f"{type(cleanup_error).__name__}: {cleanup_error}")
+                    try:
                         stdout, stderr = proc.communicate(timeout=1)
                     except subprocess.TimeoutExpired as tail:
                         stdout, stderr = tail.stdout or stdout, tail.stderr or stderr

@@ -2,21 +2,26 @@
 [Role] Local endpoint state, read-ledger, and job-record persistence (`state_store.py`).
 [Invariants]
 - Scopes all local state by deterministic `endpoint_id` and SHA-256 `client_context_id` (`id-<sha256>`) so concurrent sessions never collide or leak stale-write authorization.
+- Supports lock-free per-call `session_scope()` via `contextvars` without mutating `os.environ`.
 - Writes JSON/text records via sibling `.tmp` + `fsync` + `replace_file` (`os.replace()`).
 [Timeouts & Locks]
 - File replacement tolerates transient Windows sharing locks up to `0.5s` via `atomic.replace_file`.
 - Opportunistic retention runs on record/log writes with a `300s` cooldown marker and a
   bounded `2s` budget; a prune failure never blocks the caller's committed write.
 [Side-Effect Policy]
-- Mutates files exclusively under `state_root()` (`<cwd>/state` or `REMOTE_DEV_STATE_DIR`).
+- Mutates files exclusively under `state_root()` (scoped `state_dir`, `REMOTE_DEV_STATE_DIR`, or `<cwd>/state`).
 - Prunes only expired read ledgers/logs and confirmed-terminal job artifacts; running and
   `unknown` job records are never removed.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
+import contextlib
+from contextvars import ContextVar
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -34,18 +39,65 @@ LEDGER_NO_CONTEXT_SCOPE = "default"
 LEDGER_SCHEMA_VERSION = "remote-dev.read_ledger.v2"
 LEDGER_SCOPE_ENCODING = "id-sha256"
 
+_SESSION_ID_VAR: ContextVar[str | None] = ContextVar("remote_dev_session_id", default=None)
+_STATE_DIR_VAR: ContextVar[Path | None] = ContextVar("remote_dev_state_dir", default=None)
+_AUTH_DIR_VAR: ContextVar[Path | None] = ContextVar("remote_dev_auth_dir", default=None)
+
+
+@contextlib.contextmanager
+def session_scope(
+    session_id: str | None,
+    *,
+    state_dir: Path | str | None = None,
+    auth_dir: Path | str | None = None,
+) -> Iterator[None]:
+    """Bind per-call session, state directory, and auth directory without mutating ``os.environ``."""
+    session_token = _SESSION_ID_VAR.set(str(session_id) if session_id else None)
+    state_token = None
+    auth_token = None
+    try:
+        if state_dir is not None:
+            state_token = _STATE_DIR_VAR.set(Path(state_dir).expanduser())
+        if auth_dir is not None:
+            auth_token = _AUTH_DIR_VAR.set(Path(auth_dir).expanduser())
+        yield
+    finally:
+        if auth_token is not None:
+            _AUTH_DIR_VAR.reset(auth_token)
+        if state_token is not None:
+            _STATE_DIR_VAR.reset(state_token)
+        _SESSION_ID_VAR.reset(session_token)
+
+
+def scoped_auth_dir() -> Path | None:
+    """Active context-scoped SSH auth directory, or ``None`` when unscoped."""
+    return _AUTH_DIR_VAR.get()
+
 
 def state_root() -> Path:
     """Local runtime state directory.
 
-    Defaults to ``<cwd>/state`` (ignored by Git). ``REMOTE_DEV_STATE_DIR``
-    relocates it so an embedding consumer can keep remote-dev state next to
-    its own untracked state.
+    Defaults to ``<cwd>/state`` (ignored by Git). ``session_scope(..., state_dir=...)``
+    or ``REMOTE_DEV_STATE_DIR`` relocates it so an embedding consumer can keep
+    remote-dev state isolated per session or next to its own untracked state.
     """
+    scoped = _STATE_DIR_VAR.get()
+    if scoped is not None:
+        return scoped
     configured = os.environ.get("REMOTE_DEV_STATE_DIR")
     if configured:
         return Path(configured).expanduser()
     return substrate_root() / "state"
+
+
+def _fs_path(path: Path | str) -> str:
+    raw = os.fspath(path)
+    if os.name != "nt" or raw.startswith(("\\\\?\\", "\\\\.\\")):
+        return raw
+    abs_path = os.path.abspath(raw)
+    if abs_path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + abs_path[2:]
+    return "\\\\?\\" + abs_path
 
 
 @pinned_endpoint
@@ -57,9 +109,11 @@ def endpoint_state_dir(endpoint: Endpoint) -> Path:
 def ensure_endpoint_state(endpoint: Endpoint) -> Path:
     base = endpoint_state_dir(endpoint)
     for name in ("context", "reads", "logs", "jobs", "artifacts", "patches"):
-        (base / name).mkdir(parents=True, exist_ok=True)
+        os.makedirs(_fs_path(base / name), exist_ok=True)
     endpoint_path = base / "endpoint.json"
-    if not endpoint_path.exists():
+    try:
+        os.stat(_fs_path(endpoint_path))
+    except FileNotFoundError:
         atomic_write_json(
             endpoint_path,
             {
@@ -81,14 +135,15 @@ def ensure_endpoint_state(endpoint: Endpoint) -> Path:
 
 
 def atomic_write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    parent_fs = _fs_path(path.parent)
+    os.makedirs(parent_fs, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=parent_fs)
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             fh.write(dumps(data) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
-        replace_file(temp_name, path)
+        replace_file(temp_name, _fs_path(path))
     finally:
         try:
             os.unlink(temp_name)
@@ -97,14 +152,15 @@ def atomic_write_json(path: Path, data: Any) -> None:
 
 
 def atomic_write_text(path: Path, data: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    parent_fs = _fs_path(path.parent)
+    os.makedirs(parent_fs, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=parent_fs)
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        replace_file(temp_name, path)
+        replace_file(temp_name, _fs_path(path))
     finally:
         try:
             os.unlink(temp_name)
@@ -113,7 +169,7 @@ def atomic_write_text(path: Path, data: str) -> None:
 
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(Path(_fs_path(path)).read_text(encoding="utf-8"))
 
 
 @pinned_endpoint
@@ -121,7 +177,7 @@ def new_log_dir(endpoint: Endpoint, tool_kind: str, invocation_id: str | None = 
     base = ensure_endpoint_state(endpoint)
     token = invocation_id or new_invocation_id()
     path = base / "logs" / tool_kind / token
-    path.mkdir(parents=True, exist_ok=True)
+    os.makedirs(_fs_path(path), exist_ok=True)
     maybe_prune_endpoint_state(endpoint)
     return path
 
@@ -140,16 +196,20 @@ def maybe_prune_endpoint_state_dir(
     base: Path, *, force: bool = False, protect_job_ids=()
 ) -> dict[str, Any]:
     """Run best-effort maintenance without turning it into a caller-visible failure."""
+    clean_base = str(base)
     try:
-        return prune_endpoint_state(
-            base, force=force, protect_job_ids=protect_job_ids
+        result = prune_endpoint_state(
+            _fs_path(base), force=force, protect_job_ids=protect_job_ids
         )
+        if "base" in result:
+            result["base"] = clean_base
+        return result
     except TimeoutError as exc:
         # The committed record/log write is already durable. A maintenance
         # timeout is reported, never re-raised into the tool operation.
-        return {"base": str(base), "error": f"TimeoutError: {exc}", "timed_out": True}
+        return {"base": clean_base, "error": f"TimeoutError: {exc}", "timed_out": True}
     except OSError as exc:
-        return {"base": str(base), "error": f"{type(exc).__name__}: {exc}"}
+        return {"base": clean_base, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def _ledger_scope_digest(raw: str) -> str:
@@ -158,14 +218,16 @@ def _ledger_scope_digest(raw: str) -> str:
 
 
 def _effective_ledger_context_id(client_context_id: str | None = None) -> str | None:
-    raw = str(client_context_id) if client_context_id else None
-    if not raw:
-        for name in LEDGER_SCOPE_ENV_VARS:
-            value = os.environ.get(name)
-            if value:
-                return value
-        return None
-    return raw
+    if client_context_id:
+        return str(client_context_id)
+    scoped = _SESSION_ID_VAR.get()
+    if scoped:
+        return scoped
+    for name in LEDGER_SCOPE_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
 
 
 def _encoded_ledger_scope(raw: str) -> str:
@@ -212,10 +274,10 @@ def write_read_ledger(endpoint: Endpoint, file_info: dict[str, Any], client_cont
 @pinned_endpoint
 def load_read_ledger(endpoint: Endpoint, file_path: str, client_context_id: str | None = None) -> dict[str, Any] | None:
     path = read_ledger_path(endpoint, file_path, client_context_id)
-    if not path.exists():
-        return None
     try:
         data = read_json(path)
+    except FileNotFoundError:
+        return None
     except json.JSONDecodeError as exc:
         from remote_dev.observability import record_contract_violation
         record_contract_violation(
@@ -266,7 +328,7 @@ def _state_entries(directory: Path):
     # Path.glob suppresses directory-scan OSError on newer Python versions.
     # Only an absent state directory is empty; unreadable state is a failure.
     try:
-        entries = os.scandir(directory)
+        entries = os.scandir(_fs_path(directory))
     except FileNotFoundError:
         return []
     with entries:
@@ -274,7 +336,8 @@ def _state_entries(directory: Path):
 
 
 def _endpoint_directories():
-    return [Path(entry.path) for entry in _state_entries(state_root() / "endpoints") if entry.is_dir()]
+    endpoints_root = state_root() / "endpoints"
+    return [endpoints_root / entry.name for entry in _state_entries(endpoints_root) if entry.is_dir()]
 
 
 def _read_owned_record(path: Path, *, operation: str, contract_name: str, label: str) -> dict[str, Any]:
@@ -349,7 +412,7 @@ def list_job_records(endpoint_id: str) -> list[dict[str, Any]]:
     for entry in _state_entries(directory):
         if not entry.name.endswith(".json"):
             continue
-        path = Path(entry.path)
+        path = directory / entry.name
         try:
             data = _read_owned_record(
                 path, operation="remote.job_status", contract_name="job_record_json", label="job",
@@ -363,6 +426,10 @@ def list_job_records(endpoint_id: str) -> list[dict[str, Any]]:
 
 
 def read_text_if_exists(path: Path) -> str | None:
-    if not path.exists() or not path.is_file():
+    fs_target = _fs_path(path)
+    try:
+        if not stat.S_ISREG(os.stat(fs_target).st_mode):
+            return None
+        return Path(fs_target).read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
         return None
-    return path.read_text(encoding="utf-8", errors="replace")

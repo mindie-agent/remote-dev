@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
+import contextvars
 import json
 import os
 from pathlib import Path
@@ -106,7 +107,10 @@ class CatalogRefresh:
 
     def start(self):
         if self._thread is None:
-            self._thread = threading.Thread(target=self._watch, name="mindie-catalog", daemon=True)
+            ctx = contextvars.copy_context()
+            self._thread = threading.Thread(
+                target=ctx.run, args=(self._watch,), name="mindie-catalog", daemon=True
+            )
             self._thread.start()
 
     def _watch(self):
@@ -558,7 +562,7 @@ def serve_selected(
                         continue
                     pending[request_id] = cancel_event
                 executor = control_executor if _is_short_control_call(message) else work_executor
-                executor.submit(dispatch, message, cancel_event)
+                executor.submit(contextvars.copy_context().run, dispatch, message, cancel_event)
     finally:
         refresh.close()
         with pending_lock:

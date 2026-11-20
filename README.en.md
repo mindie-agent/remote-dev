@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v0.11.14-blue" alt="Release v0.11.14">
+  <img src="https://img.shields.io/badge/Release-v0.11.15-blue" alt="Release v0.11.15">
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Protocol-MCP%20%7C%20CLI-00ADD8" alt="MCP & CLI">
   <img src="https://img.shields.io/badge/Target-Linux%20SSH%20%26%20Docker-2496ED?logo=docker&logoColor=white" alt="Linux SSH & Docker">
@@ -266,6 +266,7 @@ Common environment variables:
 | Architecture & Layered Design | [docs/design.zh.md](./docs/design.zh.md) | [DESIGN.md](./DESIGN.md) |
 | Client Setup & Parameter Compatibility | [docs/client-compatibility.zh.md](./docs/client-compatibility.zh.md) | [CLIENT_COMPATIBILITY.md](./CLIENT_COMPATIBILITY.md) |
 | Containers, SSH Transport & Diagnostics | [docs/transport-and-diagnostics.md](./docs/transport-and-diagnostics.md) | [docs/transport-and-diagnostics.en.md](./docs/transport-and-diagnostics.en.md) |
+| Latest Release Notes (v0.11.15) | [docs/releases/remote-dev-0.11.15.md](./docs/releases/remote-dev-0.11.15.md) | [docs/releases/remote-dev-0.11.15.en.md](./docs/releases/remote-dev-0.11.15.en.md) |
 
 ---
 
