@@ -23,8 +23,6 @@ from concurrent.futures import ThreadPoolExecutor
 from remote_dev.core.cancellation import request_context
 from typing import Any
 
-os.environ.setdefault("REMOTE_DEV_SESSION_ID", f"mcp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
-
 from remote_dev import package_version
 from remote_dev.mcp.tools import call_tool, canonical_name, list_resources, list_tools, read_resource
 from remote_dev.result import tool_text
@@ -266,6 +264,7 @@ def main() -> int:
 
 
 def _serve() -> int:
+    os.environ.setdefault("REMOTE_DEV_SESSION_ID", f"mcp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     if os.name == "nt":
         for stream in (sys.stdin, sys.stdout, sys.stderr):
             if hasattr(stream, "reconfigure"):

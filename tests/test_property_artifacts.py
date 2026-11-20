@@ -214,8 +214,15 @@ class SafeLocalPathProperties(unittest.TestCase):
         self.base.mkdir()
         outside = self.base.parent / "outside"
         outside.mkdir()
-        (self.base / "linkdir").symlink_to(outside)
-        (self.base / "linkfile").symlink_to(outside / "victim")
+        try:
+            (self.base / "linkdir").symlink_to(outside, target_is_directory=True)
+            (self.base / "linkfile").symlink_to(outside / "victim")
+        except TimeoutError:
+            raise
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows SeCreateSymbolicLinkPrivilege (WinError 1314) unavailable")
+            raise
 
     def test_result_is_always_strict_inside_base_or_rejected(self) -> None:
         outside = self.base.parent / "outside"

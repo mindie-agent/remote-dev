@@ -336,6 +336,7 @@ class McpSchemaTests(unittest.TestCase):
         self.assertEqual(json.loads(proc.stdout)["result"]["tools"], list_tools())
 
     def test_mcp_server_sets_process_level_ledger_scope(self) -> None:
+        import io
         from remote_dev.core.state_store import LEDGER_SCOPE_ENV_VARS, resolve_ledger_scope
 
         saved = {name: os.environ.pop(name, None) for name in LEDGER_SCOPE_ENV_VARS}
@@ -343,6 +344,11 @@ class McpSchemaTests(unittest.TestCase):
             import remote_dev.mcp.server as mcp_server
 
             importlib.reload(mcp_server)
+            self.assertNotIn("REMOTE_DEV_SESSION_ID", os.environ)
+            self.assertEqual(resolve_ledger_scope(), "default")
+
+            with patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(b""), encoding="utf-8")):
+                self.assertEqual(mcp_server._serve(), 0)
             session_id = os.environ.get("REMOTE_DEV_SESSION_ID", "")
             scope = resolve_ledger_scope()
             self.assertTrue(session_id.startswith("mcp-"), session_id)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextvars
 import json
 import subprocess
 import sys
@@ -302,7 +303,17 @@ def live_endpoint_checks(args: argparse.Namespace) -> dict[str, Any]:
         progress("remote:parallel_workers")
         parallel_results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel_workers) as executor:
-            futures = [executor.submit(run_parallel_worker, endpoint, scratch, index, timeout_ms) for index in range(args.parallel_workers)]
+            futures = [
+                executor.submit(
+                    contextvars.copy_context().run,
+                    run_parallel_worker,
+                    endpoint,
+                    scratch,
+                    index,
+                    timeout_ms,
+                )
+                for index in range(args.parallel_workers)
+            ]
             for future in concurrent.futures.as_completed(futures):
                 parallel_results.append(future.result())
         checks.append({"name": "parallel_workers", "outcome": "success", "status": "ok", "workers": sorted(parallel_results, key=lambda item: item["worker"])})

@@ -273,6 +273,16 @@ class RemoteExecutorEscapeProperties(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        probe = Path(self._tmp.name) / ".symlink-probe"
+        try:
+            probe.symlink_to("target")
+            probe.unlink()
+        except TimeoutError:
+            raise
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows SeCreateSymbolicLinkPrivilege (WinError 1314) unavailable")
+            raise
 
     def _escape_targets(self, gen: Gen, root: Path, outside: Path) -> list[str]:
         name = gen.word(1, 6)

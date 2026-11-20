@@ -1,5 +1,6 @@
 """Execution receipts survive local faults; lost channels retain their evidence."""
 import json
+import os
 import sys
 import threading
 from unittest import mock
@@ -101,7 +102,9 @@ def test_pool_close_attempts_every_owned_connection_and_aggregates_failures():
 def test_binary_capture_owns_descendants_after_ssh_parent_exit_or_timeout(tmp_path, parent_exit):
     from test_local_process import tree_command, assert_tree_stopped
     launch = ssh_transport.SshLaunch(tree_command(tmp_path, parent_exit), None, ("test",))
-    result = ssh_transport.capture_launch(launch, timeout_ms=None if parent_exit else 300)
+    result = ssh_transport.capture_launch(
+        launch, timeout_ms=None if parent_exit else (1500 if os.name == "nt" else 300)
+    )
     assert result.returncode == (0 if parent_exit else None)
     assert result.timed_out is not parent_exit
     assert b'parent ready' in result.stdout

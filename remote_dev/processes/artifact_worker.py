@@ -112,6 +112,8 @@ def main():
                     stream.flush()
                     os.fsync(stream.fileno())
                 if digest != item["sha256"]:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(temporary)
                     send({"status": "hash_mismatch", "sha256": digest})
                     return
                 with remote_mutation_lock():

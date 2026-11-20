@@ -24,7 +24,7 @@ confirmed-terminal state projection (`job_records.py`).
 from __future__ import annotations
 
 import copy
-import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -35,10 +35,12 @@ from remote_dev.core.job_ids import require_job_id
 from remote_dev.core.job_output import merge_output_logs, observed_accounting_warning
 from remote_dev.core.locking import record_lock
 from remote_dev.core.state_store import (
+    _fs_path,
     atomic_write_json,
     find_job_record,
     job_record_path,
     maybe_prune_endpoint_state_dir,
+    read_json,
 )
 from remote_dev.result import utc_now_iso
 
@@ -65,13 +67,13 @@ def load_record(
     if endpoint is not None:
         path = job_record_path(endpoint, job_id)
         try:
-            content = path.read_text(encoding="utf-8")
+            data = read_json(path)
         except FileNotFoundError:
             raise caller_error(
                 f"unknown remote job id for endpoint: {job_id}", FileNotFoundError,
                 error_code="unknown_job", field="job_id"
             ) from None
-        return endpoint, json.loads(content), path
+        return endpoint, data, path
     found = find_job_record(job_id)
     if not found:
         raise caller_error(f"unknown remote job id: {job_id}", FileNotFoundError,
@@ -94,7 +96,13 @@ def save_output(record, path, row, *, cursor_key="stdin_cursors", write_json=Non
     local_offsets = updated.setdefault("local_output_offsets", {})
     for name in ("stdout", "stderr"):
         log = path.with_name(path.stem + "." + name + ".log")
-        with log.open("r+b" if log.exists() else "w+b") as stream:
+        log_fs = _fs_path(log)
+        try:
+            os.stat(log_fs)
+            mode = "r+b"
+        except FileNotFoundError:
+            mode = "w+b"
+        with open(log_fs, mode) as stream:
             stream.seek(int(local_offsets.get(name, 0)))
             stream.write(str(row.get(name) or "").encode("utf-8"))
             stream.truncate()
@@ -153,7 +161,7 @@ def persist_terminal_state(
     except OSError as exc:
         return {"stage": "job_terminal_state", "error_type": type(exc).__name__}
     try:
-        live = json.loads(record_path.read_text(encoding="utf-8"))
+        live = read_json(record_path)
         if not isinstance(live, dict):
             raise ValueError("local job record is not a JSON object")
         updated = copy.deepcopy(live)

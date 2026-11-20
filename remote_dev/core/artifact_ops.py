@@ -77,6 +77,8 @@ else:
             raise SystemExit(0)
         try:
             dir_st = real_dir.stat()
+        except TimeoutError:
+            raise
         except OSError:
             dirs[:] = []
             continue

@@ -325,7 +325,14 @@ def test_streaming_sha256_and_in_root_symlinks_and_git_worktree(tmp_path):
     blob_file.write_bytes(payload)
 
     model_link = snaps / "model.safetensors"
-    model_link.symlink_to(os.path.relpath(blob_file, snaps))
+    try:
+        model_link.symlink_to(os.path.relpath(blob_file, snaps))
+    except TimeoutError:
+        raise
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows SeCreateSymbolicLinkPrivilege (WinError 1314) unavailable")
+        raise
     (root / ".git").write_text("gitdir: /srv/git/worktrees/feature-a\n", encoding="utf-8")
 
     outside = tmp_path / "outside-secret.txt"

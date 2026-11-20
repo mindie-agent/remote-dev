@@ -20,6 +20,7 @@ import uuid
 from remote_dev.core.atomic import replace_file
 from remote_dev.core.errors import RemoteExecutionError
 from remote_dev.core.locking import record_lock
+from remote_dev.core.state_store import scoped_auth_dir
 
 _REFERENCE = re.compile(r"ssh-[0-9a-f]{24}\Z")
 _MAX_DOCUMENT = 1024 * 1024
@@ -38,6 +39,9 @@ def auth_error(message, category="authentication"):
 
 
 def auth_root() -> Path:
+    scoped = scoped_auth_dir()
+    if scoped is not None:
+        return scoped.expanduser().resolve()
     return Path(os.environ.get("REMOTE_DEV_AUTH_DIR", "~/.mindie/ssh")).expanduser().resolve()
 
 
